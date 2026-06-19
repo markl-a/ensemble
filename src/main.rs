@@ -136,17 +136,18 @@ fn dispatch_cmd(args: &[String]) {
         eprintln!("ledger {ledger_path}: {e}");
         std::process::exit(1);
     });
-    let now = now_secs();
     let worker = format!("worker-{}", std::process::id());
-    // recover claims stale > 5 min (a previous worker that died mid-task) before draining
+    // recover claims stale > 5 min (a previous worker that died mid-task) before draining; the clock
+    // is read FRESH per claim/terminal write so a long batch's late claims aren't seen as stale.
+    let stale_before = now_secs() - 300;
     let counts = ensemble::dispatch::run(
         &mut ledger,
         &c,
         &tasks,
         Path::new(&repo),
         &worker,
-        now,
-        now - 300,
+        &now_secs,
+        stale_before,
     )
     .unwrap_or_else(|e| {
         eprintln!("dispatch: {e}");

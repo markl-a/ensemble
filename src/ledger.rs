@@ -70,8 +70,10 @@ pub struct Ledger {
 impl Ledger {
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)?;
-        conn.pragma_update(None, "journal_mode", "WAL")?;
+        // Install the busy timeout FIRST so the WAL pragma + schema below WAIT for a concurrent
+        // writer/initializer instead of failing fast with SQLITE_BUSY.
         conn.busy_timeout(std::time::Duration::from_secs(10))?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS tasks (
                 id           TEXT PRIMARY KEY,
@@ -131,6 +133,12 @@ impl Ledger {
     }
 
     /// Write the terminal record: the task is DONE (the only success signal).
+    ///
+    /// NOTE: this gives at-most-once CLAIM but at-LEAST-once EXECUTION — if a worker finishes the
+    /// work (e.g. lands a git branch) and dies BEFORE this terminal write, `recover_orphans` will
+    /// requeue and re-run it. Side effects must therefore be idempotent for re-runs to be safe (the
+    /// conductor's worktree-per-run uses a fresh unique branch, so a re-run produces a NEW branch
+    /// rather than colliding). A retry/exactly-once policy is a Phase-3b-2b concern.
     pub fn complete(&self, id: &str, outcome: &str, now: i64) -> Result<()> {
         self.conn.execute(
             "UPDATE tasks SET state='done', outcome=?, completed_at=? WHERE id=?",

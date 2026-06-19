@@ -17,30 +17,33 @@ pub fn task_id(descr: &str) -> String {
 }
 
 /// Enqueue `tasks`, recover claims older than `stale_before`, then drain the queue through
-/// `conductor`, recording a terminal record per task. `now`/`stale_before` are injected (testable).
+/// `conductor`, recording a terminal record per task. `clock` is called FRESH for every claim and
+/// terminal write — a task claimed late in a long batch must stamp its real claim time, or a
+/// concurrent `recover_orphans` (cutoff = start − 5min) would requeue and re-run a live task.
+/// `stale_before` is the one-shot recovery cutoff. Both are injected for testing.
 pub fn run(
     ledger: &mut Ledger,
     conductor: &Conductor,
     tasks: &[String],
     repo: &Path,
     worker: &str,
-    now: i64,
+    clock: &dyn Fn() -> i64,
     stale_before: i64,
 ) -> Result<Counts> {
     for t in tasks {
-        ledger.enqueue(&task_id(t), t, now)?;
+        ledger.enqueue(&task_id(t), t, clock())?;
     }
     ledger.recover_orphans(stale_before)?;
-    while let Some(task) = ledger.claim(worker, now)? {
+    while let Some(task) = ledger.claim(worker, clock())? {
         let out = conductor.run_in_repo(&task.descr, repo);
         match out.decision {
             Decision::Landed => {
                 let branch = out.branch.as_deref().unwrap_or("");
                 let outcome = format!("LANDED {branch}");
-                ledger.complete(&task.id, outcome.trim_end(), now)?;
+                ledger.complete(&task.id, outcome.trim_end(), clock())?;
             }
             Decision::Escalated(why) => {
-                ledger.fail(&task.id, &format!("ESCALATED: {why}"), now)?;
+                ledger.fail(&task.id, &format!("ESCALATED: {why}"), clock())?;
             }
         }
     }

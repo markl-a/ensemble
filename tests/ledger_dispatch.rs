@@ -103,7 +103,7 @@ fn dispatch_drains_all_tasks_to_done() {
     let c = conductor();
     let tasks = vec!["task one".to_string(), "task two".to_string()];
     let counts =
-        ensemble::dispatch::run(&mut ledger, &c, &tasks, tmp.path(), "w", 1000, 0).unwrap();
+        ensemble::dispatch::run(&mut ledger, &c, &tasks, tmp.path(), "w", &|| 1000, 0).unwrap();
     assert_eq!((counts.done, counts.failed, counts.queued), (2, 0, 0));
 }
 
@@ -117,7 +117,8 @@ fn dispatch_is_idempotent_and_recovers_orphans() {
     // first run completes the task
     {
         let mut l = Ledger::open(&path).unwrap();
-        let counts = ensemble::dispatch::run(&mut l, &c, &tasks, tmp.path(), "w", 1000, 0).unwrap();
+        let counts =
+            ensemble::dispatch::run(&mut l, &c, &tasks, tmp.path(), "w", &|| 1000, 0).unwrap();
         assert_eq!(counts.done, 1);
     }
     // simulate a SECOND, crashed worker that claimed a NEW task but never finished it
@@ -134,7 +135,7 @@ fn dispatch_is_idempotent_and_recovers_orphans() {
     {
         let mut l = Ledger::open(&path).unwrap();
         let counts =
-            ensemble::dispatch::run(&mut l, &c, &tasks, tmp.path(), "w2", 5000, 4000).unwrap();
+            ensemble::dispatch::run(&mut l, &c, &tasks, tmp.path(), "w2", &|| 5000, 4000).unwrap();
         assert_eq!(
             counts.done, 2,
             "orphan recovered + completed; original stays done"
