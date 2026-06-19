@@ -312,3 +312,90 @@ fn on_flake_substitute_uses_the_backup_agent() {
         "substitute must fall back to the backup agent"
     );
 }
+
+// Writes `file` (with `content`) into cwd when non-empty, else just LGTMs — lets us model an
+// implementer that produces a real file then a reviewer that approves it.
+struct WriterThenLgtm {
+    name: String,
+    file: String,
+    content: String,
+}
+impl Adapter for WriterThenLgtm {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn run(&self, _p: &str, cwd: &std::path::Path) -> Result<AgentOutput, AdapterError> {
+        if !self.file.is_empty() {
+            std::fs::write(cwd.join(&self.file), &self.content).unwrap();
+        }
+        Ok(AgentOutput {
+            agent: self.name.clone(),
+            text: if self.file.is_empty() {
+                "VERDICT: LGTM".into()
+            } else {
+                format!("wrote {}", self.file)
+            },
+        })
+    }
+}
+
+#[test]
+fn landed_run_persists_work_on_a_kept_branch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    for a in [
+        &["init", "-q"][..],
+        &["config", "user.email", "t@t"],
+        &["config", "user.name", "t"],
+    ] {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(a)
+            .output()
+            .unwrap();
+    }
+    std::fs::write(repo.join("seed"), "x").unwrap();
+    for a in [&["add", "."][..], &["commit", "-q", "-m", "init"]] {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(a)
+            .output()
+            .unwrap();
+    }
+    let mut map: std::collections::HashMap<String, Box<dyn Adapter>> =
+        std::collections::HashMap::new();
+    map.insert(
+        "codex".into(),
+        Box::new(WriterThenLgtm {
+            name: "codex".into(),
+            file: "out.txt".into(),
+            content: "DONE".into(),
+        }),
+    );
+    map.insert(
+        "claude".into(),
+        Box::new(WriterThenLgtm {
+            name: "claude".into(),
+            file: String::new(),
+            content: String::new(),
+        }),
+    );
+    let c = Conductor::new(crew(), map);
+
+    let out = c.run_in_repo("write out.txt", repo);
+    assert!(matches!(out.decision, Decision::Landed));
+    let branch = out
+        .branch
+        .clone()
+        .expect("LANDED must record a kept branch");
+    // the branch exists and carries out.txt = DONE
+    let show = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["show", &format!("{branch}:out.txt")])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&show.stdout), "DONE");
+}

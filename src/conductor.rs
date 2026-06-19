@@ -17,6 +17,9 @@ pub struct RunOutcome {
     pub decision: Decision,
     pub rounds: u32,
     pub blackboard: Blackboard,
+    /// On a LANDED `run_in_repo`, the `ensemble/<slug>` branch the committed work was kept on (so
+    /// the operator can merge it). `None` for escalated runs and for `run()` (no worktree).
+    pub branch: Option<String>,
 }
 
 pub struct Conductor {
@@ -56,6 +59,7 @@ impl Conductor {
                         )),
                         rounds: round + 1,
                         blackboard: bb,
+                        branch: None,
                     };
                 }
                 None => {
@@ -65,6 +69,7 @@ impl Conductor {
                         )),
                         rounds: round + 1,
                         blackboard: bb,
+                        branch: None,
                     };
                 }
             }
@@ -140,6 +145,7 @@ impl Conductor {
                         decision: Decision::Landed,
                         rounds: round + 1,
                         blackboard: bb,
+                        branch: None,
                     }
                 }
                 GateDecision::Escalate(why) => {
@@ -147,6 +153,7 @@ impl Conductor {
                         decision: Decision::Escalated(why),
                         rounds: round + 1,
                         blackboard: bb,
+                        branch: None,
                     }
                 }
                 GateDecision::Iterate(changes) => {
@@ -158,6 +165,7 @@ impl Conductor {
             decision: Decision::Escalated("max rounds reached".to_string()),
             rounds: max,
             blackboard: bb,
+            branch: None,
         }
     }
 
@@ -167,9 +175,23 @@ impl Conductor {
     /// task that can't get an isolated worktree must not run at all (isolation is the contract).
     pub fn run_in_repo(&self, task: &str, repo: &Path) -> RunOutcome {
         match crate::worktree::Worktree::create(repo, task) {
-            Ok(wt) => {
-                self.run(task, &wt.path)
-                // wt drops here → cleanup
+            Ok(mut wt) => {
+                let mut out = self.run(task, &wt.path);
+                if matches!(out.decision, Decision::Landed) {
+                    // Persist: capture the agents' edits and keep the branch so the work survives.
+                    match wt.commit(&format!("ensemble: {task}")) {
+                        Ok(_) => {
+                            wt.keep();
+                            out.branch = Some(wt.branch().to_string());
+                        }
+                        Err(e) => out.blackboard.post(
+                            "ensemble",
+                            "finding",
+                            &format!("commit failed, work NOT persisted: {e}"),
+                        ),
+                    }
+                }
+                out // wt drops → worktree removed; branch kept iff we called keep()
             }
             Err(e) => {
                 let mut bb = Blackboard::new();
@@ -185,6 +207,7 @@ impl Conductor {
                     decision: Decision::Escalated(format!("worktree unavailable: {e}")),
                     rounds: 0,
                     blackboard: bb,
+                    branch: None,
                 }
             }
         }
