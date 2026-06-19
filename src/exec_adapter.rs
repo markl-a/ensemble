@@ -20,6 +20,24 @@ impl ExecAdapter {
             args: vec!["exec".into(), "--skip-git-repo-check".into()],
         }
     }
+
+    /// claude: `claude -p <prompt>` — prints the answer to stdout (headless).
+    pub fn claude() -> Self {
+        Self {
+            name: "claude".into(),
+            program: "claude".into(),
+            args: vec!["-p".into()],
+        }
+    }
+
+    /// opencode: `opencode run <prompt>`.
+    pub fn opencode() -> Self {
+        Self {
+            name: "opencode".into(),
+            program: "opencode".into(),
+            args: vec!["run".into()],
+        }
+    }
 }
 
 impl Adapter for ExecAdapter {
@@ -52,5 +70,16 @@ impl Adapter for ExecAdapter {
             agent: self.name.clone(),
             text,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn names_and_programs() {
+        assert_eq!(ExecAdapter::codex().name(), "codex");
+        assert_eq!(ExecAdapter::claude().name(), "claude");
+        assert_eq!(ExecAdapter::opencode().name(), "opencode");
     }
 }
