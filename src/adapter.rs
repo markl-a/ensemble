@@ -92,6 +92,9 @@ mod tests {
     #[test]
     fn mock_exhausted_returns_empty() {
         let m = MockAdapter::new("claude", vec![]);
-        assert!(matches!(m.run("x", Path::new(".")), Err(AdapterError::Empty)));
+        assert!(matches!(
+            m.run("x", Path::new(".")),
+            Err(AdapterError::Empty)
+        ));
     }
 }

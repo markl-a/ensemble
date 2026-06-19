@@ -21,9 +21,7 @@ pub enum GateDecision {
 /// all-flaked round has zero verdicts and ESCALATES — quorum is never faked from absent reviewers.
 pub fn decide(verdicts: &[RoleVerdict], policy: &GatePolicy, round: u32) -> GateDecision {
     if verdicts.is_empty() {
-        return GateDecision::Escalate(
-            "no reviewers available (all excluded/flaked)".to_string(),
-        );
+        return GateDecision::Escalate("no reviewers available (all excluded/flaked)".to_string());
     }
     let approvals = verdicts
         .iter()

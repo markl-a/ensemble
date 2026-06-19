@@ -46,9 +46,7 @@ mod tests {
         // No marker at all ⇒ conservative: NOT an approval (an unparseable review can't land).
         assert_eq!(
             parse_verdict("I think it is fine"),
-            Verdict::Changes(
-                "no explicit VERDICT line; treating as changes-requested".to_string()
-            )
+            Verdict::Changes("no explicit VERDICT line; treating as changes-requested".to_string())
         );
     }
 }
