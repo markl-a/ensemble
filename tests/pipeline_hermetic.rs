@@ -1,5 +1,6 @@
 use ensemble::*;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 fn crew() -> CrewConfig {
     CrewConfig::from_toml(
@@ -77,4 +78,81 @@ fn flaked_reviewer_is_excluded_and_escalates_not_fakes() {
         Decision::Escalated(reason) => assert!(reason.to_lowercase().contains("reviewer")),
         other => panic!("a flaked reviewer must escalate, never land: {other:?}"),
     }
+}
+
+struct CwdProbe {
+    name: String,
+    reply: String,
+    seen: Arc<Mutex<Vec<std::path::PathBuf>>>,
+}
+impl Adapter for CwdProbe {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn run(&self, _p: &str, cwd: &std::path::Path) -> Result<AgentOutput, AdapterError> {
+        self.seen.lock().unwrap().push(cwd.to_path_buf());
+        Ok(AgentOutput {
+            agent: self.name.clone(),
+            text: self.reply.clone(),
+        })
+    }
+}
+
+#[test]
+fn run_in_repo_runs_inside_a_worktree_then_cleans_up() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    for args in [
+        &["init", "-q"][..],
+        &["config", "user.email", "t@t"],
+        &["config", "user.name", "t"],
+    ] {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .unwrap();
+    }
+    std::fs::write(repo.join("f"), "x").unwrap();
+    for args in [&["add", "."][..], &["commit", "-q", "-m", "init"]] {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .unwrap();
+    }
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let mut map: std::collections::HashMap<String, Box<dyn Adapter>> =
+        std::collections::HashMap::new();
+    map.insert(
+        "codex".into(),
+        Box::new(CwdProbe {
+            name: "codex".into(),
+            reply: "impl".into(),
+            seen: seen.clone(),
+        }),
+    );
+    map.insert(
+        "claude".into(),
+        Box::new(CwdProbe {
+            name: "claude".into(),
+            reply: "VERDICT: LGTM".into(),
+            seen: seen.clone(),
+        }),
+    );
+    let c = Conductor::new(crew(), map);
+
+    let out = c.run_in_repo("add a fn", repo);
+    assert!(matches!(out.decision, Decision::Landed));
+    // every adapter ran inside the worktree, not the repo root
+    let seen = seen.lock().unwrap();
+    assert!(
+        seen.iter()
+            .all(|p| p.to_string_lossy().contains("worktrees")),
+        "ran outside worktree: {seen:?}"
+    );
+    // worktree cleaned up
+    assert!(!repo.join(".ensemble/worktrees").join("add-a-fn").exists());
 }

@@ -125,6 +125,30 @@ impl Conductor {
             blackboard: bb,
         }
     }
+
+    /// Run the pipeline for `task` in a fresh git worktree of `repo`, cleaning it up afterward.
+    /// Falls back to running in `repo` itself if the worktree can't be created (logged in the
+    /// outcome).
+    pub fn run_in_repo(&self, task: &str, repo: &Path) -> RunOutcome {
+        match crate::worktree::Worktree::create(repo, task) {
+            Ok(wt) => {
+                self.run(task, &wt.path)
+                // wt drops here → cleanup
+            }
+            Err(e) => {
+                let mut out = self.run(task, repo);
+                if let Decision::Landed = out.decision {
+                    // surface the isolation failure without masking a real land/escalate
+                    out.blackboard.post(
+                        "ensemble",
+                        "finding",
+                        &format!("worktree unavailable, ran in repo root: {e}"),
+                    );
+                }
+                out
+            }
+        }
+    }
 }
 
 /// Build an agent's prompt: the task, the inter-agent blackboard summary, and any change-requests
