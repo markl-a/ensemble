@@ -1,5 +1,12 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Process-wide monotonic counter making every worktree slug unique, so two tasks with the same
+/// (or same-after-sanitize/truncate) text can NEVER collide on a branch/path — which under
+/// `run_many` would otherwise make one `git worktree add` fail and (pre-fix) silently share the
+/// repo root. Uniqueness here is what makes parallel isolation correct.
+static SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// An isolated `git worktree` for one task. Dropping it removes the worktree + its branch, so a
 /// pipeline can mutate files without colliding with other parallel tasks or the main checkout.
@@ -10,9 +17,11 @@ pub struct Worktree {
 }
 
 impl Worktree {
-    /// `git -C <repo> worktree add -b ensemble/<task_id> <repo>/.ensemble/worktrees/<task_id> HEAD`.
+    /// `git -C <repo> worktree add -b ensemble/<slug> <repo>/.ensemble/worktrees/<slug> HEAD`,
+    /// where `<slug>` = sanitized `task_id` + a unique sequence suffix (collision-proof).
     pub fn create(repo: &Path, task_id: &str) -> std::io::Result<Self> {
-        let slug = sanitize(task_id);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let slug = format!("{}-{seq}", sanitize(task_id));
         let branch = format!("ensemble/{slug}");
         let path = repo.join(".ensemble").join("worktrees").join(&slug);
         if let Some(parent) = path.parent() {

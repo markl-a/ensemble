@@ -162,8 +162,9 @@ impl Conductor {
     }
 
     /// Run the pipeline for `task` in a fresh git worktree of `repo`, cleaning it up afterward.
-    /// Falls back to running in `repo` itself if the worktree can't be created (logged in the
-    /// outcome).
+    /// If the worktree can't be created, ESCALATE — never fall back to running in `repo` itself:
+    /// under `run_many` another task may be mutating the shared working tree concurrently, so a
+    /// task that can't get an isolated worktree must not run at all (isolation is the contract).
     pub fn run_in_repo(&self, task: &str, repo: &Path) -> RunOutcome {
         match crate::worktree::Worktree::create(repo, task) {
             Ok(wt) => {
@@ -171,16 +172,20 @@ impl Conductor {
                 // wt drops here → cleanup
             }
             Err(e) => {
-                let mut out = self.run(task, repo);
-                if let Decision::Landed = out.decision {
-                    // surface the isolation failure without masking a real land/escalate
-                    out.blackboard.post(
-                        "ensemble",
-                        "finding",
-                        &format!("worktree unavailable, ran in repo root: {e}"),
-                    );
+                let mut bb = Blackboard::new();
+                bb.post(
+                    "ensemble",
+                    "finding",
+                    &format!(
+                        "worktree unavailable — task not run (is `{}` a git repo?): {e}",
+                        repo.display()
+                    ),
+                );
+                RunOutcome {
+                    decision: Decision::Escalated(format!("worktree unavailable: {e}")),
+                    rounds: 0,
+                    blackboard: bb,
                 }
-                out
             }
         }
     }

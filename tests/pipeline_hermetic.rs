@@ -153,8 +153,11 @@ fn run_in_repo_runs_inside_a_worktree_then_cleans_up() {
             .all(|p| p.to_string_lossy().contains("worktrees")),
         "ran outside worktree: {seen:?}"
     );
-    // worktree cleaned up
-    assert!(!repo.join(".ensemble/worktrees").join("add-a-fn").exists());
+    // worktree cleaned up (the worktrees dir is empty after the run)
+    let live = std::fs::read_dir(repo.join(".ensemble/worktrees"))
+        .map(|d| d.count())
+        .unwrap_or(0);
+    assert_eq!(live, 0, "worktree should be cleaned up");
 }
 
 // reusable always-ok adapter
