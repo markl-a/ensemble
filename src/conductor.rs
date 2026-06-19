@@ -43,7 +43,7 @@ impl Conductor {
         for round in 0..max {
             // 1) implementer
             let impl_role = self.crew.implementer_role();
-            let impl_prompt = build_prompt(task, &bb, &feedback, impl_role);
+            let impl_prompt = build_prompt(task, &bb, &feedback, impl_role, false);
             match self
                 .adapter_for_role(impl_role)
                 .map(|a| a.run(&impl_prompt, cwd))
@@ -75,7 +75,7 @@ impl Conductor {
             // the quorum from a real `Some(Ok(..))` — a flake is never faked into an approval.
             let mut verdicts: Vec<RoleVerdict> = Vec::new();
             for role in self.crew.reviewer_roles() {
-                let prompt = build_prompt(task, &bb, &feedback, role);
+                let prompt = build_prompt(task, &bb, &feedback, role, true);
                 let agent_name = self
                     .crew
                     .roles
@@ -215,7 +215,13 @@ impl Conductor {
 
 /// Build an agent's prompt: the task, the inter-agent blackboard summary, and any change-requests
 /// routed back to the implementer this round.
-fn build_prompt(task: &str, bb: &Blackboard, feedback: &[String], role: &str) -> String {
+fn build_prompt(
+    task: &str,
+    bb: &Blackboard,
+    feedback: &[String],
+    role: &str,
+    is_reviewer: bool,
+) -> String {
     let mut p = format!("You are the '{role}' role on a collaborative dev crew.\nTask: {task}\n");
     let summary = bb.summary();
     if !summary.is_empty() {
@@ -227,6 +233,18 @@ fn build_prompt(task: &str, bb: &Blackboard, feedback: &[String], role: &str) ->
         for f in feedback {
             p.push_str(&format!("- {f}\n"));
         }
+    }
+    // Tell each role the protocol: reviewers MUST end with a parseable VERDICT line (else
+    // `parse_verdict` conservatively treats the review as changes-requested and the task can
+    // never land); the implementer just does the work and summarizes.
+    if is_reviewer {
+        p.push_str(
+            "\nReview the work so far against the task. End your reply with EXACTLY one line:\n\
+             VERDICT: LGTM                    (if the task is correctly done)\n\
+             VERDICT: CHANGES: <what to fix>  (otherwise)\n",
+        );
+    } else {
+        p.push_str("\nDo the task now. Then briefly state what you changed.\n");
     }
     p
 }
