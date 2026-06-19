@@ -149,6 +149,10 @@ pub fn apply_result(
         &["fetch", "--quiet", &bp, &format!("{branch}:{local_ref}")],
     )?;
     git_run(worktree, &["merge", "--ff-only", "--quiet", &local_ref])?;
+    // The merged commit is now reachable via the worktree's own branch, so the temporary tracking
+    // ref is dead weight — prune it (best-effort) so `refs/ensemble/*` doesn't accumulate one ref
+    // per remote run forever. A prune hiccup must not fail an otherwise-successful apply.
+    let _ = git_run(repo, &["update-ref", "-d", &local_ref]);
     Ok(())
     // `stage` drops → staged bundle removed
 }
@@ -240,6 +244,21 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(wt.join("remote.txt")).unwrap(),
             "FROM-REMOTE"
+        );
+
+        // the temporary tracking ref was pruned (refs/ensemble/* must not accumulate per run).
+        // NOTE: refs/ensemble/dispatch/job-1 lives in a different namespace from the worktree's
+        // branch refs/heads/ensemble/x, so this only checks the tracking refs.
+        let refs = std::process::Command::new("git")
+            .arg("-C")
+            .arg(orch)
+            .args(["for-each-ref", "--format=%(refname)", "refs/ensemble/"])
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&refs.stdout).trim().is_empty(),
+            "refs/ensemble/* should be pruned after apply, found: {}",
+            String::from_utf8_lossy(&refs.stdout)
         );
     }
 
