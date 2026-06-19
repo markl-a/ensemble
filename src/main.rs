@@ -5,6 +5,8 @@ use std::path::Path;
 const USAGE: &str = "usage:\n  \
     ensemble run \"<task>\" [--crew <crew.toml>] [--repo <path>]\n  \
     ensemble run-many \"<task1>\" \"<task2>\" ... [--crew <crew.toml>] [--repo <path>]\n  \
+    ensemble dispatch \"<task1>\" ... --ledger <db> [--crew <crew.toml>] [--repo <path>]   (durable, resumable)\n  \
+    ensemble ledger <status|recover> --ledger <db> [--stale-secs N]\n  \
     ensemble serve [--bind <addr>]   (default 0.0.0.0:7878 — host this node's local agents)";
 
 fn main() {
@@ -13,6 +15,8 @@ fn main() {
     match sub {
         Some("run") => run_single(&args),
         Some("run-many") => run_many(&args),
+        Some("dispatch") => dispatch_cmd(&args),
+        Some("ledger") => ledger_cmd(&args),
         Some("serve") => serve_cmd(&args),
         _ => {
             eprintln!("{USAGE}");
@@ -104,6 +108,95 @@ fn run_many(args: &[String]) {
     }
     if any_escalated {
         std::process::exit(1);
+    }
+}
+
+/// Seconds since the Unix epoch (the ledger's timestamps; tests inject their own).
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// `ensemble dispatch "<t1>" ... --ledger <db> [--crew <p>] [--repo <p>]` — a DURABLE, RESUMABLE
+/// batch: tasks are recorded in a SQLite ledger, claimed at-most-once, and given a terminal record.
+/// Re-running resumes (done tasks are skipped; a prior worker's stale claims are recovered).
+fn dispatch_cmd(args: &[String]) {
+    let tasks = positional_tasks(args);
+    if tasks.is_empty() {
+        eprintln!("{USAGE}");
+        std::process::exit(2);
+    }
+    let ledger_path = parse_flag(args, "--ledger").unwrap_or_else(|| "ensemble-ledger.db".into());
+    let crew = load_crew(args);
+    let repo = parse_flag(args, "--repo").unwrap_or_else(|| ".".to_string());
+    let c = Conductor::new(crew.clone(), adapters_for(&crew));
+    let mut ledger = ensemble::ledger::Ledger::open(Path::new(&ledger_path)).unwrap_or_else(|e| {
+        eprintln!("ledger {ledger_path}: {e}");
+        std::process::exit(1);
+    });
+    let now = now_secs();
+    let worker = format!("worker-{}", std::process::id());
+    // recover claims stale > 5 min (a previous worker that died mid-task) before draining
+    let counts = ensemble::dispatch::run(
+        &mut ledger,
+        &c,
+        &tasks,
+        Path::new(&repo),
+        &worker,
+        now,
+        now - 300,
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("dispatch: {e}");
+        std::process::exit(1);
+    });
+    println!(
+        "dispatch: {} done, {} failed, {} queued, {} claimed",
+        counts.done, counts.failed, counts.queued, counts.claimed
+    );
+    if counts.failed > 0 {
+        std::process::exit(1);
+    }
+}
+
+/// `ensemble ledger <status|recover> --ledger <db> [--stale-secs N]` — inspect or recover the ledger.
+fn ledger_cmd(args: &[String]) {
+    let sub = args.get(2).map(|s| s.as_str());
+    let ledger_path = parse_flag(args, "--ledger").unwrap_or_else(|| "ensemble-ledger.db".into());
+    let l = ensemble::ledger::Ledger::open(Path::new(&ledger_path)).unwrap_or_else(|e| {
+        eprintln!("ledger {ledger_path}: {e}");
+        std::process::exit(1);
+    });
+    match sub {
+        Some("status") => {
+            let c = l.counts().unwrap_or_default();
+            println!(
+                "queued={} claimed={} done={} failed={}",
+                c.queued, c.claimed, c.done, c.failed
+            );
+            for t in l.list().unwrap_or_default() {
+                let out = t.outcome.clone().unwrap_or_default();
+                let suffix = if out.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({out})")
+                };
+                println!("  [{}] {} — {}{}", t.state_str(), t.id, t.descr, suffix);
+            }
+        }
+        Some("recover") => {
+            let stale = parse_flag(args, "--stale-secs")
+                .and_then(|s| s.parse::<i64>().ok())
+                .unwrap_or(300);
+            let n = l.recover_orphans(now_secs() - stale).unwrap_or(0);
+            println!("recovered {n} orphaned claim(s)");
+        }
+        _ => {
+            eprintln!("usage: ensemble ledger <status|recover> --ledger <path> [--stale-secs N]");
+            std::process::exit(2);
+        }
     }
 }
 
