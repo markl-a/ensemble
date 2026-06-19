@@ -399,3 +399,74 @@ fn landed_run_persists_work_on_a_kept_branch() {
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&show.stdout), "DONE");
 }
+
+#[test]
+fn commit_failure_escalates_never_a_silent_land() {
+    // The persistence feature's whole point is "LANDED work survives". If the commit FAILS the
+    // branch is discarded on Drop, so the work is lost — the run must Escalate (not report a clean
+    // Landed with exit 0), or the headline/exit-code would lie about destroyed work.
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    for a in [
+        &["init", "-q"][..],
+        &["config", "user.email", "t@t"],
+        &["config", "user.name", "t"],
+        // Force every commit to fail: require GPG signing but point at a gpg that doesn't exist.
+        // Deterministic and cross-platform — `git add`/`git diff` are unaffected, `git commit` is.
+        &["config", "commit.gpgsign", "true"],
+        &["config", "gpg.program", "definitely-not-a-real-gpg-binary"],
+    ] {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(a)
+            .output()
+            .unwrap();
+    }
+    // seed commit (made before gpgsign matters? no — it's already on; sign-disable just this one)
+    std::fs::write(repo.join("seed"), "x").unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["add", "."])
+        .output()
+        .unwrap();
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["-c", "commit.gpgsign=false", "commit", "-q", "-m", "init"])
+        .output()
+        .unwrap();
+
+    let mut map: std::collections::HashMap<String, Box<dyn Adapter>> =
+        std::collections::HashMap::new();
+    map.insert(
+        "codex".into(),
+        Box::new(WriterThenLgtm {
+            name: "codex".into(),
+            file: "out.txt".into(),
+            content: "DONE".into(),
+        }),
+    );
+    map.insert(
+        "claude".into(),
+        Box::new(WriterThenLgtm {
+            name: "claude".into(),
+            file: String::new(),
+            content: String::new(),
+        }),
+    );
+    let c = Conductor::new(crew(), map);
+
+    let out = c.run_in_repo("write out.txt", repo);
+    // the gate LANDED, but persisting failed ⇒ the outcome must be Escalated, not a silent Land
+    assert!(
+        matches!(out.decision, Decision::Escalated(_)),
+        "commit failure must escalate, not report a clean Landed: {:?}",
+        out.decision
+    );
+    assert!(
+        out.branch.is_none(),
+        "no branch should be recorded when the work could not be persisted"
+    );
+}

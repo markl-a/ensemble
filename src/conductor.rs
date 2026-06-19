@@ -184,11 +184,21 @@ impl Conductor {
                             wt.keep();
                             out.branch = Some(wt.branch().to_string());
                         }
-                        Err(e) => out.blackboard.post(
-                            "ensemble",
-                            "finding",
-                            &format!("commit failed, work NOT persisted: {e}"),
-                        ),
+                        Err(e) => {
+                            // Persisting failed → the branch is deleted on Drop, so the work is
+                            // GONE. Never report a clean LAND for lost work: downgrade to Escalated
+                            // so the CLI headline, the process exit code, and `run_many`'s
+                            // any-escalated check all reflect that the operator must intervene (the
+                            // transcript still records what the agents produced).
+                            out.blackboard.post(
+                                "ensemble",
+                                "finding",
+                                &format!("commit failed, work NOT persisted: {e}"),
+                            );
+                            out.decision = Decision::Escalated(format!(
+                                "commit failed, work not persisted: {e}"
+                            ));
+                        }
                     }
                 }
                 out // wt drops → worktree removed; branch kept iff we called keep()
