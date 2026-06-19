@@ -98,7 +98,9 @@ impl Adapter for AgyAdapter {
         let _ = child.wait();
         drop(pair.master);
 
-        let text = strip_ansi(&String::from_utf8_lossy(&raw)).trim().to_string();
+        let text = strip_ansi(&String::from_utf8_lossy(&raw))
+            .trim()
+            .to_string();
         if text.is_empty() {
             return Err(AdapterError::Empty);
         }
