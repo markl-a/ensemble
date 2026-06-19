@@ -157,6 +157,9 @@ non-LLM trust anchor.
   node over the tailnet); cross-machine shared blackboard/state; node discovery +
   health + degrade-on-node-down. Grounded in §4b (wolfpack/OpenHands/grackle).
   - **3a ✅** RemoteAdapter + `ensemble serve` agent-host + tailnet discovery (transport proven).
+  - **auto-discovery ✅** `run/dispatch` default-ON probe each tailnet `serve` peer's `/health` and
+    route any agent without an explicit `[agents.<n>] node` to the discovered host (explicit >
+    discovered > local). `ensemble nodes` lists hosts; `--no-discover` opts out. No hand-written URLs.
   - **3b-1 ✅** cross-machine **git-sync via git bundles**: a remote agent runs on the
     orchestrator's base commit (bundled over the `/run` wire) and its edits flow back into the
     orchestrator's worktree — the Adapter abstraction holds, so the conductor + Phase-2c

@@ -21,6 +21,13 @@ queue a recurring cron drains — **one double-gated task per tick.**
    (health + current job + last verdict), over the existing tailnet HTTP. Disposable cache, not a source of truth.
 4. [ ] **Phase 4 — governance hardening:** signed / hash-chained proofpack of verdicts; anti-anchoring
    BLIND review (reviewer can't see prior verdicts); ACP/MCP alignment so ensemble composes with the ecosystem.
+6. [ ] **Per-agent CLI config (operator-requested):** `[agents.<n>] model = "..."` / `args = [...]` / `program = "..."`
+   / `timeout = N` in crew.toml — today the CLI binary/flags/model are hardcoded in ExecAdapter/AgyAdapter.
+   Let crew.toml pick each AI's model + extra flags.
+7. [ ] **Discovery hardening (gate follow-ups):** `discover_nodes()` runs `tailscale status --json` with NO
+   subprocess timeout → a wedged tailscaled would hang every `run` (now default-on hot path) — add a bounded
+   wait. + discovery port is hardcoded 7878; add `[discovery] port` / `--disc-port`. + MagicDNS-off fallback to
+   `TailscaleIPs`. + parallelize peer probes.
 5. [ ] **ensemble done → phantom-mesh main roadmap.** Switch repos. Pick the top item from the main
    roadmap (apex ② owned-memory phase-2, ④ governed unattended runs, etc.). Work in a **worktree off main** —
    NEVER disturb the dirty `feat/l1-governed-worker` tree. Scrub IPs/dates/machine-names/internal-paths before
@@ -44,6 +51,7 @@ queue a recurring cron drains — **one double-gated task per tick.**
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-20 — **default-on tailnet auto-discovery** @bc11a08 (operator-requested): `run/dispatch` auto-find tailnet `serve` hosts (probe `/health`) for any agent without an explicit `node`; explicit > discovered > local; `ensemble nodes` + `--no-discover`. Gate (codex) caught a bare-switch arg-parse bug → fixed. New items 6 (per-agent model/flags config) + 7 (discovery hardening) added.
 - 2026-06-20 — 3b-1 follow-up: prune `refs/ensemble/*` after ff-merge @ecaecc8 (codex+claude LGTM). Remaining item-2 sub-tasks: thin bundles, true-merge, node scratch GC.
 - 2026-06-20 — Phase 3b-2 SQLite coordination ledger (slice-1) landed: durable resumable `ensemble dispatch` + `ledger` CLI; gate (codex) caught a stale-batch-clock re-run bug → fixed.
 - 2026-06-20 — Phase 3b-1 cross-machine git-sync landed @a775298 (this backlog created).
