@@ -6,10 +6,12 @@ queue a recurring cron drains — **one double-gated task per tick.**
 
 ## Priority queue (work the top undone item)
 
-1. [ ] **Phase 3b-2 — SQLite coordination ledger.** Durable node registry + `dispatch_queue UNIQUE(task_id)`
-   (at-most-once dispatch) + a completion record that is the ONLY success signal (yonder: silence ≠
-   success) + orphaned-claim recovery on node-liveness lapse. Turns the synchronous orchestrator-push
-   into a durable pull-based backlog. New module `src/ledger.rs` (rusqlite, WAL). Grounded in design §4b(b/c).
+1. [x] **Phase 3b-2 — SQLite coordination ledger (slice-1).** ✅ landed — `src/ledger.rs` (rusqlite/WAL):
+   enqueue (idempotent/at-most-once), atomic claim, terminal complete/fail, recover_orphans; `src/dispatch.rs`
+   durable resumable drain; `ensemble dispatch`/`ensemble ledger status|recover` CLI. Gate caught a stale-clock
+   re-run bug (fixed). **3b-2b (next durable slice):** cross-machine shared ledger (serve workers PULL over
+   HTTP/shared-FS) + node registry/heartbeat table + heartbeat-renewed leases (so a long live run isn't
+   recovered) + per-state guards on complete/fail.
 2. [ ] **Phase 3b-1 follow-ups (small; interleave when a tick is light):**
    - thin result bundles (`git bundle create - <branch> --not <base_sha>`; carry `base_sha` in `RepoCtx`).
    - true-merge apply (not `--ff-only`) for multi-round / dirty-worktree cases + a conflict policy.
@@ -42,4 +44,5 @@ queue a recurring cron drains — **one double-gated task per tick.**
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-20 — Phase 3b-2 SQLite coordination ledger (slice-1) landed: durable resumable `ensemble dispatch` + `ledger` CLI; gate (codex) caught a stale-batch-clock re-run bug → fixed.
 - 2026-06-20 — Phase 3b-1 cross-machine git-sync landed @a775298 (this backlog created).

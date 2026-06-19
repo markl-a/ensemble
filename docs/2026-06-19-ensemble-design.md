@@ -161,8 +161,12 @@ non-LLM trust anchor.
     orchestrator's base commit (bundled over the `/run` wire) and its edits flow back into the
     orchestrator's worktree — the Adapter abstraction holds, so the conductor + Phase-2c
     persistence are unchanged. (`src/repo_sync.rs`; plan `docs/plans/2026-06-19-phase3b1-*`.)
-  - **3b-2** SQLite coordination ledger (durable node registry + `dispatch_queue UNIQUE(task_id)`
-    at-most-once + yonder terminal-record = only success signal) → a durable pull-based backlog.
+  - **3b-2 ✅ (slice-1)** SQLite coordination ledger (`src/ledger.rs`, rusqlite/WAL): enqueue
+    at-most-once + atomic claim + yonder terminal-record + orphan recovery; durable resumable
+    `ensemble dispatch` (`src/dispatch.rs`) + `ensemble ledger status|recover`. Plan
+    `docs/plans/2026-06-20-phase3b2-*`.
+  - **3b-2b** cross-machine shared ledger (serve workers PULL over HTTP / shared FS) + node
+    registry/heartbeat + heartbeat-renewed leases → a true multi-node pull fleet.
 - **Phase 4 — governance hardening**: signed/hash-chained proofpack of verdicts; anti-
   anchoring blind review; ACP/MCP alignment so ensemble composes with the ecosystem.
 
