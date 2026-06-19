@@ -208,15 +208,23 @@ fn ledger_cmd(args: &[String]) {
     }
 }
 
+/// Value-less switches: they take NO following value, so the arg parser must advance past them by
+/// one (not two) — otherwise `--no-discover "task"` would swallow the task as a phantom flag value.
+const BARE_SWITCHES: &[&str] = &["--no-discover"];
+
 /// Collect positional task arguments: everything after the subcommand that is neither a `--flag`
-/// nor a flag's value.
+/// nor a value flag's value. Bare switches (e.g. `--no-discover`) consume no value.
 fn positional_tasks(args: &[String]) -> Vec<String> {
     let mut tasks = Vec::new();
     let mut i = 2; // skip argv[0] (binary) and argv[1] (subcommand)
     while i < args.len() {
         let a = &args[i];
         if a.starts_with("--") {
-            i += 2; // skip the flag and its value
+            if BARE_SWITCHES.contains(&a.as_str()) {
+                i += 1; // value-less switch
+            } else {
+                i += 2; // value flag: skip the flag AND its value
+            }
         } else {
             tasks.push(a.clone());
             i += 1;
@@ -321,4 +329,51 @@ fn parse_flag(args: &[String], flag: &str) -> Option<String> {
         .position(|a| a == flag)
         .and_then(|i| args.get(i + 1))
         .cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn argv(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn bare_switch_does_not_swallow_a_following_task() {
+        // --no-discover takes no value, so the task after it must survive (codex gate finding).
+        let a = argv(&["ensemble", "run", "--no-discover", "do it"]);
+        assert_eq!(positional_tasks(&a), vec!["do it".to_string()]);
+    }
+
+    #[test]
+    fn bare_switch_works_after_and_between_tasks_with_value_flags() {
+        let a = argv(&[
+            "ensemble",
+            "run-many",
+            "t1",
+            "--no-discover",
+            "t2",
+            "--repo",
+            ".",
+        ]);
+        assert_eq!(
+            positional_tasks(&a),
+            vec!["t1".to_string(), "t2".to_string()]
+        );
+    }
+
+    #[test]
+    fn value_flags_still_consume_their_value() {
+        let a = argv(&["ensemble", "run", "--crew", "c.toml", "task", "--repo", "."]);
+        assert_eq!(positional_tasks(&a), vec!["task".to_string()]);
+    }
+
+    #[test]
+    fn has_flag_detects_a_switch_anywhere() {
+        assert!(has_flag(
+            &argv(&["ensemble", "run", "--no-discover", "x"]),
+            "--no-discover"
+        ));
+        assert!(!has_flag(&argv(&["ensemble", "run", "x"]), "--no-discover"));
+    }
 }
