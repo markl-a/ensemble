@@ -40,9 +40,27 @@ fn de_on_flake<'de, D: serde::Deserializer<'de>>(d: D) -> Result<OnFlake, D::Err
     }
 }
 
+/// Error from loading a crew config: a TOML parse failure, or a semantic-validation failure
+/// (e.g. an empty `pipeline`, which would otherwise panic the conductor at `pipeline[0]`).
+#[derive(Debug, thiserror::Error)]
+pub enum CrewError {
+    #[error("crew config parse: {0}")]
+    Parse(#[from] toml::de::Error),
+    #[error("crew config invalid: {0}")]
+    Invalid(String),
+}
+
 impl CrewConfig {
-    pub fn from_toml(s: &str) -> Result<Self, toml::de::Error> {
+    pub fn from_toml(s: &str) -> Result<Self, CrewError> {
         let c: CrewConfig = toml::from_str(s)?;
+        // A valid-but-empty pipeline parses fine but would panic the conductor at `pipeline[0]`
+        // (the implementer). Reject it here so every real entry point (from_path → the CLI) fails
+        // cleanly instead of panicking on malformed input.
+        if c.pipeline.is_empty() {
+            return Err(CrewError::Invalid(
+                "pipeline must have at least one role (the implementer)".to_string(),
+            ));
+        }
         Ok(c)
     }
     pub fn from_path(p: &std::path::Path) -> std::io::Result<Self> {
@@ -90,6 +108,21 @@ mod tests {
         // implementer = first pipeline role; reviewers = the rest
         assert_eq!(c.implementer_role(), "implement");
         assert_eq!(c.reviewer_roles(), vec!["review", "debug"]);
+    }
+
+    #[test]
+    fn rejects_empty_pipeline_so_conductor_cannot_panic() {
+        let toml = r#"
+            pipeline = []
+            [gate]
+            min_approvals = 1
+            max_rounds = 1
+            on_flake = "exclude"
+        "#;
+        assert!(
+            CrewConfig::from_toml(toml).is_err(),
+            "empty pipeline must be rejected"
+        );
     }
 
     #[test]

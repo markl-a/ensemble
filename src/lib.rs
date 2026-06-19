@@ -12,7 +12,7 @@ pub mod verdict;
 pub use adapter::{Adapter, AdapterError, AgentOutput, MockAdapter};
 pub use blackboard::{Blackboard, Message};
 pub use conductor::{Conductor, Decision, RunOutcome};
-pub use crew::{CrewConfig, GatePolicy, OnFlake, RoleConfig};
+pub use crew::{CrewConfig, CrewError, GatePolicy, OnFlake, RoleConfig};
 pub use exec_adapter::ExecAdapter;
 pub use gate::{decide, GateDecision, RoleVerdict};
 pub use verdict::{parse_verdict, Verdict};
