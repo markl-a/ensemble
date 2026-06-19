@@ -1,0 +1,15 @@
+[package]
+name = "ensemble"
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "A local-first, governed orchestrator that runs different-vendor AI coding CLIs (Claude Code, Codex, Antigravity/agy, opencode) as one collaborative dev crew — parallel tasks + role pipeline + inter-agent comms, across machines over Tailscale."
+readme = "README.md"
+keywords = ["ai", "agents", "orchestration", "code-review", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "ensemble"
+path = "src/main.rs"
+
+[dependencies]

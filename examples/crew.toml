@@ -1,0 +1,28 @@
+# ensemble crew configuration — which vendor CLI plays which role, and the pipeline.
+# This is the Phase-1 design shape; fields land as the conductor/gate are implemented.
+
+# Quorum + convergence policy for the gate.
+[gate]
+min_approvals = 2        # how many reviewers must APPROVE for a task to land
+max_rounds    = 2        # bounded convergence; escalate to a human after this many CHANGES loops
+on_flake      = "exclude"  # a flaked/empty/rate-limited agent: "retry" | "substitute" | "exclude"
+
+# The role pipeline a single task flows through (implement -> review -> debug).
+pipeline = ["implement", "review", "debug"]
+
+[roles.implement]
+agent = "codex"          # OpenAI Codex CLI writes the change
+
+[roles.review]
+agent = "claude"         # Claude Code reviews the diff
+blind = true             # don't show this reviewer the others' verdicts (anti-anchoring)
+
+[roles.debug]
+agent = "agy"            # Google Antigravity CLI runs tests / hunts bugs
+
+# Optional per-agent overrides; sane defaults are built in.
+[agents.codex]
+backup = "opencode"      # substitute when codex flakes (if gate.on_flake = "substitute")
+
+[agents.agy]
+# agy is driven headlessly under a real PTY (see docs/design §3 + §4a). No extra config needed.

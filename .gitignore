@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+Cargo.lock
+.DS_Store
+# ensemble runtime scratch
+/.ensemble/
+*.blackboard.jsonl
