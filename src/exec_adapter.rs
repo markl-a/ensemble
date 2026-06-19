@@ -71,17 +71,33 @@ impl Adapter for ExecAdapter {
         &self.name
     }
     fn run(&self, prompt: &str, cwd: &Path) -> Result<AgentOutput, AdapterError> {
-        let out = self
+        use std::io::Write;
+        // Pass the prompt via STDIN, not as a CLI arg. On Windows the prompt would otherwise go
+        // through `cmd /C <program> ... "<prompt>"`, where cmd's command-line parsing MANGLES
+        // multi-line / quoted prompts (newlines are command separators; quoting differs from the
+        // CRT rules Rust applies). codex (`exec`), claude (`-p`) and opencode (`run`) all read the
+        // prompt from stdin when given no positional prompt — verified on z13.
+        let mut child = match self
             .build_command()
-            .arg(prompt)
             .current_dir(cwd)
-            .stdin(std::process::Stdio::null())
-            .output();
-        let out = match out {
-            Ok(o) => o,
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 return Err(AdapterError::NotInstalled(self.program.clone()))
             }
+            Err(e) => return Err(AdapterError::Flaked(e.to_string())),
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            // Best-effort: a broken pipe (CLI exited before reading) shows up as empty output
+            // below. Dropping `stdin` closes it (EOF), so the CLI stops reading and proceeds.
+            let _ = stdin.write_all(prompt.as_bytes());
+        }
+        let out = match child.wait_with_output() {
+            Ok(o) => o,
             Err(e) => return Err(AdapterError::Flaked(e.to_string())),
         };
         let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
