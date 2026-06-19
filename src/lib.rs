@@ -2,6 +2,7 @@
 //! collaborative dev crew. See docs/2026-06-19-ensemble-design.md.
 
 pub mod adapter;
+pub mod agy_adapter;
 pub mod blackboard;
 pub mod conductor;
 pub mod crew;
@@ -10,6 +11,7 @@ pub mod gate;
 pub mod verdict;
 
 pub use adapter::{Adapter, AdapterError, AgentOutput, MockAdapter};
+pub use agy_adapter::AgyAdapter;
 pub use blackboard::{Blackboard, Message};
 pub use conductor::{Conductor, Decision, RunOutcome};
 pub use crew::{CrewConfig, CrewError, GatePolicy, OnFlake, RoleConfig};
