@@ -1,14 +1,15 @@
 # ensemble crew configuration — which vendor CLI plays which role, and the pipeline.
 # This is the Phase-1 design shape; fields land as the conductor/gate are implemented.
 
+# The role pipeline a single task flows through (implement -> review -> debug).
+# Top-level key: must precede the [gate] table so TOML scopes it to the crew, not the gate.
+pipeline = ["implement", "review", "debug"]
+
 # Quorum + convergence policy for the gate.
 [gate]
 min_approvals = 2        # how many reviewers must APPROVE for a task to land
 max_rounds    = 2        # bounded convergence; escalate to a human after this many CHANGES loops
 on_flake      = "exclude"  # a flaked/empty/rate-limited agent: "retry" | "substitute" | "exclude"
-
-# The role pipeline a single task flows through (implement -> review -> debug).
-pipeline = ["implement", "review", "debug"]
 
 [roles.implement]
 agent = "codex"          # OpenAI Codex CLI writes the change
