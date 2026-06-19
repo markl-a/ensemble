@@ -49,7 +49,13 @@ fn run_single(args: &[String]) {
     let out = c.run_in_repo(&task, Path::new(&repo));
     print_transcript(&out);
     match out.decision {
-        Decision::Landed => println!("LANDED after {} round(s)", out.rounds),
+        Decision::Landed => {
+            print!("LANDED after {} round(s)", out.rounds);
+            if let Some(b) = &out.branch {
+                print!(" → work kept on branch `{b}` (merge it with: git merge {b})");
+            }
+            println!();
+        }
         Decision::Escalated(why) => {
             eprintln!("ESCALATED after {} round(s): {}", out.rounds, why);
             std::process::exit(1);
@@ -83,7 +89,13 @@ fn run_many(args: &[String]) {
     let mut any_escalated = false;
     for (task, out) in tasks.iter().zip(outs.iter()) {
         match &out.decision {
-            Decision::Landed => println!("LANDED ({} round(s)): {task}", out.rounds),
+            Decision::Landed => {
+                print!("LANDED ({} round(s)): {task}", out.rounds);
+                if let Some(b) = &out.branch {
+                    print!(" → work kept on branch `{b}` (merge it with: git merge {b})");
+                }
+                println!();
+            }
             Decision::Escalated(why) => {
                 any_escalated = true;
                 println!("ESCALATED ({} round(s)): {task} — {why}", out.rounds);
