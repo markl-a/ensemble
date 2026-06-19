@@ -29,9 +29,12 @@ fn main() {
         })
     };
 
-    // Phase-1 adapter registry: only codex is a real adapter yet.
+    // Phase-1b adapter registry: all four real CLIs.
     let mut adapters: HashMap<String, Box<dyn Adapter>> = HashMap::new();
     adapters.insert("codex".into(), Box::new(ExecAdapter::codex()));
+    adapters.insert("claude".into(), Box::new(ExecAdapter::claude()));
+    adapters.insert("opencode".into(), Box::new(ExecAdapter::opencode()));
+    adapters.insert("agy".into(), Box::new(AgyAdapter::new()));
 
     let c = Conductor::new(crew, adapters);
     let out = c.run(&task, Path::new("."));
