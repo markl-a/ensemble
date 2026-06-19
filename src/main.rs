@@ -47,6 +47,7 @@ fn run_single(args: &[String]) {
     let registry = adapters_for(&crew);
     let c = Conductor::new(crew, registry);
     let out = c.run_in_repo(&task, Path::new(&repo));
+    print_transcript(&out);
     match out.decision {
         Decision::Landed => println!("LANDED after {} round(s)", out.rounds),
         Decision::Escalated(why) => {
@@ -54,6 +55,16 @@ fn run_single(args: &[String]) {
             std::process::exit(1);
         }
     }
+}
+
+/// Print the blackboard transcript (every inter-agent message) so the operator can see what each
+/// agent actually said — essential for understanding a LANDED or ESCALATED outcome.
+fn print_transcript(out: &RunOutcome) {
+    println!("─── transcript ───");
+    for m in out.blackboard.read_since(0) {
+        println!("[{} · {}]\n{}\n", m.from, m.kind, m.body.trim());
+    }
+    println!("──────────────────");
 }
 
 /// `ensemble run-many "<t1>" "<t2>" ... [--crew <p>] [--repo <p>]` — parallel tasks, each in its

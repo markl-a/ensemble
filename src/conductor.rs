@@ -222,29 +222,46 @@ fn build_prompt(
     role: &str,
     is_reviewer: bool,
 ) -> String {
-    let mut p = format!("You are the '{role}' role on a collaborative dev crew.\nTask: {task}\n");
+    let _ = role;
     let summary = bb.summary();
-    if !summary.is_empty() {
-        p.push('\n');
-        p.push_str(&summary);
-    }
-    if !feedback.is_empty() {
-        p.push_str("\nReviewers requested these changes:\n");
-        for f in feedback {
-            p.push_str(&format!("- {f}\n"));
-        }
-    }
-    // Tell each role the protocol: reviewers MUST end with a parseable VERDICT line (else
-    // `parse_verdict` conservatively treats the review as changes-requested and the task can
-    // never land); the implementer just does the work and summarizes.
     if is_reviewer {
+        // Reviewer: judge the IMPLEMENTER's work — do NOT redo the task — and end with a parseable
+        // VERDICT line (else `parse_verdict` conservatively reads it as changes-requested and the
+        // task can never land).
+        let mut p = format!(
+            "You are a REVIEWER on a dev crew. A teammate (the implementer) was asked to do:\n\
+             TASK: {task}\n\n"
+        );
+        if !summary.is_empty() {
+            p.push_str("Activity so far (the implementer's output is the `result` entry):\n");
+            p.push_str(&summary);
+            p.push('\n');
+        }
         p.push_str(
-            "\nReview the work so far against the task. End your reply with EXACTLY one line:\n\
-             VERDICT: LGTM                    (if the task is correctly done)\n\
+            "Judge ONLY whether the implementer's work satisfies the task. Do NOT do the task \
+             yourself. Give a one-line reason, then end with EXACTLY one final line:\n\
+             VERDICT: LGTM                    (if it satisfies the task)\n\
              VERDICT: CHANGES: <what to fix>  (otherwise)\n",
         );
+        p
     } else {
-        p.push_str("\nDo the task now. Then briefly state what you changed.\n");
+        // Implementer: do the task now and produce the deliverable.
+        let mut p = format!(
+            "You are the IMPLEMENTER on a dev crew. Do this task now and produce the deliverable:\n\
+             TASK: {task}\n"
+        );
+        if !feedback.is_empty() {
+            p.push_str("\nA reviewer asked you to fix:\n");
+            for f in feedback {
+                p.push_str(&format!("- {f}\n"));
+            }
+        }
+        if !summary.is_empty() {
+            p.push('\n');
+            p.push_str(&summary);
+            p.push('\n');
+        }
+        p.push_str("\nAfter doing it, briefly state what you produced.\n");
+        p
     }
-    p
 }

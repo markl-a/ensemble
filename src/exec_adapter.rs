@@ -17,7 +17,14 @@ impl ExecAdapter {
         Self {
             name: "codex".into(),
             program: "codex".into(),
-            args: vec!["exec".into(), "--skip-git-repo-check".into()],
+            // The implementer must actually edit files autonomously, so bypass approvals/sandbox
+            // (it runs inside an isolated, throwaway git worktree). --skip-git-repo-check lets it
+            // run in the worktree without a git-root prompt.
+            args: vec![
+                "exec".into(),
+                "--dangerously-bypass-approvals-and-sandbox".into(),
+                "--skip-git-repo-check".into(),
+            ],
         }
     }
 
@@ -40,13 +47,32 @@ impl ExecAdapter {
     }
 }
 
+impl ExecAdapter {
+    /// Build the base command. On Windows the vendor CLIs are typically npm-global `.cmd` shims
+    /// (codex/opencode) that `CreateProcess` cannot exec directly, so route through `cmd /C
+    /// <program> <args...>`; on Unix, exec the program directly. (Same lesson as a real PTY/CLI
+    /// driver — npm shims need a shell on Windows.)
+    #[cfg(windows)]
+    fn build_command(&self) -> Command {
+        let mut c = Command::new("cmd");
+        c.arg("/C").arg(&self.program).args(&self.args);
+        c
+    }
+    #[cfg(not(windows))]
+    fn build_command(&self) -> Command {
+        let mut c = Command::new(&self.program);
+        c.args(&self.args);
+        c
+    }
+}
+
 impl Adapter for ExecAdapter {
     fn name(&self) -> &str {
         &self.name
     }
     fn run(&self, prompt: &str, cwd: &Path) -> Result<AgentOutput, AdapterError> {
-        let out = Command::new(&self.program)
-            .args(&self.args)
+        let out = self
+            .build_command()
             .arg(prompt)
             .current_dir(cwd)
             .stdin(std::process::Stdio::null())
@@ -60,8 +86,14 @@ impl Adapter for ExecAdapter {
         };
         let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if text.is_empty() {
+            // When shelled through `cmd /C`, a missing CLI is a non-zero exit + a "not recognized"
+            // stderr (not a spawn NotFound), so classify that here.
             let err = String::from_utf8_lossy(&out.stderr);
-            if err.to_lowercase().contains("rate") || err.contains("429") {
+            let err_low = err.to_lowercase();
+            if err_low.contains("not recognized") || err_low.contains("cannot find") {
+                return Err(AdapterError::NotInstalled(self.program.clone()));
+            }
+            if err_low.contains("rate") || err.contains("429") {
                 return Err(AdapterError::RateLimited);
             }
             return Err(AdapterError::Empty);

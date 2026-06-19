@@ -10,25 +10,34 @@ pub enum Verdict {
 /// `VERDICT: CHANGES: <msg>` requests changes. Anything without an explicit approving VERDICT
 /// line is treated as changes-requested — an unparseable or ambiguous review must NEVER land.
 pub fn parse_verdict(text: &str) -> Verdict {
+    // Scan every line that MENTIONS "verdict" (case-insensitive) — tolerating markdown prefixes a
+    // real reviewer adds, e.g. "## Review verdict: ✅ Approve" or "**VERDICT: LGTM**". Classify by
+    // approve/lgtm vs changes; keep the LAST such line as authoritative. A reply with no verdict
+    // line is conservatively changes-requested (an unparseable review must never land).
+    let mut result: Option<Verdict> = None;
     for line in text.lines() {
-        let l = line.trim();
-        let upper = l.to_ascii_uppercase();
-        if let Some(rest) = upper.strip_prefix("VERDICT:") {
-            let rest = rest.trim();
-            if rest.starts_with("LGTM") || rest.starts_with("APPROVE") {
-                return Verdict::Approve;
-            }
-            if let Some(idx) = rest.find("CHANGES") {
-                // take the message after "CHANGES:" from the ORIGINAL-case line
-                let after = l[l.to_ascii_uppercase().find("CHANGES").unwrap() + "CHANGES".len()..]
-                    .trim_start_matches(|c: char| c == ':' || c.is_whitespace());
-                let _ = idx;
-                return Verdict::Changes(after.to_string());
-            }
-            return Verdict::Changes(format!("unrecognized VERDICT line: {l}"));
+        let low = line.to_ascii_lowercase();
+        if !low.contains("verdict") {
+            continue;
+        }
+        if low.contains("lgtm") || low.contains("approve") {
+            result = Some(Verdict::Approve);
+        } else if let Some(idx) = low.find("changes") {
+            // message after "changes" (+ an optional ':'); byte indices match since lowercasing
+            // ASCII preserves positions.
+            let after = line[idx + "changes".len()..]
+                .trim_start_matches(|c: char| c == ':' || c.is_whitespace());
+            result = Some(Verdict::Changes(after.to_string()));
+        } else {
+            result = Some(Verdict::Changes(format!(
+                "unrecognized verdict line: {}",
+                line.trim()
+            )));
         }
     }
-    Verdict::Changes("no explicit VERDICT line; treating as changes-requested".to_string())
+    result.unwrap_or_else(|| {
+        Verdict::Changes("no explicit VERDICT line; treating as changes-requested".to_string())
+    })
 }
 
 #[cfg(test)]
