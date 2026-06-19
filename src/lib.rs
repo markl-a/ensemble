@@ -5,6 +5,7 @@ pub mod adapter;
 pub mod blackboard;
 pub mod conductor;
 pub mod crew;
+pub mod exec_adapter;
 pub mod gate;
 pub mod verdict;
 
@@ -12,5 +13,6 @@ pub use adapter::{Adapter, AdapterError, AgentOutput, MockAdapter};
 pub use blackboard::{Blackboard, Message};
 pub use conductor::{Conductor, Decision, RunOutcome};
 pub use crew::{CrewConfig, GatePolicy, OnFlake, RoleConfig};
+pub use exec_adapter::ExecAdapter;
 pub use gate::{decide, GateDecision, RoleVerdict};
 pub use verdict::{parse_verdict, Verdict};
