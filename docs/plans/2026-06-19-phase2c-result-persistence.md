@@ -208,3 +208,5 @@ Decision::Landed => {
 ## Notes / deferred
 - No AUTO-merge into the base branch — kept-branch + operator merges. An opt-in `--merge` (antfarm ff-only-after-gate pattern, design §4b) is a later option.
 - Cross-machine: a remote node's worktree/branch lives on that node (Phase 3b coordinates which branch + syncs it back).
+- **Gate fix (landed @2ad022f):** the original `run_in_repo` left a clean `Landed` (branch deleted on Drop → work lost) when `commit()` errored, while the CLI still printed `LANDED` + exit 0. Now downgraded to `Escalated`; regression test `commit_failure_escalates_never_a_silent_land`. (claude found it; codex+claude both LGTM'd the fix.)
+- **Follow-up (both reviewers, non-blocking):** `commit()` returning `Ok(false)` (nothing staged) still takes the `Ok` arm → reported `Landed` with the kept branch pointing at base. Correct when the agents committed directly inside the worktree (branch carries their commits); misleading when they produced nothing at all (empty branch == base). Distinguishing the two needs a base-divergence check (`git rev-list base..branch`); deferred — not a regression.
