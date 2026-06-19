@@ -7,8 +7,10 @@ pub mod blackboard;
 pub mod conductor;
 pub mod crew;
 pub mod discovery;
+pub mod dispatch;
 pub mod exec_adapter;
 pub mod gate;
+pub mod ledger;
 pub mod remote_adapter;
 pub mod repo_sync;
 pub mod serve;
@@ -24,6 +26,7 @@ pub use crew::{AgentConfig, CrewConfig, CrewError, GatePolicy, OnFlake, RoleConf
 pub use discovery::{discover_nodes, Node};
 pub use exec_adapter::ExecAdapter;
 pub use gate::{decide, GateDecision, RoleVerdict};
+pub use ledger::{Counts, Ledger, LedgerError, Task, TaskState};
 pub use remote_adapter::RemoteAdapter;
 pub use repo_sync::{apply_result, bundle_rev, head_sha, is_git_worktree};
 pub use serve::serve;
