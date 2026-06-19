@@ -9,6 +9,7 @@ pub mod crew;
 pub mod exec_adapter;
 pub mod gate;
 pub mod remote_adapter;
+pub mod serve;
 pub mod verdict;
 pub mod wire;
 pub mod worktree;
@@ -21,6 +22,7 @@ pub use crew::{AgentConfig, CrewConfig, CrewError, GatePolicy, OnFlake, RoleConf
 pub use exec_adapter::ExecAdapter;
 pub use gate::{decide, GateDecision, RoleVerdict};
 pub use remote_adapter::RemoteAdapter;
+pub use serve::serve;
 pub use verdict::{parse_verdict, Verdict};
 pub use wire::{RunRequest, RunResponse};
 pub use worktree::Worktree;
