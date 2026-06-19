@@ -78,17 +78,69 @@ opencode/agy Windows flaking seen repeatedly during ensemble's own design sessio
 adapters need live CLIs → `#[ignore]` live smoke. conductor/blackboard/gate are hermetic via
 a mock adapter returning canned `AgentOutput`. transport tested with a loopback "remote".
 
-## 4. Reference projects (filled by the two running studies)
+## 4. Reference projects (source-grounded — deep-read of real code, 2026-06)
 
-### 4a. Single-machine multi-CLI (deep-read of 8 repos — PENDING workflow wf_7e9831de-16f)
-bernstein · cc-multi-cli-plugin · mcp-agent-switchboard · vibe-kanban · emdash ·
-pal-mcp-server(clink) · antfarm · claude-council. → per-vendor adapter cheat-sheet, the
-inter-agent-comms mechanism, orchestration + gate patterns. *(to be inserted)*
+### 4a. Single-machine multi-CLI — what to borrow
 
-### 4b. Cross-machine over Tailscale (deep-read of 5 repos — PENDING)
-wolfpack (Tailnet PTY broker) · grackle (SSH/gRPC) · yonder (git-spine + events.jsonl) ·
-OpenHands (remote Agent Servers) · antfarm (file-queue across nodes). → the Tailscale
-transport, cross-machine shared blackboard, node discovery/health/degrade. *(to be inserted)*
+**Inter-agent communication (the headline). Real mechanisms found in the wild:**
+- **bernstein** (richest, and actually wired into the live spawn loop): (1) a **bulletin board
+  summary injected into every spawned agent's prompt** ("Other agents are working in parallel.
+  Recent activity:…"); (2) **agent-to-agent delegation by role** (post → query-by-role → claim
+  → post-result); (3) direct file channels with `@mention` + a wakeup signal; (4) a real-time
+  stdin-pipe IPC bus.
+- **mcp-agent-switchboard**: a **debate** that relays one CLI's last text into the other's next
+  prompt (each side resumes its own session id), plus a **SQLite shared-context blackboard** +
+  event timeline, plus handoff-prompt-injection.
+- **cc-multi-cli-plugin**: **none** — strict hub-and-spoke, everything mediated by Claude.
+- **→ ensemble decision:** the **mediated blackboard whose rolling summary is injected into the
+  next agent's prompt** (bernstein #1) is the cleanest fit for subprocess CLIs and is what §3's
+  `blackboard/` implements. Add **role-delegation** (bernstein #2) as a follow-up. Skip the
+  stdin-pipe IPC bus (fragile across vendors).
+
+**Driving agy (3 different approaches observed — pick + verify):**
+- bernstein: `antigravity -p <prompt> -m <model> --output-format json --yolo` as a plain
+  subprocess, parse the logfile (treats agy as the Gemini-CLI rename).
+- cc-multi: `agy -p --log-file <f>` with stdin closed + stdout ignored, then **read the on-disk
+  transcript JSONL** (last `source=MODEL,type=PLANNER_RESPONSE` step; Windows `.tmp→.pb` retry).
+- switchboard: drive the **IDE via remote-debugging** (no headless path).
+- **→ ensemble's agy adapter:** try `--output-format json` first BUT **re-verify on the current
+  agy** (a prior finding: on agy 1.0.10 the `-p` transcript.jsonl is empty and the data moved to
+  a protobuf per-conversation `.db`; a real-PTY capture is the proven fallback). Adapter ships
+  both paths with a capability probe.
+
+**Orchestration + gate + config:** bernstein = worktree-per-task + an **objective janitor gate
+(tests/lint, not cross-review)** + per-vendor adapter with a discovery cascade and a strategy
+contract table; emdash = per-vendor provider defs (`cli`/flags/`terminalOnly`). ensemble keeps
+the quorum *review* gate AND adds an objective test/lint gate (borrow bernstein) as a
+non-LLM trust anchor.
+
+### 4b. Cross-machine over Tailscale (Phase 3) — what to borrow
+
+- **(a) Transport = wolfpack's `tailscale serve --bg <port>` fronting a loopback-only agent
+  host** → reach a node at `https://<node>.<tailnet>.ts.net` with **zero open ports + free TLS +
+  identity** (`tailscale-user-login` header). Address work by a **stable node-id and resolve the
+  live tailnet URL at call time** (OpenHands' "discovered URL, not configured"). Live agent
+  stream over WS with **`since_seq` ring-buffer replay on reconnect** (wolfpack) so a dropped
+  link doesn't lose output. **Avoid** grackle's reverse-SSH tunnels — on a tailnet every node is
+  already addressable.
+- **(b) Cross-machine shared state = one SQLite/WAL coordination ledger** (node registry +
+  tasks + `dispatch_queue UNIQUE(task_id)` for at-most-once — grackle), any vector/semantic store
+  kept as a **disposable cache**. Overlay **yonder's contract**: **job-id == a ref-pinned
+  `dispatch/<job-id>` git branch** (an agent can never touch `main`) + a **fsync'd terminal
+  record as the ONLY completion signal** (silence ≠ success) — maps straight onto the
+  flight-recorder. antfarm's **folder-as-status + atomic `rename`** is the DB-free alternative
+  (valid only with a single writing process).
+- **(c) Discovery/health/degrade:** `tailscale status --json` + an `/info` probe (wolfpack);
+  **heartbeat → mark-disconnected → *suspend* (not lose) the session → backoff-reconnect →
+  recover** (grackle); a dead node simply **stops pulling** work + its orphaned claims
+  auto-recover on owner-liveness lapse (antfarm/yonder).
+- **Cross-cutting — the ④ differentiator:** *every* repo studied hardcodes
+  `bypassPermissions`/`full-auto`/`danger-full-access`. ensemble borrows their **dispatch +
+  transport + completion-contract**, NOT their blank-cheque unattended posture — the governor +
+  flight-recorder + quorum are exactly that gap.
+- **Fleet caveats:** wolfpack's broker is **POSIX-only** (Windows nodes need TCP-loopback, not a
+  Unix socket); yonder's Windows process-liveness check is a stub → ship a **real Windows
+  liveness probe from day one** for Windows worker nodes.
 
 ## 5. The path (达成路径 — phased)
 
