@@ -230,3 +230,82 @@ fn run_many_runs_tasks_in_parallel_each_in_its_own_worktree() {
         .unwrap_or(0);
     assert_eq!(live, 0, "worktrees should be cleaned up");
 }
+
+#[test]
+fn on_flake_retry_recovers_after_one_transient_flake() {
+    // reviewer flakes once then approves; on_flake=retry ⇒ the round still gets an APPROVE ⇒ Land
+    let crew = CrewConfig::from_toml(
+        r#"
+        pipeline = ["implement","review"]
+        [gate]
+        min_approvals = 1
+        max_rounds = 1
+        on_flake = "retry"
+        [roles.implement]
+        agent = "codex"
+        [roles.review]
+        agent = "claude"
+    "#,
+    )
+    .unwrap();
+    let mut map: std::collections::HashMap<String, Box<dyn Adapter>> =
+        std::collections::HashMap::new();
+    map.insert(
+        "codex".into(),
+        Box::new(MockAdapter::new("codex", vec![Ok("impl".into())])),
+    );
+    map.insert(
+        "claude".into(),
+        Box::new(MockAdapter::new(
+            "claude",
+            vec![Err(AdapterError::RateLimited), Ok("VERDICT: LGTM".into())],
+        )),
+    );
+    let out = Conductor::new(crew, map).run("t", std::path::Path::new("."));
+    assert!(
+        matches!(out.decision, Decision::Landed),
+        "retry must recover the transient flake"
+    );
+}
+
+#[test]
+fn on_flake_substitute_uses_the_backup_agent() {
+    let crew = CrewConfig::from_toml(
+        r#"
+        pipeline = ["implement","review"]
+        [gate]
+        min_approvals = 1
+        max_rounds = 1
+        on_flake = "substitute"
+        [roles.implement]
+        agent = "codex"
+        [roles.review]
+        agent = "claude"
+        [agents.claude]
+        backup = "opencode"
+    "#,
+    )
+    .unwrap();
+    let mut map: std::collections::HashMap<String, Box<dyn Adapter>> =
+        std::collections::HashMap::new();
+    map.insert(
+        "codex".into(),
+        Box::new(MockAdapter::new("codex", vec![Ok("impl".into())])),
+    );
+    map.insert(
+        "claude".into(),
+        Box::new(MockAdapter::new("claude", vec![Err(AdapterError::Empty)])),
+    );
+    map.insert(
+        "opencode".into(),
+        Box::new(MockAdapter::new(
+            "opencode",
+            vec![Ok("VERDICT: LGTM".into())],
+        )),
+    );
+    let out = Conductor::new(crew, map).run("t", std::path::Path::new("."));
+    assert!(
+        matches!(out.decision, Decision::Landed),
+        "substitute must fall back to the backup agent"
+    );
+}

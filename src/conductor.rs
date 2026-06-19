@@ -70,22 +70,57 @@ impl Conductor {
             }
 
             // 2) reviewers — a flaked reviewer is EXCLUDED (logged), never counted as approval.
+            // When the primary adapter errors, consult `on_flake`: Retry re-runs the same agent
+            // once; Substitute falls back to the agent's configured backup. A verdict only enters
+            // the quorum from a real `Some(Ok(..))` — a flake is never faked into an approval.
             let mut verdicts: Vec<RoleVerdict> = Vec::new();
             for role in self.crew.reviewer_roles() {
                 let prompt = build_prompt(task, &bb, &feedback, role);
-                match self.adapter_for_role(role).map(|a| a.run(&prompt, cwd)) {
+                let agent_name = self
+                    .crew
+                    .roles
+                    .get(role)
+                    .map(|r| r.agent.clone())
+                    .unwrap_or_default();
+                let mut result = self.adapter_for_role(role).map(|a| a.run(&prompt, cwd));
+                let mut effective_agent = agent_name.clone();
+
+                if matches!(result, Some(Err(_))) {
+                    match self.crew.gate.on_flake {
+                        OnFlake::Exclude => {}
+                        OnFlake::Retry => {
+                            bb.post(role, "finding", "reviewer flaked — retrying once");
+                            result = self.adapter_for_role(role).map(|a| a.run(&prompt, cwd));
+                        }
+                        OnFlake::Substitute => {
+                            if let Some(backup) = self.crew.backup_for(&agent_name) {
+                                if let Some(b) = self.adapters.get(backup) {
+                                    bb.post(
+                                        role,
+                                        "finding",
+                                        &format!(
+                                            "reviewer flaked — substituting backup '{backup}'"
+                                        ),
+                                    );
+                                    effective_agent = backup.to_string();
+                                    result = Some(b.run(&prompt, cwd));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                match result {
                     Some(Ok(out)) => {
                         let v = parse_verdict(&out.text);
                         bb.post(&out.agent, "verdict", &out.text);
                         verdicts.push(RoleVerdict {
                             role: role.to_string(),
-                            agent: out.agent,
+                            agent: effective_agent,
                             verdict: v,
                         });
                     }
                     Some(Err(e)) => {
-                        // OnFlake::Exclude (the only Phase-1 policy): drop from quorum, log why.
-                        let _ = OnFlake::Exclude;
                         bb.post(role, "finding", &format!("reviewer excluded — flaked: {e}"));
                     }
                     None => {

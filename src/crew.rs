@@ -1,11 +1,15 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 
-/// What to do when a reviewer agent flakes. Phase 1 implements only `Exclude` (drop it from the
-/// quorum with a logged reason — never fake a pass). `Retry`/`Substitute` are Phase 2.
+/// What to do when a reviewer agent flakes. `Exclude` drops it from the quorum with a logged
+/// reason (never fake a pass). `Retry` re-runs the same agent once; `Substitute` falls back to the
+/// agent's configured backup. In every case a verdict only enters the quorum from a real
+/// successful run — a flake is never counted as approval.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OnFlake {
     Exclude,
+    Retry,
+    Substitute,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -23,19 +27,31 @@ pub struct RoleConfig {
     pub blind: bool,
 }
 
+/// Per-agent overrides. `backup` names the agent to substitute when this agent flakes and the
+/// gate's `on_flake = "substitute"`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentConfig {
+    #[serde(default)]
+    pub backup: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct CrewConfig {
     pub gate: GatePolicy,
     pub pipeline: Vec<String>,
     pub roles: HashMap<String, RoleConfig>,
+    #[serde(default)]
+    pub agents: HashMap<String, AgentConfig>,
 }
 
 fn de_on_flake<'de, D: serde::Deserializer<'de>>(d: D) -> Result<OnFlake, D::Error> {
     let s = String::deserialize(d)?;
     match s.as_str() {
         "exclude" => Ok(OnFlake::Exclude),
+        "retry" => Ok(OnFlake::Retry),
+        "substitute" => Ok(OnFlake::Substitute),
         other => Err(serde::de::Error::custom(format!(
-            "on_flake = \"{other}\" is not supported in Phase 1 (only \"exclude\")"
+            "on_flake = \"{other}\" is not supported (use \"exclude\", \"retry\", or \"substitute\")"
         ))),
     }
 }
@@ -74,6 +90,10 @@ impl CrewConfig {
     /// All pipeline roles after the implementer = reviewers (their verdicts feed the gate).
     pub fn reviewer_roles(&self) -> Vec<&str> {
         self.pipeline.iter().skip(1).map(|s| s.as_str()).collect()
+    }
+    /// The backup agent configured for `agent` (used when `on_flake = "substitute"`), if any.
+    pub fn backup_for(&self, agent: &str) -> Option<&str> {
+        self.agents.get(agent).and_then(|a| a.backup.as_deref())
     }
 }
 
@@ -126,13 +146,34 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_on_flake_in_phase1() {
+    fn parses_all_on_flake_and_agent_backups() {
         let toml = r#"
             pipeline = ["implement", "review"]
             [gate]
             min_approvals = 1
             max_rounds = 1
             on_flake = "substitute"
+            [roles.implement]
+            agent = "codex"
+            [roles.review]
+            agent = "claude"
+            [agents.claude]
+            backup = "opencode"
+        "#;
+        let c = CrewConfig::from_toml(toml).unwrap();
+        assert!(matches!(c.gate.on_flake, OnFlake::Substitute));
+        assert_eq!(c.backup_for("claude"), Some("opencode"));
+        assert_eq!(c.backup_for("codex"), None);
+    }
+
+    #[test]
+    fn rejects_unknown_on_flake() {
+        let toml = r#"
+            pipeline = ["implement", "review"]
+            [gate]
+            min_approvals = 1
+            max_rounds = 1
+            on_flake = "teleport"
             [roles.implement]
             agent = "codex"
             [roles.review]
