@@ -156,6 +156,13 @@ non-LLM trust anchor.
 - **Phase 3 — cross-machine over Tailscale**: remote adapter (drive an AI CLI on a worker
   node over the tailnet); cross-machine shared blackboard/state; node discovery +
   health + degrade-on-node-down. Grounded in §4b (wolfpack/OpenHands/grackle).
+  - **3a ✅** RemoteAdapter + `ensemble serve` agent-host + tailnet discovery (transport proven).
+  - **3b-1 ✅** cross-machine **git-sync via git bundles**: a remote agent runs on the
+    orchestrator's base commit (bundled over the `/run` wire) and its edits flow back into the
+    orchestrator's worktree — the Adapter abstraction holds, so the conductor + Phase-2c
+    persistence are unchanged. (`src/repo_sync.rs`; plan `docs/plans/2026-06-19-phase3b1-*`.)
+  - **3b-2** SQLite coordination ledger (durable node registry + `dispatch_queue UNIQUE(task_id)`
+    at-most-once + yonder terminal-record = only success signal) → a durable pull-based backlog.
 - **Phase 4 — governance hardening**: signed/hash-chained proofpack of verdicts; anti-
   anchoring blind review; ACP/MCP alignment so ensemble composes with the ecosystem.
 
