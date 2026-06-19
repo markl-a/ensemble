@@ -7,7 +7,10 @@ const USAGE: &str = "usage:\n  \
     ensemble run-many \"<task1>\" \"<task2>\" ... [--crew <crew.toml>] [--repo <path>]\n  \
     ensemble dispatch \"<task1>\" ... --ledger <db> [--crew <crew.toml>] [--repo <path>]   (durable, resumable)\n  \
     ensemble ledger <status|recover> --ledger <db> [--stale-secs N]\n  \
-    ensemble serve [--bind <addr>]   (default 0.0.0.0:7878 — host this node's local agents)";
+    ensemble nodes   (probe the tailnet for `serve` hosts and the agents they offer)\n  \
+    ensemble serve [--bind <addr>]   (default 0.0.0.0:7878 — host this node's local agents)\n\n\
+    run/run-many/dispatch auto-discover tailnet `serve` hosts for any agent without an explicit\n  \
+    [agents.<n>] node = ... in crew.toml; pass --no-discover to stay local.";
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -17,6 +20,7 @@ fn main() {
         Some("run-many") => run_many(&args),
         Some("dispatch") => dispatch_cmd(&args),
         Some("ledger") => ledger_cmd(&args),
+        Some("nodes") => nodes_cmd(&args),
         Some("serve") => serve_cmd(&args),
         _ => {
             eprintln!("{USAGE}");
@@ -48,7 +52,7 @@ fn run_single(args: &[String]) {
     };
     let crew = load_crew(args);
     let repo = parse_flag(args, "--repo").unwrap_or_else(|| ".".to_string());
-    let registry = adapters_for(&crew);
+    let registry = adapters_for(&crew, !has_flag(args, "--no-discover"));
     let c = Conductor::new(crew, registry);
     let out = c.run_in_repo(&task, Path::new(&repo));
     print_transcript(&out);
@@ -87,7 +91,7 @@ fn run_many(args: &[String]) {
     }
     let crew = load_crew(args);
     let repo = parse_flag(args, "--repo").unwrap_or_else(|| ".".to_string());
-    let registry = adapters_for(&crew);
+    let registry = adapters_for(&crew, !has_flag(args, "--no-discover"));
     let c = Conductor::new(crew, registry);
     let outs = c.run_many(&tasks, Path::new(&repo));
     let mut any_escalated = false;
@@ -131,7 +135,10 @@ fn dispatch_cmd(args: &[String]) {
     let ledger_path = parse_flag(args, "--ledger").unwrap_or_else(|| "ensemble-ledger.db".into());
     let crew = load_crew(args);
     let repo = parse_flag(args, "--repo").unwrap_or_else(|| ".".to_string());
-    let c = Conductor::new(crew.clone(), adapters_for(&crew));
+    let c = Conductor::new(
+        crew.clone(),
+        adapters_for(&crew, !has_flag(args, "--no-discover")),
+    );
     let mut ledger = ensemble::ledger::Ledger::open(Path::new(&ledger_path)).unwrap_or_else(|e| {
         eprintln!("ledger {ledger_path}: {e}");
         std::process::exit(1);
@@ -245,17 +252,27 @@ fn adapters() -> HashMap<String, Box<dyn Adapter>> {
     adapters
 }
 
-/// Phase-3a crew-aware registry: for each agent a role references, build a `RemoteAdapter` when
-/// the crew sets `[agents.<n>] node = "http://..."`, else the local `ExecAdapter`/`AgyAdapter`.
-/// Only the four known locals are wired locally; an unknown local agent is skipped (a missing
-/// adapter already makes the conductor escalate cleanly).
-fn adapters_for(crew: &CrewConfig) -> HashMap<String, Box<dyn Adapter>> {
+/// Crew-aware registry. For each agent a role references, resolve in priority order: (1) an explicit
+/// `[agents.<n>] node = "http://..."` in crew.toml → RemoteAdapter (always wins); (2) when `discover`,
+/// a tailnet peer running `ensemble serve` that hosts the agent → RemoteAdapter; (3) the local
+/// `ExecAdapter`/`AgyAdapter` fallback. The tailnet is probed only when `discover` is on AND some
+/// needed agent lacks an explicit node. An unknown local agent is skipped (a missing adapter already
+/// makes the conductor escalate cleanly).
+fn adapters_for(crew: &CrewConfig, discover: bool) -> HashMap<String, Box<dyn Adapter>> {
     let mut m: HashMap<String, Box<dyn Adapter>> = HashMap::new();
     let agents: std::collections::HashSet<&str> =
         crew.roles.values().map(|r| r.agent.as_str()).collect();
+    let needs_discovery = discover && agents.iter().any(|a| crew.node_for(a).is_none());
+    let discovered = if needs_discovery {
+        ensemble::discovery::discover_agent_hosts(7878)
+    } else {
+        HashMap::new()
+    };
     for agent in agents {
         if let Some(node) = crew.node_for(agent) {
-            m.insert(agent.into(), Box::new(RemoteAdapter::new(agent, node)));
+            m.insert(agent.into(), Box::new(RemoteAdapter::new(agent, node))); // explicit wins
+        } else if let Some(node) = discovered.get(agent) {
+            m.insert(agent.into(), Box::new(RemoteAdapter::new(agent, node))); // auto-discovered
         } else {
             match agent {
                 "codex" => {
@@ -275,6 +292,28 @@ fn adapters_for(crew: &CrewConfig) -> HashMap<String, Box<dyn Adapter>> {
         }
     }
     m
+}
+
+/// `ensemble nodes` — probe the tailnet and print which agent each discovered `serve` node hosts.
+fn nodes_cmd(_args: &[String]) {
+    let hosts = ensemble::discovery::discover_agent_hosts(7878);
+    if hosts.is_empty() {
+        println!(
+            "no ensemble nodes discovered (is `tailscale` installed, MagicDNS on, and are peers running `ensemble serve`?)"
+        );
+        return;
+    }
+    println!("discovered agent hosts on the tailnet:");
+    let mut entries: Vec<(&String, &String)> = hosts.iter().collect();
+    entries.sort();
+    for (agent, url) in entries {
+        println!("  {agent} -> {url}");
+    }
+}
+
+/// True if `flag` (a bare switch like `--no-discover`) is present in `args`.
+fn has_flag(args: &[String], flag: &str) -> bool {
+    args.iter().any(|a| a == flag)
 }
 
 fn parse_flag(args: &[String], flag: &str) -> Option<String> {
