@@ -23,7 +23,10 @@ pub use agy_adapter::AgyAdapter;
 pub use blackboard::{Blackboard, Message};
 pub use conductor::{Conductor, Decision, RunOutcome};
 pub use crew::{AgentConfig, CrewConfig, CrewError, GatePolicy, OnFlake, RoleConfig};
-pub use discovery::{discover_nodes, Node};
+pub use discovery::{
+    build_agent_hosts, discover_agent_hosts, discover_nodes, parse_health_agents, probe_agents,
+    Node,
+};
 pub use exec_adapter::ExecAdapter;
 pub use gate::{decide, GateDecision, RoleVerdict};
 pub use ledger::{Counts, Ledger, LedgerError, Task, TaskState};
