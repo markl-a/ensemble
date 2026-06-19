@@ -6,9 +6,39 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A git bundle — raw bytes, transferable over any byte channel.
 pub type Bundle = Vec<u8>;
+
+/// Process-wide counters making scratch/staging paths unique even when two callers pass the same
+/// logical id (e.g. two orchestrators sending `job_id = "codex-0"` to one node).
+static STAGE_SEQ: AtomicU64 = AtomicU64::new(0);
+static NODE_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Make a ref/id safe to embed in a filesystem path (a branch like `dispatch/codex-0` contains `/`,
+/// which is a path separator). Non `[A-Za-z0-9_-]` → `-`.
+fn sanitize_ref(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+/// A file removed on drop — so a staged bundle never leaks, even on an early `?` return.
+struct TempFile {
+    path: PathBuf,
+}
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
 
 fn git_capture(dir: &Path, args: &[&str]) -> std::io::Result<std::process::Output> {
     let out = Command::new("git").arg("-C").arg(dir).args(args).output()?;
@@ -100,17 +130,27 @@ pub fn apply_result(
     bundle: &[u8],
     branch: &str,
 ) -> std::io::Result<()> {
-    let bundle_path = repo.join(".ensemble-result.bundle");
-    std::fs::write(&bundle_path, bundle)?;
-    let bp = bundle_path.to_string_lossy().to_string();
+    // Stage in a unique temp file (NOT a fixed path in the repo): concurrent `run_many` applies must
+    // not clobber each other's bundle between write and fetch, and it must never leak into the
+    // worktree. The TempFile guard removes it on every return path.
+    let seq = STAGE_SEQ.fetch_add(1, Ordering::Relaxed);
+    let stage = TempFile {
+        path: std::env::temp_dir().join(format!(
+            "ensemble-stage-{}-{}-{seq}.bundle",
+            sanitize_ref(branch),
+            std::process::id()
+        )),
+    };
+    std::fs::write(&stage.path, bundle)?;
+    let bp = stage.path.to_string_lossy().to_string();
     let local_ref = format!("refs/ensemble/{branch}");
     git_run(
         repo,
         &["fetch", "--quiet", &bp, &format!("{branch}:{local_ref}")],
     )?;
-    let _ = std::fs::remove_file(&bundle_path);
     git_run(worktree, &["merge", "--ff-only", "--quiet", &local_ref])?;
     Ok(())
+    // `stage` drops → staged bundle removed
 }
 
 /// A scratch directory for a node-side job, removed on drop.
@@ -119,7 +159,15 @@ pub struct NodeJobDir {
 }
 impl NodeJobDir {
     pub fn new(job_id: &str) -> Self {
-        let path = std::env::temp_dir().join(format!("ensemble-node-{job_id}"));
+        // Unique per node PROCESS, not just per job_id: two different orchestrators can each send
+        // `job_id = "codex-0"`, and a deterministic dir would let one job's Drop delete the other's
+        // scratch repo mid-run. pid + a local counter keep them isolated.
+        let seq = NODE_SEQ.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "ensemble-node-{}-{}-{seq}",
+            sanitize_ref(job_id),
+            std::process::id()
+        ));
         Self { path }
     }
 }

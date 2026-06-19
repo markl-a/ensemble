@@ -10,8 +10,10 @@ static JOB_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// An [`Adapter`] that runs its agent on a REMOTE node's `ensemble serve` agent-host over HTTP
 /// (plain HTTP over the tailnet — WireGuard encrypts the link). The conductor can't tell it apart
-/// from a local adapter. The orchestrator's `cwd` is not sent: the remote node runs the CLI in its
-/// OWN checkout (cross-machine git sync = Phase 3b); Phase 3a proves the transport.
+/// from a local adapter. When `cwd` is a git worktree (Phase 3b-1), the orchestrator's base commit
+/// is shipped as a bundle and the remote agent's edits are fetched back into `cwd` — so a remote
+/// agent operates on the orchestrator's git state exactly like a local one. A non-repo `cwd` uses
+/// the Phase-3a plain transport (the node runs in its own checkout).
 pub struct RemoteAdapter {
     name: String,
     base_url: String,
@@ -42,8 +44,12 @@ impl Adapter for RemoteAdapter {
 
     fn run(&self, prompt: &str, cwd: &Path) -> Result<AgentOutput, AdapterError> {
         // Git-sync when cwd is a worktree: ship the base so the node edits the orchestrator's state
-        // and its edits flow back. Otherwise (no repo) fall back to the Phase-3a plain run.
-        let repo = self.repo_ctx(cwd);
+        // and its edits flow back. Otherwise (no repo) fall back to the Phase-3a plain run. A
+        // worktree that can't bundle ERRORS (sync-or-fail) rather than silently running remotely.
+        let repo = self.repo_ctx(cwd)?;
+        // The exact branch the node must return for git-sync — validated on the response so a
+        // buggy/hostile node can't smuggle a `../`-style ref into our fetch/merge.
+        let expected_branch = repo.as_ref().map(|c| format!("dispatch/{}", c.job_id));
         let req = RunRequest {
             agent: self.name.clone(),
             prompt: prompt.to_string(),
@@ -69,15 +75,37 @@ impl Adapter for RemoteAdapter {
                         rr.error.unwrap_or_default(),
                     ));
                 }
-                // Bring the remote agent's edits into the orchestrator's worktree.
-                if let Some(res) = rr.repo_result {
-                    use base64::Engine;
-                    let bundle = base64::engine::general_purpose::STANDARD
-                        .decode(&res.result_bundle_b64)
-                        .map_err(|e| AdapterError::Flaked(format!("decode result bundle: {e}")))?;
-                    let repo_root = git_common_repo(cwd);
-                    crate::repo_sync::apply_result(&repo_root, cwd, &bundle, &res.branch)
-                        .map_err(|e| AdapterError::Flaked(format!("apply remote edits: {e}")))?;
+                // Bring the remote agent's edits into the orchestrator's worktree — but only when we
+                // actually requested git-sync, and only the exact branch we asked for.
+                match (expected_branch, rr.repo_result) {
+                    (Some(exp), Some(res)) => {
+                        if res.branch != exp {
+                            return Err(AdapterError::Flaked(format!(
+                                "node returned unexpected branch '{}' (expected '{exp}')",
+                                res.branch
+                            )));
+                        }
+                        use base64::Engine;
+                        let bundle = base64::engine::general_purpose::STANDARD
+                            .decode(&res.result_bundle_b64)
+                            .map_err(|e| {
+                                AdapterError::Flaked(format!("decode result bundle: {e}"))
+                            })?;
+                        let repo_root = git_common_repo(cwd);
+                        crate::repo_sync::apply_result(&repo_root, cwd, &bundle, &res.branch)
+                            .map_err(|e| {
+                                AdapterError::Flaked(format!("apply remote edits: {e}"))
+                            })?;
+                    }
+                    // We requested sync but the node returned nothing → its edits are lost. Fail loud
+                    // rather than report a clean success with no work applied.
+                    (Some(exp), None) => {
+                        return Err(AdapterError::Flaked(format!(
+                            "git-sync requested ({exp}) but node returned no edits"
+                        )));
+                    }
+                    // We didn't request sync (non-repo cwd) → ignore any stray repo_result.
+                    (None, _) => {}
                 }
                 Ok(AgentOutput {
                     agent: rr.agent,
@@ -95,21 +123,23 @@ impl Adapter for RemoteAdapter {
 
 impl RemoteAdapter {
     /// Build the git-sync context for a run in `cwd`: a unique job id + a bundle of `cwd`'s HEAD.
-    /// Returns `None` when `cwd` isn't a git worktree or HEAD can't be bundled (e.g. no commits yet)
-    /// — the node then runs in its own checkout (Phase 3a behavior).
-    fn repo_ctx(&self, cwd: &Path) -> Option<crate::wire::RepoCtx> {
+    /// `Ok(None)` when `cwd` isn't a git worktree (→ Phase-3a plain run). `Err` when `cwd` IS a
+    /// worktree but its base can't be bundled — sync-or-fail: never silently run on the node's own
+    /// checkout (the edits would be lost while the run still looked successful).
+    fn repo_ctx(&self, cwd: &Path) -> Result<Option<crate::wire::RepoCtx>, AdapterError> {
         if !crate::repo_sync::is_git_worktree(cwd) {
-            return None;
+            return Ok(None);
         }
         let seq = JOB_SEQ.fetch_add(1, Ordering::Relaxed);
         let job_id = format!("{}-{seq}", self.name);
-        let bundle = crate::repo_sync::bundle_rev(cwd, "HEAD").ok()?;
+        let bundle = crate::repo_sync::bundle_rev(cwd, "HEAD")
+            .map_err(|e| AdapterError::Flaked(format!("bundle base for git-sync: {e}")))?;
         use base64::Engine;
-        Some(crate::wire::RepoCtx {
+        Ok(Some(crate::wire::RepoCtx {
             base_bundle_b64: base64::engine::general_purpose::STANDARD.encode(bundle),
             base_ref: "HEAD".into(),
             job_id,
-        })
+        }))
     }
 }
 
@@ -191,9 +221,11 @@ mod tests {
     }
 
     #[test]
-    fn remote_adapter_applies_returned_edits_into_the_worktree() {
-        use base64::Engine;
-        // a repo + worktree at base
+    fn remote_adapter_rejects_a_branch_it_did_not_request() {
+        // The happy apply path is covered end-to-end by tests/cross_machine.rs (a real node that
+        // echoes the requested job_id). Here we assert the SECURITY behavior: when cwd is a worktree
+        // (so we requested git-sync as `dispatch/<agent>-<seq>`), a node that returns ANY other
+        // branch — e.g. a `../`-style injection — is rejected, and the worktree is left untouched.
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path();
         for a in [
@@ -233,37 +265,28 @@ mod tests {
             .output()
             .unwrap();
 
-        // a "node" builds a dispatch branch off the same base that adds remote.txt, bundled
-        let node_tmp = tempfile::tempdir().unwrap();
-        let node = node_tmp.path().join("job");
-        let base = crate::repo_sync::bundle_rev(repo, "HEAD").unwrap();
-        crate::repo_sync::materialize_base(&node, &base, "HEAD", "dispatch/codex-0").unwrap();
-        std::fs::write(node.join("remote.txt"), "REMOTE").unwrap();
-        crate::repo_sync::commit_all(&node, "ensemble: codex-0").unwrap();
-        let result = crate::repo_sync::bundle_branch(&node, "dispatch/codex-0").unwrap();
-        let b64 = base64::engine::general_purpose::STANDARD.encode(&result);
-
+        // the node replies with a branch we never asked for (a path-escape attempt)
         let (url, h) = stub_server(crate::wire::RunResponse::ok_with_repo(
             "codex",
             "did it",
-            b64,
-            "dispatch/codex-0".into(),
+            "AAAA".into(),
+            "../../evil".into(),
         ));
         let a = RemoteAdapter::new("codex", &url);
-        let out = a.run("make remote.txt", &wt).unwrap();
-        assert_eq!(out.text, "did it");
-        assert_eq!(
-            std::fs::read_to_string(wt.join("remote.txt")).unwrap(),
-            "REMOTE"
+        let err = a.run("do work", &wt).unwrap_err();
+        assert!(
+            matches!(err, AdapterError::Flaked(ref m) if m.contains("unexpected branch")),
+            "a mismatched result branch must be rejected: {err:?}"
         );
         h.join().unwrap();
     }
 
     #[test]
     fn remote_adapter_flakes_on_unreachable_node() {
+        let tmp = tempfile::tempdir().unwrap(); // non-repo cwd → plain path, no base bundling
         let a = RemoteAdapter::new("codex", "http://127.0.0.1:1"); // nothing listening
         assert!(matches!(
-            a.run("x", std::path::Path::new(".")),
+            a.run("x", tmp.path()),
             Err(AdapterError::Flaked(_))
         ));
     }

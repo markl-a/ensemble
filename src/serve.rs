@@ -261,8 +261,10 @@ mod tests {
         let url = format!("http://{}", server.server_addr());
         let h = std::thread::spawn(move || serve_until_n(server, local, 1));
 
+        // a NON-repo cwd → the plain Phase-3a path (no git-sync), which is what this test exercises.
+        let cwd = tempfile::tempdir().unwrap();
         let a = crate::remote_adapter::RemoteAdapter::new("codex", &url);
-        let out = a.run("do it", std::path::Path::new(".")).unwrap();
+        let out = a.run("do it", cwd.path()).unwrap();
         assert_eq!(out.text, "REMOTE-OK");
         h.join().unwrap();
     }
