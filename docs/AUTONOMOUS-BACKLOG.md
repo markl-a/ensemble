@@ -15,7 +15,7 @@ queue a recurring cron drains — **one double-gated task per tick.**
 2. [ ] **Phase 3b-1 follow-ups (small; interleave when a tick is light):**
    - thin result bundles (`git bundle create - <branch> --not <base_sha>`; carry `base_sha` in `RepoCtx`).
    - true-merge apply (not `--ff-only`) for multi-round / dirty-worktree cases + a conflict policy.
-   - prune `refs/ensemble/*` after a successful ff-merge (the worktree branch already carries the commit).
+   - [x] prune `refs/ensemble/*` after a successful ff-merge ✅@ecaecc8 (best-effort `update-ref -d`; round-trip test asserts the namespace is empty).
    - node scratch GC: sweep stale `ensemble-node-*` temp dirs on `serve` startup.
 3. [ ] **Phase 3c — per-node status dashboard (各做各的):** read-only view of which node is running what
    (health + current job + last verdict), over the existing tailnet HTTP. Disposable cache, not a source of truth.
@@ -44,5 +44,6 @@ queue a recurring cron drains — **one double-gated task per tick.**
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-20 — 3b-1 follow-up: prune `refs/ensemble/*` after ff-merge @ecaecc8 (codex+claude LGTM). Remaining item-2 sub-tasks: thin bundles, true-merge, node scratch GC.
 - 2026-06-20 — Phase 3b-2 SQLite coordination ledger (slice-1) landed: durable resumable `ensemble dispatch` + `ledger` CLI; gate (codex) caught a stale-batch-clock re-run bug → fixed.
 - 2026-06-20 — Phase 3b-1 cross-machine git-sync landed @a775298 (this backlog created).
