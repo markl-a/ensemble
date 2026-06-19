@@ -28,11 +28,15 @@ pub struct RoleConfig {
 }
 
 /// Per-agent overrides. `backup` names the agent to substitute when this agent flakes and the
-/// gate's `on_flake = "substitute"`.
+/// gate's `on_flake = "substitute"`. `node` is the base URL of a remote `ensemble serve` host that
+/// runs this agent (e.g. "http://acer.tail.ts.net:7878") — when set, the orchestrator drives the
+/// agent on that node over HTTP instead of locally.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AgentConfig {
     #[serde(default)]
     pub backup: Option<String>,
+    #[serde(default)]
+    pub node: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -94,6 +98,11 @@ impl CrewConfig {
     /// The backup agent configured for `agent` (used when `on_flake = "substitute"`), if any.
     pub fn backup_for(&self, agent: &str) -> Option<&str> {
         self.agents.get(agent).and_then(|a| a.backup.as_deref())
+    }
+    /// The remote node base URL configured for `agent` (a `[agents.<n>] node = "http://..."`),
+    /// if any. When set, the orchestrator drives `agent` on that node via a `RemoteAdapter`.
+    pub fn node_for(&self, agent: &str) -> Option<&str> {
+        self.agents.get(agent).and_then(|a| a.node.as_deref())
     }
 }
 
@@ -180,6 +189,26 @@ mod tests {
             agent = "claude"
         "#;
         assert!(CrewConfig::from_toml(toml).is_err());
+    }
+
+    #[test]
+    fn parses_remote_agent_node_url() {
+        let toml = r#"
+            pipeline = ["implement","review"]
+            [gate]
+            min_approvals = 1
+            max_rounds = 1
+            on_flake = "exclude"
+            [roles.implement]
+            agent = "codex"
+            [roles.review]
+            agent = "claude"
+            [agents.claude]
+            node = "http://acer.tail.ts.net:7878"
+        "#;
+        let c = CrewConfig::from_toml(toml).unwrap();
+        assert_eq!(c.node_for("claude"), Some("http://acer.tail.ts.net:7878"));
+        assert_eq!(c.node_for("codex"), None);
     }
 
     #[test]

@@ -4,7 +4,8 @@ use std::path::Path;
 
 const USAGE: &str = "usage:\n  \
     ensemble run \"<task>\" [--crew <crew.toml>] [--repo <path>]\n  \
-    ensemble run-many \"<task1>\" \"<task2>\" ... [--crew <crew.toml>] [--repo <path>]";
+    ensemble run-many \"<task1>\" \"<task2>\" ... [--crew <crew.toml>] [--repo <path>]\n  \
+    ensemble serve [--bind <addr>]   (default 0.0.0.0:7878 — host this node's local agents)";
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -12,10 +13,23 @@ fn main() {
     match sub {
         Some("run") => run_single(&args),
         Some("run-many") => run_many(&args),
+        Some("serve") => serve_cmd(&args),
         _ => {
             eprintln!("{USAGE}");
             std::process::exit(2);
         }
+    }
+}
+
+/// `ensemble serve [--bind <addr>]` — run a tiny HTTP agent-host exposing this node's local CLIs
+/// (the 4-adapter registry) over `/health` + `/run`. A `RemoteAdapter` on another machine drives
+/// them. Plain HTTP over the tailnet (WireGuard encrypts). Blocks forever.
+fn serve_cmd(args: &[String]) {
+    let bind = parse_flag(args, "--bind").unwrap_or_else(|| "0.0.0.0:7878".to_string());
+    println!("ensemble serve on {bind}");
+    if let Err(e) = ensemble::serve(&bind, adapters()) {
+        eprintln!("serve: {e}");
+        std::process::exit(1);
     }
 }
 
@@ -30,7 +44,8 @@ fn run_single(args: &[String]) {
     };
     let crew = load_crew(args);
     let repo = parse_flag(args, "--repo").unwrap_or_else(|| ".".to_string());
-    let c = Conductor::new(crew, adapters());
+    let registry = adapters_for(&crew);
+    let c = Conductor::new(crew, registry);
     let out = c.run_in_repo(&task, Path::new(&repo));
     match out.decision {
         Decision::Landed => println!("LANDED after {} round(s)", out.rounds),
@@ -51,7 +66,8 @@ fn run_many(args: &[String]) {
     }
     let crew = load_crew(args);
     let repo = parse_flag(args, "--repo").unwrap_or_else(|| ".".to_string());
-    let c = Conductor::new(crew, adapters());
+    let registry = adapters_for(&crew);
+    let c = Conductor::new(crew, registry);
     let outs = c.run_many(&tasks, Path::new(&repo));
     let mut any_escalated = false;
     for (task, out) in tasks.iter().zip(outs.iter()) {
@@ -101,7 +117,8 @@ fn load_crew(args: &[String]) -> CrewConfig {
     }
 }
 
-/// Phase-1b adapter registry: all four real CLIs.
+/// Phase-1b adapter registry: all four real CLIs (local). Used by `ensemble serve` to host this
+/// node's agents.
 fn adapters() -> HashMap<String, Box<dyn Adapter>> {
     let mut adapters: HashMap<String, Box<dyn Adapter>> = HashMap::new();
     adapters.insert("codex".into(), Box::new(ExecAdapter::codex()));
@@ -109,6 +126,38 @@ fn adapters() -> HashMap<String, Box<dyn Adapter>> {
     adapters.insert("opencode".into(), Box::new(ExecAdapter::opencode()));
     adapters.insert("agy".into(), Box::new(AgyAdapter::new()));
     adapters
+}
+
+/// Phase-3a crew-aware registry: for each agent a role references, build a `RemoteAdapter` when
+/// the crew sets `[agents.<n>] node = "http://..."`, else the local `ExecAdapter`/`AgyAdapter`.
+/// Only the four known locals are wired locally; an unknown local agent is skipped (a missing
+/// adapter already makes the conductor escalate cleanly).
+fn adapters_for(crew: &CrewConfig) -> HashMap<String, Box<dyn Adapter>> {
+    let mut m: HashMap<String, Box<dyn Adapter>> = HashMap::new();
+    let agents: std::collections::HashSet<&str> =
+        crew.roles.values().map(|r| r.agent.as_str()).collect();
+    for agent in agents {
+        if let Some(node) = crew.node_for(agent) {
+            m.insert(agent.into(), Box::new(RemoteAdapter::new(agent, node)));
+        } else {
+            match agent {
+                "codex" => {
+                    m.insert(agent.into(), Box::new(ExecAdapter::codex()));
+                }
+                "claude" => {
+                    m.insert(agent.into(), Box::new(ExecAdapter::claude()));
+                }
+                "opencode" => {
+                    m.insert(agent.into(), Box::new(ExecAdapter::opencode()));
+                }
+                "agy" => {
+                    m.insert(agent.into(), Box::new(AgyAdapter::new()));
+                }
+                _ => { /* unknown local agent: skip — conductor escalates on missing adapter */ }
+            }
+        }
+    }
+    m
 }
 
 fn parse_flag(args: &[String], flag: &str) -> Option<String> {
