@@ -14,6 +14,9 @@ pub struct Worktree {
     pub path: PathBuf,
     pub branch: String,
     repo: PathBuf,
+    /// When false (default), the branch is deleted on Drop (the work is discarded). A LANDED run
+    /// flips this via `keep()` so the committed work survives after the worktree dir is removed.
+    keep_branch: bool,
 }
 
 impl Worktree {
@@ -44,7 +47,54 @@ impl Worktree {
             path,
             branch,
             repo: repo.to_path_buf(),
+            keep_branch: false,
         })
+    }
+
+    pub fn branch(&self) -> &str {
+        &self.branch
+    }
+
+    /// Keep the branch after this worktree is dropped (so a LANDED result persists).
+    pub fn keep(&mut self) {
+        self.keep_branch = true;
+    }
+
+    /// Stage all changes in the worktree and commit them onto its branch. Returns Ok(false) when
+    /// there was nothing to commit (the agents may have already committed, or produced nothing).
+    pub fn commit(&self, message: &str) -> std::io::Result<bool> {
+        let add = Command::new("git")
+            .arg("-C")
+            .arg(&self.path)
+            .args(["add", "-A"])
+            .output()?;
+        if !add.status.success() {
+            return Err(std::io::Error::other(format!(
+                "git add: {}",
+                String::from_utf8_lossy(&add.stderr)
+            )));
+        }
+        // nothing staged ⇒ nothing to commit (don't error)
+        let diff = Command::new("git")
+            .arg("-C")
+            .arg(&self.path)
+            .args(["diff", "--cached", "--quiet"])
+            .status()?;
+        if diff.success() {
+            return Ok(false); // exit 0 = no staged changes
+        }
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&self.path)
+            .args(["commit", "-m", message])
+            .output()?;
+        if !out.status.success() {
+            return Err(std::io::Error::other(format!(
+                "git commit: {}",
+                String::from_utf8_lossy(&out.stderr)
+            )));
+        }
+        Ok(true)
     }
 }
 
@@ -56,11 +106,13 @@ impl Drop for Worktree {
             .args(["worktree", "remove", "--force"])
             .arg(&self.path)
             .output();
-        let _ = Command::new("git")
-            .arg("-C")
-            .arg(&self.repo)
-            .args(["branch", "-D", &self.branch])
-            .output();
+        if !self.keep_branch {
+            let _ = Command::new("git")
+                .arg("-C")
+                .arg(&self.repo)
+                .args(["branch", "-D", &self.branch])
+                .output();
+        }
     }
 }
 
@@ -118,5 +170,73 @@ mod tests {
             assert!(path.exists(), "worktree dir should exist while alive");
         } // drop → removed
         assert!(!path.exists(), "worktree dir should be removed after drop");
+    }
+
+    #[test]
+    fn committed_and_kept_branch_survives_drop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        git(repo, &["init", "-q"]);
+        git(repo, &["config", "user.email", "t@t"]);
+        git(repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("f"), "x").unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-q", "-m", "init"]);
+
+        let branch;
+        {
+            let mut wt = Worktree::create(repo, "persist-me").unwrap();
+            branch = wt.branch().to_string();
+            std::fs::write(wt.path.join("new.txt"), "hello").unwrap();
+            let committed = wt.commit("ensemble: persist-me").unwrap();
+            assert!(committed, "a new untracked file should produce a commit");
+            wt.keep();
+        } // drop: worktree dir removed, branch KEPT
+
+        // the branch still exists and carries new.txt
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["branch", "--list", &branch])
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains(&branch),
+            "kept branch must survive drop"
+        );
+        let show = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["show", &format!("{branch}:new.txt")])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&show.stdout), "hello");
+    }
+
+    #[test]
+    fn unkept_branch_is_deleted_on_drop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        git(repo, &["init", "-q"]);
+        git(repo, &["config", "user.email", "t@t"]);
+        git(repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("f"), "x").unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-q", "-m", "init"]);
+        let branch;
+        {
+            let wt = Worktree::create(repo, "discard-me").unwrap();
+            branch = wt.branch().to_string();
+        } // drop: not kept → branch deleted
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["branch", "--list", &branch])
+            .output()
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&out.stdout).contains(&branch),
+            "unkept branch must be deleted"
+        );
     }
 }
