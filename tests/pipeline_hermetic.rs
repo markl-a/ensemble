@@ -156,3 +156,77 @@ fn run_in_repo_runs_inside_a_worktree_then_cleans_up() {
     // worktree cleaned up
     assert!(!repo.join(".ensemble/worktrees").join("add-a-fn").exists());
 }
+
+// reusable always-ok adapter
+struct AlwaysOk {
+    name: String,
+    reply: String,
+}
+impl Adapter for AlwaysOk {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn run(&self, _p: &str, _cwd: &std::path::Path) -> Result<AgentOutput, AdapterError> {
+        Ok(AgentOutput {
+            agent: self.name.clone(),
+            text: self.reply.clone(),
+        })
+    }
+}
+
+#[test]
+fn run_many_runs_tasks_in_parallel_each_in_its_own_worktree() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    for args in [
+        &["init", "-q"][..],
+        &["config", "user.email", "t@t"],
+        &["config", "user.name", "t"],
+    ] {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .unwrap();
+    }
+    std::fs::write(repo.join("f"), "x").unwrap();
+    for args in [&["add", "."][..], &["commit", "-q", "-m", "init"]] {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .unwrap();
+    }
+    // each adapter call returns Ok; reviewer always LGTM ⇒ all land
+    let mut map: std::collections::HashMap<String, Box<dyn Adapter>> =
+        std::collections::HashMap::new();
+    map.insert(
+        "codex".into(),
+        Box::new(AlwaysOk {
+            name: "codex".into(),
+            reply: "impl".into(),
+        }),
+    );
+    map.insert(
+        "claude".into(),
+        Box::new(AlwaysOk {
+            name: "claude".into(),
+            reply: "VERDICT: LGTM".into(),
+        }),
+    );
+    let c = Conductor::new(crew(), map);
+
+    let outs = c.run_many(
+        &["task one".into(), "task two".into(), "task three".into()],
+        repo,
+    );
+    assert_eq!(outs.len(), 3);
+    assert!(outs.iter().all(|o| matches!(o.decision, Decision::Landed)));
+    // all worktrees cleaned up
+    let live = std::fs::read_dir(repo.join(".ensemble/worktrees"))
+        .map(|d| d.count())
+        .unwrap_or(0);
+    assert_eq!(live, 0, "worktrees should be cleaned up");
+}

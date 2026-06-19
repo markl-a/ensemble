@@ -149,6 +149,28 @@ impl Conductor {
             }
         }
     }
+
+    /// Run many tasks in parallel — each in its own git worktree of `repo`. Results are returned in
+    /// the same order as `tasks`. (甲) For Phase 2 we spawn one thread per task (the task list is
+    /// operator-sized, not unbounded); a bounded pool is a later refinement.
+    pub fn run_many(&self, tasks: &[String], repo: &Path) -> Vec<RunOutcome> {
+        use std::sync::Mutex;
+        let results: Vec<Mutex<Option<RunOutcome>>> =
+            (0..tasks.len()).map(|_| Mutex::new(None)).collect();
+        std::thread::scope(|s| {
+            for (i, task) in tasks.iter().enumerate() {
+                let slot = &results[i];
+                s.spawn(move || {
+                    let out = self.run_in_repo(task, repo);
+                    *slot.lock().unwrap() = Some(out);
+                });
+            }
+        });
+        results
+            .into_iter()
+            .map(|m| m.into_inner().unwrap().unwrap())
+            .collect()
+    }
 }
 
 /// Build an agent's prompt: the task, the inter-agent blackboard summary, and any change-requests
