@@ -176,8 +176,8 @@ pub fn ensure_kept_worktree(repo: &Path, member: &str, task: &str) -> std::io::R
 /// The repo's common git directory (the shared `.git`), resolved to an absolute path. Every linked
 /// worktree of the same repo reports the SAME common dir, so it is a stable per-repo lock anchor
 /// regardless of which worktree `repo` points at. (`--git-common-dir` may be relative when `repo` is
-/// the main worktree — resolve it against `repo` then.)
-fn git_common_dir(repo: &Path) -> std::io::Result<PathBuf> {
+/// the main worktree — resolve it against `repo` then.) Reused by the MCP `ensemble_merge` lock.
+pub(crate) fn git_common_dir(repo: &Path) -> std::io::Result<PathBuf> {
     let out = Command::new("git")
         .arg("-C")
         .arg(repo)

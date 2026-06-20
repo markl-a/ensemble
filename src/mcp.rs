@@ -9,6 +9,7 @@
 //! `tools/call`) + the read-only tools `ensemble_mesh` and `ensemble_board_read`.
 
 use crate::board::FileBoard;
+use fs2::FileExt;
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -162,6 +163,19 @@ fn tools_list() -> Value {
             "name": "ensemble_claim",
             "description": "Atomically claim the oldest unclaimed task from the repo's shared crew work-queue, as THIS member, AT-MOST-ONCE (no two members ever get the same task). Returns {claimed:true, id, descr} or {claimed:false} when the queue is empty.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        },
+        {
+            "name": "ensemble_merge",
+            "description": "Land a member's branch (e.g. a kept worktree's `ensemble/<member>/<task>`) onto a target branch (default \"main\") in this repo — fast-forward or true-merge. On CONFLICT the merge is ABORTED and the worktree restored (NEVER auto-resolved); the conflicting paths are returned so you can escalate or resolve, then retry. Concurrent merges are serialized. Returns {landed:true, branch, into} or {landed:false, branch, into, conflict:[paths]}.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "branch": { "type": "string", "description": "the branch to land (e.g. ensemble/<member>/<task>)" },
+                    "into": { "type": "string", "description": "target branch to land onto (default \"main\")" }
+                },
+                "required": ["branch"],
+                "additionalProperties": false
+            }
         }
     ]})
 }
@@ -179,6 +193,7 @@ fn tools_call(params: &Value, ctx: &Ctx) -> Result<Value, RpcError> {
         "ensemble_worktree" => tool_worktree(&args, ctx)?,
         "ensemble_enqueue" => tool_enqueue(&args, ctx)?,
         "ensemble_claim" => tool_claim(&args, ctx)?,
+        "ensemble_merge" => tool_merge(&args, ctx)?,
         other => return Err(RpcError::invalid_params(format!("unknown tool: {other}"))),
     };
     // MCP tool result: a content list. We return one text item (JSON-or-text payload).
@@ -336,6 +351,97 @@ fn tool_claim(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
     Ok(match claimed {
         Some(t) => json!({ "claimed": true, "id": t.id, "descr": t.descr }),
         None => json!({ "claimed": false }),
+    }
+    .to_string())
+}
+
+/// Take an EXCLUSIVE per-repo lock file `name` under the repo's COMMON git dir (the same anchor as
+/// `ensure_kept_worktree`, so it serializes across threads AND processes / linked worktree roots). The
+/// returned `File` holds the lock until it is dropped — released on the handler's normal return OR a
+/// panic (fs2 is an OS advisory lock, freed on close).
+fn lock_repo(repo: &Path, name: &str) -> Result<std::fs::File, RpcError> {
+    let dir = crate::worktree::git_common_dir(repo)
+        .map_err(|e| RpcError::internal(format!("git common dir: {e}")))?;
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(dir.join(name))
+        .map_err(|e| RpcError::internal(format!("lock open: {e}")))?;
+    f.lock_exclusive()
+        .map_err(|e| RpcError::internal(format!("lock: {e}")))?;
+    Ok(f)
+}
+
+/// Land `branch` onto `into` (default "main") in this repo via the gated `repo_sync::merge_branch`
+/// (fast-forward or true-merge; on conflict it ABORTS + restores the worktree, NEVER auto-resolves).
+/// The merge mutates the MAIN worktree (checkout + merge), so concurrent merges (the MCP server runs
+/// requests on parallel threads) are serialized by a per-repo lock. `branch` is required; a present
+/// non-string/blank `into` is -32602; a git/preflight failure (e.g. a dirty worktree, mid-merge) is
+/// -32603. Returns `{landed:true, branch, into}` or, on conflict, `{landed:false, branch, into,
+/// conflict:[paths]}` — a conflict is a reported OUTCOME, not an error (escalate/resolve, then retry).
+fn tool_merge(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
+    if !args.is_object() {
+        return Err(RpcError::invalid_params("arguments must be an object with `branch`"));
+    }
+    let branch = required_str(args, "branch")?;
+    let into = match args.get("into") {
+        None | Some(Value::Null) => "main",
+        Some(v) => {
+            let s = v
+                .as_str()
+                .ok_or_else(|| RpcError::invalid_params("`into` must be a string"))?;
+            if s.trim().is_empty() {
+                return Err(RpcError::invalid_params("`into` must not be empty"));
+            }
+            s
+        }
+    };
+    // `branch`/`into` must each be a REAL local branch. A path-like or rev value (a filename, `HEAD`,
+    // a SHA, a tag, `a:b`) is dangerous: `merge_branch` runs `git checkout <into>`, and e.g.
+    // `into:"f"` where `f` is a tracked FILE makes git do a PATH checkout instead of switching
+    // branches — the merge then lands onto whatever branch the worktree was on while we report
+    // `into:"f"` (a silent wrong-ref land). Verifying `refs/heads/<name>` exists prevents that, and
+    // ALSO blocks flag-injection (the name is embedded inside a `refs/heads/...` arg, so it can never
+    // be read as a leading-`-` git option). This is best-effort (a branch could vanish before the
+    // locked merge, which then fails -32603) but never silently lands on the wrong ref.
+    for (field, name) in [("branch", branch), ("into", into)] {
+        // Reject a leading '-' FIRST: even a ref literally named e.g. `--detach` (creatable via git
+        // plumbing) would, if passed raw to `git checkout`/`git merge`, be parsed as a FLAG — the
+        // existence check alone doesn't stop that. A legitimate branch never starts with '-'.
+        if name.starts_with('-') {
+            return Err(RpcError::invalid_params(format!("`{field}` must not start with '-'")));
+        }
+        // Prove the SHORT name resolves — under git's OWN revision rules, the same ones `git
+        // checkout`/`git merge` use — to EXACTLY the local branch `refs/heads/<name>`. A mere
+        // `show-ref --verify refs/heads/<name>` only proves the ref EXISTS, not that the raw arg maps
+        // to it: `git merge HEAD` means the special HEAD (not a branch named HEAD), a same-named tag
+        // shadows the branch, a `refs/heads/main`-looking name resolves the real main, and a SHA / a
+        // tracked file resolve to a commit / a path. `rev-parse --symbolic-full-name <name>` returns
+        // the full ref the name actually resolves to; requiring it to equal `refs/heads/<name>` rejects
+        // all of those (and a path-y `into:"f"` that would otherwise cause a `git checkout` path swap).
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&ctx.repo)
+            .args(["rev-parse", "--quiet", "--verify", "--symbolic-full-name", name])
+            .output()
+            .map_err(|e| RpcError::internal(format!("git rev-parse: {e}")))?;
+        if !out.status.success()
+            || String::from_utf8_lossy(&out.stdout).trim() != format!("refs/heads/{name}")
+        {
+            return Err(RpcError::invalid_params(format!("`{field}` is not a local branch: {name}")));
+        }
+    }
+    let _lock = lock_repo(&ctx.repo, "ensemble-merge.lock")?; // serialize concurrent merges
+    let outcome = crate::repo_sync::merge_branch(&ctx.repo, branch, into)
+        .map_err(|e| RpcError::internal(format!("merge: {e}")))?;
+    Ok(match outcome {
+        crate::repo_sync::MergeOutcome::Landed => {
+            json!({ "landed": true, "branch": branch, "into": into })
+        }
+        crate::repo_sync::MergeOutcome::Conflict(paths) => {
+            json!({ "landed": false, "branch": branch, "into": into, "conflict": paths })
+        }
     }
     .to_string())
 }
@@ -702,6 +808,22 @@ mod tests {
         std::fs::write(dir.join("f"), "x").unwrap();
         run(&["add", "."]);
         run(&["commit", "-q", "-m", "init"]);
+        run(&["branch", "-M", "main"]); // deterministic default-branch name (merge tests target it)
+    }
+
+    /// Run a git command in `dir`, asserting success (for building merge-test fixtures).
+    fn git_ok(dir: &std::path::Path, args: &[&str]) {
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success(),
+            "git {args:?} failed"
+        );
     }
 
     #[test]
@@ -886,5 +1008,188 @@ mod tests {
         .unwrap();
         assert_eq!(r["error"]["code"], -32602);
         assert!(r["error"]["message"].as_str().unwrap().contains("descr"), "names the field, not 'unknown tool'");
+    }
+
+    #[test]
+    fn tools_list_includes_merge() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = call(r#"{"jsonrpc":"2.0","id":50,"method":"tools/list"}"#, &ctx(tmp.path())).unwrap();
+        let names: Vec<&str> = r["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"ensemble_merge"));
+    }
+
+    #[test]
+    fn merge_tool_lands_a_clean_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        git_repo(repo);
+        // a branch that only ADDS a file → merges cleanly into main
+        git_ok(repo, &["checkout", "-q", "-b", "ensemble/feat"]);
+        std::fs::write(repo.join("new.txt"), "hello").unwrap();
+        git_ok(repo, &["add", "."]);
+        git_ok(repo, &["commit", "-q", "-m", "feat"]);
+        git_ok(repo, &["checkout", "-q", "main"]);
+
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":51,"method":"tools/call","params":{"name":"ensemble_merge","arguments":{"branch":"ensemble/feat","into":"main"}}}"#,
+            &ctx(repo),
+        )
+        .unwrap();
+        let p: Value = serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(p["landed"], true);
+        assert_eq!(p["branch"], "ensemble/feat");
+        assert_eq!(p["into"], "main");
+        assert!(repo.join("new.txt").exists(), "the branch's file is now on main's worktree");
+    }
+
+    #[test]
+    fn merge_tool_reports_a_conflict_without_landing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        git_repo(repo); // main: f="x"
+        git_ok(repo, &["checkout", "-q", "-b", "ensemble/conf"]);
+        std::fs::write(repo.join("f"), "branch-edit").unwrap();
+        git_ok(repo, &["commit", "-q", "-am", "branch"]);
+        git_ok(repo, &["checkout", "-q", "main"]);
+        std::fs::write(repo.join("f"), "main-edit").unwrap();
+        git_ok(repo, &["commit", "-q", "-am", "main"]);
+
+        // `into` omitted → defaults to "main"
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":52,"method":"tools/call","params":{"name":"ensemble_merge","arguments":{"branch":"ensemble/conf"}}}"#,
+            &ctx(repo),
+        )
+        .unwrap();
+        let p: Value = serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(p["landed"], false, "a conflict is a reported outcome, not an error");
+        assert!(
+            p["conflict"].as_array().unwrap().iter().any(|v| v == "f"),
+            "names the conflicting path: {p}"
+        );
+        // the merge was aborted and main restored to its own edit (clean tree)
+        assert_eq!(std::fs::read_to_string(repo.join("f")).unwrap(), "main-edit");
+    }
+
+    #[test]
+    fn merge_requires_a_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        git_repo(tmp.path());
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":53,"method":"tools/call","params":{"name":"ensemble_merge","arguments":{}}}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
+        assert_eq!(r["error"]["code"], -32602);
+        assert!(r["error"]["message"].as_str().unwrap().contains("branch"), "names the field, not 'unknown tool'");
+    }
+
+    #[test]
+    fn merge_rejects_a_flag_like_branch_to_block_git_option_injection() {
+        let tmp = tempfile::tempdir().unwrap();
+        git_repo(tmp.path());
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":54,"method":"tools/call","params":{"name":"ensemble_merge","arguments":{"branch":"--upload-pack=x"}}}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
+        assert_eq!(r["error"]["code"], -32602);
+        assert!(r["error"]["message"].as_str().unwrap().contains("branch"), "rejects a '-'-leading ref: {}", r["error"]["message"]);
+    }
+
+    #[test]
+    fn merge_rejects_an_into_that_is_a_path_not_a_branch() {
+        // Regression (codex gate, slice 4a): `into:"f"` (a tracked FILE, not a branch) must be
+        // rejected — else `git checkout f` does a PATH checkout and the merge lands on the WRONG
+        // branch while reporting success.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        git_repo(repo); // "f" is a tracked file, NOT a branch
+        git_ok(repo, &["checkout", "-q", "-b", "ensemble/x"]);
+        std::fs::write(repo.join("n.txt"), "y").unwrap();
+        git_ok(repo, &["add", "."]);
+        git_ok(repo, &["commit", "-q", "-m", "x"]);
+        git_ok(repo, &["checkout", "-q", "main"]);
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":55,"method":"tools/call","params":{"name":"ensemble_merge","arguments":{"branch":"ensemble/x","into":"f"}}}"#,
+            &ctx(repo),
+        )
+        .unwrap();
+        assert_eq!(r["error"]["code"], -32602);
+        assert!(r["error"]["message"].as_str().unwrap().contains("not a local branch"));
+    }
+
+    #[test]
+    fn merge_rejects_into_head_pseudoref() {
+        // Regression (codex gate, slice 4a r3): `into:"HEAD"` must be rejected — `git rev-parse
+        // --symbolic-full-name HEAD` resolves to the CURRENT branch, not `refs/heads/HEAD`, so the raw
+        // name can't unambiguously mean a local branch (existence alone wouldn't catch this).
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        git_repo(repo);
+        git_ok(repo, &["checkout", "-q", "-b", "ensemble/x"]);
+        std::fs::write(repo.join("n.txt"), "y").unwrap();
+        git_ok(repo, &["add", "."]);
+        git_ok(repo, &["commit", "-q", "-m", "x"]);
+        git_ok(repo, &["checkout", "-q", "main"]);
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":57,"method":"tools/call","params":{"name":"ensemble_merge","arguments":{"branch":"ensemble/x","into":"HEAD"}}}"#,
+            &ctx(repo),
+        )
+        .unwrap();
+        assert_eq!(r["error"]["code"], -32602);
+        assert!(r["error"]["message"].as_str().unwrap().contains("not a local branch"));
+    }
+
+    #[test]
+    fn merge_rejects_a_nonexistent_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        git_repo(repo);
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":56,"method":"tools/call","params":{"name":"ensemble_merge","arguments":{"branch":"ensemble/ghost"}}}"#,
+            &ctx(repo),
+        )
+        .unwrap();
+        assert_eq!(r["error"]["code"], -32602);
+        assert!(r["error"]["message"].as_str().unwrap().contains("not a local branch"));
+    }
+
+    #[test]
+    fn concurrent_merges_serialize_and_both_land() {
+        // ensemble_merge mutates the MAIN worktree (checkout into + merge); the per-repo lock must
+        // serialize concurrent merges (the MCP server runs requests on parallel threads) so they don't
+        // race git's index. Two non-conflicting branches must BOTH land.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        git_repo(repo);
+        for (b, f) in [("ensemble/a", "a.txt"), ("ensemble/b", "b.txt")] {
+            git_ok(repo, &["checkout", "-q", "-b", b, "main"]);
+            std::fs::write(repo.join(f), "x").unwrap();
+            git_ok(repo, &["add", "."]);
+            git_ok(repo, &["commit", "-q", "-m", b]);
+        }
+        git_ok(repo, &["checkout", "-q", "main"]);
+        let c = ctx(repo);
+        std::thread::scope(|s| {
+            for b in ["ensemble/a", "ensemble/b"] {
+                let c = &c;
+                s.spawn(move || {
+                    let body = format!(
+                        r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"ensemble_merge","arguments":{{"branch":"{b}"}}}}}}"#
+                    );
+                    let _ = call(&body, c);
+                });
+            }
+        });
+        git_ok(repo, &["checkout", "-q", "main"]);
+        assert!(
+            repo.join("a.txt").exists() && repo.join("b.txt").exists(),
+            "both branches landed under the serializing lock (no clobber)"
+        );
     }
 }
