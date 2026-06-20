@@ -1,108 +1,83 @@
 //! A persistent, MULTI-PROCESS blackboard backing the `ensemble mcp` crew API. Live CLIs each run
-//! their own `ensemble mcp` subprocess (no shared memory), so they coordinate through shared state
-//! under the repo's `.ensemble/`. Reuses `blackboard::Message`. (The conductor's in-memory
-//! `Blackboard` stays for a single headless run; this is the cross-process board for live members.)
+//! their own `ensemble mcp` subprocess (no shared memory), so they coordinate through a shared
+//! append-only JSONL file under the repo's `.ensemble/` — `<repo>/.ensemble/board.jsonl`. Reuses
+//! `blackboard::Message`. (The conductor's in-memory `Blackboard` stays for a single headless run;
+//! this is the cross-process board for live members.)
 //!
-//! Storage = a DIRECTORY of one-file-per-message (`<repo>/.ensemble/board/<ts>-<pid>-<seq>.json`),
-//! NOT a shared append-only file. Each post is written to a temp file then ATOMICALLY renamed into
-//! place, so concurrent posts from different processes never contend, never interleave/corrupt, and
-//! a writer that crashes mid-post leaves only an ignored `.tmp` — never a torn message and never a
-//! lost one. No lock is needed (so a crash can't wedge the board), and readers only ever see fully
-//! written messages. Ordering is by filename (a fixed-width nanosecond timestamp, then pid+seq for
-//! ties): stable on one host except under sub-millisecond clock-backwards, which at worst re-shows a
-//! message once — benign for a coordination board.
+//! Posts are SERIALIZED by an OS advisory file lock (`fs2`), so the append order == the file order
+//! == the read order: a positional `read_since(n)` cursor is therefore LOSSLESS even under concurrent
+//! writers (no out-of-order publish). The lock is kernel-managed and auto-released when a holder dies,
+//! so a crash can't wedge the board; a crash mid-append leaves at most one torn trailing line, which
+//! readers skip (and the next post re-appends cleanly) — never corrupting earlier messages. Readers
+//! take a SHARED lock so they never observe a half-written line.
 
 use crate::blackboard::Message;
-use std::ffi::OsString;
-use std::io::Write;
+use fs2::FileExt;
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Per-process counter making each post's filename unique even within the same nanosecond.
-static SEQ: AtomicU64 = AtomicU64::new(0);
-
-/// Bound a posted body so the board stays readable (hygiene, not correctness — each message is its
-/// own atomically-renamed file, so size never affects durability). Excerpted to this many chars.
+/// Bound a posted body so the board stays readable (hygiene). Excerpted to this many chars.
 const MAX_BODY: usize = 1500;
 
 /// The shared on-disk board for one repo (session = repo).
 pub struct FileBoard {
-    dir: PathBuf,
+    path: PathBuf,
 }
 
 impl FileBoard {
-    /// The board for `repo` lives under `<repo>/.ensemble/board/`.
+    /// The board for `repo` lives at `<repo>/.ensemble/board.jsonl`.
     pub fn open(repo: &Path) -> Self {
         Self {
-            dir: repo.join(".ensemble").join("board"),
+            path: repo.join(".ensemble").join("board.jsonl"),
         }
     }
 
-    pub fn dir(&self) -> &Path {
-        &self.dir
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
-    /// Publish one message: write it to a temp file, then atomically rename it into the board dir so
-    /// readers see it whole or not at all. Concurrent-safe across processes with no lock.
+    /// Append one message under an EXCLUSIVE lock (so concurrent posts from any process serialize),
+    /// creating `.ensemble/` if needed. The lock makes the append totally ordered → the cursor is
+    /// lossless.
     pub fn post(&self, from: &str, kind: &str, body: &str) -> std::io::Result<()> {
-        std::fs::create_dir_all(&self.dir)?;
+        if let Some(dir) = self.path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
         let msg = Message {
             from: from.to_string(),
             kind: kind.to_string(),
             body: excerpt(body, MAX_BODY),
         };
-        let json = serde_json::to_string(&msg).map_err(std::io::Error::other)?;
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let pid = std::process::id();
-        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-        // fixed-width fields → lexicographic filename order == chronological order (ties by pid,seq)
-        let tmp = self.dir.join(format!(".tmp-{pid}-{seq}"));
-        let final_path = self
-            .dir
-            .join(format!("{nanos:030}-{pid:010}-{seq:020}.json"));
-        {
-            let mut f = std::fs::File::create(&tmp)?;
-            f.write_all(json.as_bytes())?;
-            f.flush()?;
-        }
-        std::fs::rename(&tmp, &final_path)?; // atomic publish
-        Ok(())
+        let mut line = serde_json::to_string(&msg).map_err(std::io::Error::other)?;
+        line.push('\n');
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
+        f.lock_exclusive()?; // blocks until no other writer holds it; released on unlock/close
+        let r = (&f).write_all(line.as_bytes());
+        let _ = f.unlock();
+        r
     }
 
-    /// All messages at index ≥ `n`, in board order. Every `.json` is a complete message (atomic
-    /// rename), so the cursor is stable; an unreadable/partial entry is skipped, never fatal. Empty
-    /// if the board dir doesn't exist yet.
+    /// All messages at index ≥ `n`, in post order, taken under a SHARED lock (so a concurrent append
+    /// can't expose a half-written line). A malformed/torn line is skipped, never fatal. Empty if the
+    /// board doesn't exist yet.
     pub fn read_since(&self, n: usize) -> std::io::Result<Vec<Message>> {
-        let rd = match std::fs::read_dir(&self.dir) {
-            Ok(rd) => rd,
+        let f = match std::fs::File::open(&self.path) {
+            Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(e),
         };
-        let mut names: Vec<OsString> = rd
-            .flatten()
-            .map(|e| e.file_name())
-            .filter(|name| {
-                Path::new(name)
-                    .extension()
-                    .map(|x| x == "json")
-                    .unwrap_or(false)
-            })
+        f.lock_shared()?;
+        let msgs: Vec<Message> = std::io::BufReader::new(&f)
+            .lines()
+            .map_while(Result::ok)
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str(&l).ok())
             .collect();
-        names.sort();
-        let msgs = names
-            .into_iter()
-            .skip(n)
-            .filter_map(|name| {
-                std::fs::read_to_string(self.dir.join(&name))
-                    .ok()
-                    .and_then(|s| serde_json::from_str::<Message>(&s).ok())
-            })
-            .collect();
-        Ok(msgs)
+        let _ = f.unlock();
+        Ok(msgs.into_iter().skip(n).collect())
     }
 
     /// Total message count — the cursor a poller advances to.
@@ -142,9 +117,7 @@ mod tests {
         assert_eq!(all[0].from, "codex");
         assert_eq!(all[0].kind, "result");
         assert_eq!(all[0].body, "implemented the parser");
-        // post order is preserved (timestamp+seq filename ordering)
-        assert_eq!(all[1].from, "claude");
-        // a cursor returns only newer messages
+        assert_eq!(all[1].from, "claude"); // append order preserved
         let newer = b.read_since(1).unwrap();
         assert_eq!(newer.len(), 1);
         assert_eq!(newer[0].from, "claude");
@@ -171,7 +144,6 @@ mod tests {
 
     #[test]
     fn separate_handles_share_the_same_repo_board() {
-        // two FileBoard handles on the same repo (≈ two processes) see each other's posts
         let tmp = tempfile::tempdir().unwrap();
         FileBoard::open(tmp.path()).post("a", "question", "anyone on auth?").unwrap();
         let seen = FileBoard::open(tmp.path()).read_since(0).unwrap();
@@ -180,9 +152,9 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_posts_all_survive_and_dont_corrupt() {
-        // many threads posting at once: every message lands (atomic rename, no interleave) and each
-        // is individually parseable.
+    fn concurrent_posts_serialize_with_no_loss_or_corruption() {
+        // many threads (each its own File/lock) posting at once: the exclusive lock serializes the
+        // appends, so all land and each line is individually parseable (no interleave).
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().to_path_buf();
         std::thread::scope(|s| {
