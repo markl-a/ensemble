@@ -24,6 +24,20 @@ pub enum AdapterError {
     NotInstalled(String),
 }
 
+impl AdapterError {
+    /// A DISTINCT, stable process exit code per failure kind, so a conductor's shell (e.g. Claude
+    /// Code's Bash tool) can branch on *why* a delegated `ensemble agent` run failed. 0=ok and
+    /// 7=no-adapter-resolved are owned by main.rs and never overlap these.
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            AdapterError::Flaked(_) => 3,
+            AdapterError::Empty => 4,
+            AdapterError::RateLimited => 5,
+            AdapterError::NotInstalled(_) => 6,
+        }
+    }
+}
+
 /// A vendor AI CLI driven headlessly. Implementors encode the per-vendor invocation contract.
 pub trait Adapter: Send + Sync {
     /// The agent's name as referenced in crew.toml (e.g. "codex", "claude").
@@ -96,5 +110,23 @@ mod tests {
             m.run("x", Path::new(".")),
             Err(AdapterError::Empty)
         ));
+    }
+
+    #[test]
+    fn exit_code_is_total_and_distinct() {
+        // Every AdapterError variant maps to a DISTINCT non-zero code so a conductor's shell can
+        // branch on the failure kind. (0 = ok is owned by main.rs, not an error variant.)
+        let codes = [
+            AdapterError::Flaked("x".into()).exit_code(),
+            AdapterError::Empty.exit_code(),
+            AdapterError::RateLimited.exit_code(),
+            AdapterError::NotInstalled("x".into()).exit_code(),
+        ];
+        assert_eq!(codes, [3, 4, 5, 6]);
+        let mut sorted = codes.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), codes.len(), "exit codes must be distinct");
+        assert!(codes.iter().all(|&c| c != 0 && c != 7));
     }
 }

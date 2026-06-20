@@ -19,6 +19,7 @@ const USAGE: &str = "usage:\n  \
     ensemble dispatch \"<task1>\" ... --ledger <db> [--crew <crew.toml>] [--repo <path>]   (durable, resumable)\n  \
     ensemble ledger <status|recover> --ledger <db> [--stale-secs N]\n  \
     ensemble nodes   (probe the tailnet for `serve` hosts and the agents they offer)\n  \
+    ensemble agent <name> \"<task>\" [--node auto|<host>] [--repo <path>] [--json]   (delegate ONE turn to one CLI)\n  \
     ensemble serve [--bind <addr>]   (default 0.0.0.0:7878 — host this node's local agents)\n\n\
     run/run-many/dispatch auto-discover tailnet `serve` hosts for any agent without an explicit\n  \
     [agents.<n>] node = ... in crew.toml; pass --no-discover to stay local.";
@@ -39,6 +40,7 @@ fn main() {
         Some("dispatch") => dispatch_cmd(&args),
         Some("ledger") => ledger_cmd(&args),
         Some("nodes") => nodes_cmd(&args),
+        Some("agent") => agent_cmd(&args),
         Some("serve") => serve_cmd(&args),
         _ => {
             eprintln!("{USAGE}");
@@ -229,7 +231,7 @@ fn ledger_cmd(args: &[String]) {
 
 /// Value-less switches: they take NO following value, so the arg parser must advance past them by
 /// one (not two) — otherwise `--no-discover "task"` would swallow the task as a phantom flag value.
-const BARE_SWITCHES: &[&str] = &["--no-discover"];
+const BARE_SWITCHES: &[&str] = &["--no-discover", "--json"];
 
 /// Collect positional task arguments: everything after the subcommand that is neither a `--flag`
 /// nor a value flag's value. Bare switches (e.g. `--no-discover`) consume no value.
@@ -321,6 +323,111 @@ fn adapters_for(crew: &CrewConfig, discover: bool) -> HashMap<String, Box<dyn Ad
     m
 }
 
+/// Resolve a SINGLE agent to an adapter (for `ensemble agent`). Priority: an explicit node (a full
+/// URL used verbatim, or a bare host → `http://<host>:7878`) > a discovered tailnet host (when
+/// `discover`) > the local CLI by name. `None` if nothing resolves.
+fn resolve_one(
+    name: &str,
+    explicit_node: Option<&str>,
+    discover: bool,
+) -> Option<Box<dyn Adapter>> {
+    if let Some(node) = explicit_node {
+        let url = if node.starts_with("http://") || node.starts_with("https://") {
+            node.to_string()
+        } else {
+            format!("http://{node}:7878")
+        };
+        return Some(Box::new(RemoteAdapter::new(name, &url)));
+    }
+    if discover {
+        if let Some(url) = ensemble::discovery::discover_agent_hosts(7878).get(name) {
+            return Some(Box::new(RemoteAdapter::new(name, url)));
+        }
+    }
+    match name {
+        "codex" => Some(Box::new(ExecAdapter::codex())),
+        "claude" => Some(Box::new(ExecAdapter::claude())),
+        "opencode" => Some(Box::new(ExecAdapter::opencode())),
+        "agy" => Some(Box::new(AgyAdapter::new())),
+        _ => None,
+    }
+}
+
+/// `ensemble agent <name> "<task>" [--node auto|<host>] [--repo <p>] [--json]` — delegate ONE turn
+/// to a single CLI (local or, via `--node`/discovery, on another machine; edits land in `--repo`
+/// via the existing git-sync). The primitive an interactive conductor (Claude Code/codex) shells
+/// out to. `--json` emits a one-line machine-readable result; the exit code encodes the failure kind.
+fn agent_cmd(args: &[String]) {
+    let pos = positional_tasks(args); // [name, task]
+    if pos.len() < 2 {
+        eprintln!("{USAGE}");
+        std::process::exit(2);
+    }
+    let name = pos[0].clone();
+    let task = pos[1].clone();
+    let repo = parse_flag(args, "--repo").unwrap_or_else(|| ".".to_string());
+    let json = has_flag(args, "--json");
+    let node = parse_flag(args, "--node");
+    // --node <host|url> = explicit; --node auto (or absent, unless --no-discover) = discover.
+    let explicit = node.as_deref().filter(|n| *n != "auto");
+    let discover = explicit.is_none() && !has_flag(args, "--no-discover");
+    let node_label = match &explicit {
+        Some(n) if n.starts_with("http") => (*n).to_string(),
+        Some(n) => format!("http://{n}:7878"),
+        None if discover => "auto".to_string(),
+        None => "local".to_string(),
+    };
+
+    let adapter = match resolve_one(&name, explicit, discover) {
+        Some(a) => a,
+        None => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({"agent": name, "node": node_label, "ok": false,
+                        "text": "", "branch": serde_json::Value::Null, "error_kind": "NoAdapter"})
+                );
+            } else {
+                eprintln!("no adapter resolved for agent '{name}'");
+            }
+            std::process::exit(7);
+        }
+    };
+
+    match adapter.run(&task, Path::new(&repo)) {
+        Ok(out) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({"agent": out.agent, "node": node_label, "ok": true,
+                        "text": out.text, "branch": serde_json::Value::Null,
+                        "error_kind": serde_json::Value::Null})
+                );
+            } else {
+                println!("{}", out.text);
+            }
+        }
+        Err(e) => {
+            let kind = match &e {
+                AdapterError::Flaked(_) => "Flaked",
+                AdapterError::Empty => "Empty",
+                AdapterError::RateLimited => "RateLimited",
+                AdapterError::NotInstalled(_) => "NotInstalled",
+            };
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({"agent": name, "node": node_label, "ok": false,
+                        "text": "", "branch": serde_json::Value::Null, "error_kind": kind})
+                );
+            } else {
+                eprintln!("agent '{name}' failed: {e}");
+            }
+            std::process::exit(e.exit_code());
+        }
+    }
+}
+
 /// `ensemble nodes` — probe the tailnet and print which agent each discovered `serve` node hosts.
 fn nodes_cmd(_args: &[String]) {
     let hosts = ensemble::discovery::discover_agent_hosts(7878);
@@ -394,5 +501,36 @@ mod tests {
             "--no-discover"
         ));
         assert!(!has_flag(&argv(&["ensemble", "run", "x"]), "--no-discover"));
+    }
+
+    #[test]
+    fn resolve_one_explicit_url_wins() {
+        // A full URL is used verbatim → RemoteAdapter named for the agent (.name() == agent name).
+        let a = resolve_one("codex", Some("http://1.2.3.4:9999"), false).unwrap();
+        assert_eq!(a.name(), "codex");
+    }
+
+    #[test]
+    fn resolve_one_bare_host_maps_to_default_port_url() {
+        // A bare host (no scheme) → http://<host>:7878 RemoteAdapter. Resolution must not fall
+        // through to a local adapter even though "claude" is a known local name.
+        let a = resolve_one("claude", Some("ayaneo"), false).unwrap();
+        assert_eq!(a.name(), "claude");
+    }
+
+    #[test]
+    fn resolve_one_unknown_name_no_node_no_discover_is_none() {
+        // No explicit node, discovery off, and an unknown local name → nothing resolves.
+        assert!(resolve_one("nope", None, false).is_none());
+    }
+
+    #[test]
+    fn resolve_one_known_local_name_without_discover_is_local_adapter() {
+        // Each known local name resolves to its local adapter when there's no node and no discovery.
+        for n in ["codex", "claude", "opencode", "agy"] {
+            let a = resolve_one(n, None, false)
+                .unwrap_or_else(|| panic!("{n} should resolve to a local adapter"));
+            assert_eq!(a.name(), n);
+        }
     }
 }
