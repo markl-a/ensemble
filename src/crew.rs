@@ -46,9 +46,6 @@ pub struct AgentConfig {
 pub struct TestConfig {
     /// shell command run in the worktree; exit 0 = GREEN.
     pub command: String,
-    /// optional hard timeout; a test command that exceeds it is treated as RED ("timed out").
-    #[serde(default)]
-    pub timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

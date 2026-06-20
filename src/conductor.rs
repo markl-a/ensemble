@@ -78,7 +78,7 @@ impl Conductor {
             // reviewers run. RED bounces the traceback back to the implementer (don't spend reviewer
             // turns on code that doesn't pass); a suite that never goes green can NEVER land.
             if let Some(test) = &self.crew.test {
-                let t = crate::test_gate::run_tests(cwd, &test.command, test.timeout_secs);
+                let t = crate::test_gate::run_tests(cwd, &test.command);
                 bb.post(
                     "test",
                     if t.passed {
