@@ -27,17 +27,14 @@ queue a recurring cron drains — **one double-gated task per tick.**
 6. [ ] **Per-agent CLI config (operator-requested):** `[agents.<n>] model = "..."` / `args = [...]` / `program = "..."`
    / `timeout = N` in crew.toml — today the CLI binary/flags/model are hardcoded in ExecAdapter/AgyAdapter.
    Let crew.toml pick each AI's model + extra flags.
-7. [partial/STASHED] **Discovery hardening (gate follow-ups):** `discover_nodes()` runs `tailscale status --json` with NO
-   subprocess timeout → a wedged tailscaled would hang every `run` (now default-on hot path) — add a bounded
-   wait. + discovery port is hardcoded 7878; add `[discovery] port` / `--disc-port`. + MagicDNS-off fallback to
-   `TailscaleIPs`. + parallelize peer probes.
-   ⚠️ A `git stash` (stash@{0}, "draft: discovery hardening (item 7) — codex-authored during gate exec, UNVETTED")
-   already implements bounded `capture_bounded(STATUS_TIMEOUT=4s)`, `Node::endpoint()` TailscaleIP fallback, and
-   parallel `probe_all`. It was written by a `codex exec` GATE run that mutated the tree (NOT my task, NOT gated as
-   such), so it was stashed out, NOT landed. Next tick: `git stash pop`, review it as its own change, double-gate,
-   then land (+ still add the `[discovery] port` knob, which the draft does not cover). **Lesson: `codex exec
-   --dangerously-bypass-approvals-and-sandbox` can EDIT files during a "review"; always `git status` after a gate
-   and never commit changes you didn't author. Pass review-only instructions + verify the tree.**
+7. [x] **Discovery hardening** ✅@79a69f5 (codex+claude LGTM): bounded `tailscale status --json`
+   (`capture_bounded`, 4s wall-clock + kill-on-timeout, exit-status-gated) so a wedged tailscaled never hangs the
+   default-on `run`/`agent`/`nodes` path; parallel `/health` probes (`probe_all` via `thread::scope`, spawn-order
+   join keeps first-host-wins) instead of a 2s×N serial wait; MagicDNS-off fallback to the stable `TailscaleIP`
+   (`Node::endpoint()`, IPv4 preferred, IPv6 bracketed) so a second VPN mangling DNS doesn't blind discovery. The
+   re-gate (codex from an EMPTY temp cwd — see lesson @f1811f8) caught 3 real bugs — IPv6 URL brackets, unbounded
+   reap, dropped exit-status gate — all fixed before landing. **Remaining (small):** `[discovery] port` /
+   `--disc-port` knob (port still hardcoded 7878).
 8. [x] **`ensemble doctor`** — env-readiness check ✅@fab543e (codex+claude LGTM). Pure core
    `check_tools`/`is_ready` (hermetic, 5 tests) + thin IO `run_checks` (PATH probe via `where`/`command -v`,
    git-repo via reused `repo_sync::is_git_worktree`); `ensemble doctor` prints a report, exits non-zero when
@@ -73,6 +70,7 @@ queue a recurring cron drains — **one double-gated task per tick.**
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-20 — **Discovery hardening LANDED @79a69f5** (codex+claude LGTM; item 7 done). The stashed item-7 draft (stash@{0}) was re-implemented as its OWN gated change on `feat/discovery-hardening`: `capture_bounded` runs `tailscale status --json` under a 4s wall-clock timeout (kill-on-timeout, exit-status-gated) so a wedged tailscaled can't hang the default-on hot path; `probe_all` probes peers' `/health` in parallel (`thread::scope`, first-host-wins preserved); `Node::endpoint()` falls back to the stable TailscaleIP (IPv4 preferred, IPv6 bracketed) when MagicDNS is off. **Re-gate done SAFELY** — codex ran from an EMPTY temp cwd (not the repo) after the f1811f8 gate-mutation incident, and it caught 3 real bugs (IPv6 URL brackets, unbounded `child.wait()` reap, dropped exit-status gate) which were fixed before landing. Work committed to a branch FIRST so a rogue gate couldn't lose it. ⚠️ A leftover `codex.exe` from the prior incident was still reverting the working tree mid-session → had to `taskkill /F`; `TaskStop` only killed the shell pipeline. Remaining: `[discovery] port` knob (item 7 sub-bullet).
 - 2026-06-20 — **node-scratch GC LANDED @59e1ea6** (codex+claude LGTM; item 2 sub-task done). `serve()` startup sweeps `ensemble-node-*` dirs orphaned by a crashed/killed serve, AFTER bind. Design driven entirely by the gate: started age-based → codex flagged it could delete a LIVE long-running job's dir → reworked to PID-LIVENESS; then 3 more codex rounds closed fail-safe holes (/proc-missing reads all-dead, kill-0 EPERM read as dead, /proc-self authoritative check, tasklist success-gated). Pure `orphan_scratch`/`scratch_pid` mock-tested. ⚠️ DISCOVERED: a `codex exec` gate run silently EDITED `src/discovery.rs` (233 lines of item-7 discovery hardening) during a "review" — caught via `git status` (claude's review also flagged the unrelated diff). Stashed it out (stash@{0}, UNVETTED) so only the gated GC change landed; item 7 now has a draft to review+gate next tick. Lesson recorded in item 7.
 - 2026-06-20 — **F3 `ensemble doctor` LANDED @fab543e** (codex+claude LGTM). Env-readiness check: reports the 4 AI CLIs + tailscale on PATH + is-cwd-a-git-repo, exits non-zero when the mesh can't run here (no git repo OR zero CLIs) so a script can gate (`ensemble doctor && ensemble run …`). Pure core `check_tools`/`is_ready` (5 hermetic tests) + thin IO `run_checks`. ⚠️ Did NOT reuse the stalled-batch `feat/doctor` branch — it predated F1 and its diff would have reverted F1's adapter.rs/main.rs work; salvaged just the scaffold + tests onto a fresh `feat/doctor-v2` off current main. Gate (claude) caught a DRY dup — a private `cwd_is_git_repo` duplicating the exported `repo_sync::is_git_worktree` → reuse the exported helper; codex LGTM'd round 1 (even built+ran it natively). Remaining open: F2 thin-bundles (item 9), agent streaming (item 10, pending operator design-approval), per-agent config (item 6), discovery hardening (item 7).
 - 2026-06-20 — **F1 `ensemble agent` delegate verb LANDED @dfd46aa** (codex+claude LGTM). The interactive-conductor primitive: `ensemble agent <name> "<task>" [--node auto|<host>] [--repo] [--json]` → delegate ONE turn to a CLI (local or remote via discovery, edits land in --repo via git-sync); resolve_one returns (adapter,label); distinct exit codes per failure kind. Gate caught: >2-positional drop, `--node --json` value-swallow, inconsistent JSON node label — all fixed.
