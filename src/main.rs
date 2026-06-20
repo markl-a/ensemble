@@ -22,6 +22,7 @@ const USAGE: &str = "usage:\n  \
     ensemble mesh   (this node's CLIs + which agents each tailnet peer hosts)\n  \
     ensemble doctor   (check this machine is ready: which AI CLIs + tailscale are on PATH, is-git-repo)\n  \
     ensemble agent <name> \"<task>\" [--node auto|<host>] [--repo <path>] [--json]   (delegate ONE turn to one CLI)\n  \
+    ensemble merge <branch> [--into <target>] [--repo <path>]   (land a kept branch; conflict → escalate, never auto-resolve)\n  \
     ensemble serve [--bind <addr>]   (default: this node's tailnet IP:7878; loopback if no tailnet)\n  \
     ensemble up [--bind <addr>]   (quick start: show the mesh, then serve in the foreground)\n\n\
     run/run-many/dispatch auto-discover tailnet `serve` hosts for any agent without an explicit\n  \
@@ -46,6 +47,7 @@ fn main() {
         Some("mesh") => mesh_cmd(&args),
         Some("doctor") => doctor_cmd(&args),
         Some("agent") => agent_cmd(&args),
+        Some("merge") => merge_cmd(&args),
         Some("serve") => serve_cmd(&args),
         Some("up") => up_cmd(&args),
         _ => {
@@ -499,6 +501,37 @@ fn agent_cmd(args: &[String]) {
                 eprintln!("agent '{name}' failed: {e}");
             }
             std::process::exit(e.exit_code());
+        }
+    }
+}
+
+/// `ensemble merge <branch> [--into <target>] [--repo <path>]` — land a kept branch onto `into`
+/// (default main): fast-forward or true-merge. A conflict is NEVER auto-resolved — it aborts (the
+/// worktree is restored) and the conflicting paths are reported for the operator (an AI-resolver
+/// round is the next slice). Exit 0 = landed, 3 = conflict (escalated), 1 = error.
+fn merge_cmd(args: &[String]) {
+    require_value_if_present(args, "--into");
+    require_value_if_present(args, "--repo");
+    let pos = positional_tasks(args);
+    if pos.len() != 1 {
+        eprintln!("ensemble merge needs exactly <branch>\n{USAGE}");
+        std::process::exit(2);
+    }
+    let branch = &pos[0];
+    let into = parse_flag(args, "--into").unwrap_or_else(|| "main".to_string());
+    let repo = parse_flag(args, "--repo").unwrap_or_else(|| ".".to_string());
+    match ensemble::merge_branch(Path::new(&repo), branch, &into) {
+        Ok(ensemble::MergeOutcome::Landed) => println!("merged {branch} into {into}"),
+        Ok(ensemble::MergeOutcome::Conflict(paths)) => {
+            eprintln!("merge conflict: {branch} into {into} NOT landed (escalated). Conflicting paths:");
+            for p in &paths {
+                eprintln!("  {p}");
+            }
+            std::process::exit(3);
+        }
+        Err(e) => {
+            eprintln!("merge failed: {e}");
+            std::process::exit(1);
         }
     }
 }

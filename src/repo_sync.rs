@@ -65,6 +65,49 @@ pub fn head_sha(repo: &Path) -> std::io::Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// Outcome of landing one branch onto another.
+#[derive(Debug, PartialEq, Eq)]
+pub enum MergeOutcome {
+    /// Merged cleanly (fast-forward or a true merge commit); `into` now contains `branch`.
+    Landed,
+    /// Conflicting paths; the merge was ABORTED and the worktree restored — NEVER auto-resolved.
+    Conflict(Vec<String>),
+}
+
+/// Land `branch` onto `into` in `repo`: fast-forward when possible, else a true merge. A conflict is
+/// never auto-resolved — the merge is aborted (tree restored) and the conflicting paths are returned
+/// so the caller can escalate (or spawn a resolver round).
+pub fn merge_branch(repo: &Path, branch: &str, into: &str) -> std::io::Result<MergeOutcome> {
+    // Put `into` at HEAD so the merge lands there.
+    git_run(repo, &["checkout", "--quiet", into])?;
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["merge", "--no-edit", branch])
+        .output()?;
+    if out.status.success() {
+        return Ok(MergeOutcome::Landed);
+    }
+    // A real conflict lists unmerged paths; a non-zero exit with none is some other failure.
+    let conflicts: Vec<String> = git_capture(repo, &["diff", "--name-only", "--diff-filter=U"])
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+    if conflicts.is_empty() {
+        return Err(std::io::Error::other(format!(
+            "git merge {branch} into {into}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        )));
+    }
+    // Never auto-resolve: abort (restoring the worktree) and report the paths for escalation.
+    let _ = git_run(repo, &["merge", "--abort"]);
+    Ok(MergeOutcome::Conflict(conflicts))
+}
+
 /// True if `dir` is inside a git work tree.
 pub fn is_git_worktree(dir: &Path) -> bool {
     Command::new("git")
@@ -331,6 +374,80 @@ mod tests {
         std::fs::write(repo.join("seed"), "base").unwrap();
         git(repo, &["add", "."]);
         git(repo, &["commit", "-q", "-m", "init"]);
+        git(repo, &["branch", "-M", "main"]);
+    }
+
+    #[test]
+    fn merge_fast_forward_lands() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+        git(repo, &["checkout", "-q", "-b", "ensemble/x"]);
+        std::fs::write(repo.join("a"), "A").unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-q", "-m", "add a"]);
+        git(repo, &["checkout", "-q", "main"]); // main is behind → fast-forward
+        assert_eq!(
+            merge_branch(repo, "ensemble/x", "main").unwrap(),
+            MergeOutcome::Landed
+        );
+        assert!(repo.join("a").exists(), "ff should bring `a` onto main");
+    }
+
+    #[test]
+    fn merge_diverged_non_conflicting_lands() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+        git(repo, &["checkout", "-q", "-b", "ensemble/y"]);
+        std::fs::write(repo.join("b"), "B").unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-q", "-m", "b"]);
+        git(repo, &["checkout", "-q", "main"]);
+        std::fs::write(repo.join("c"), "C").unwrap(); // main diverged on a different file
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-q", "-m", "c"]);
+        assert_eq!(
+            merge_branch(repo, "ensemble/y", "main").unwrap(),
+            MergeOutcome::Landed
+        );
+        assert!(repo.join("b").exists() && repo.join("c").exists(), "true merge keeps both");
+    }
+
+    #[test]
+    fn merge_conflict_aborts_and_lists_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+        std::fs::write(repo.join("foo"), "main-1\n").unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-q", "-m", "foo"]);
+        git(repo, &["checkout", "-q", "-b", "ensemble/z"]);
+        std::fs::write(repo.join("foo"), "branch-edit\n").unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-q", "-m", "edit foo on branch"]);
+        git(repo, &["checkout", "-q", "main"]);
+        std::fs::write(repo.join("foo"), "main-edit\n").unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-q", "-m", "edit foo on main"]);
+        match merge_branch(repo, "ensemble/z", "main").unwrap() {
+            MergeOutcome::Conflict(paths) => {
+                assert!(paths.contains(&"foo".to_string()), "conflicting paths: {paths:?}")
+            }
+            o => panic!("expected Conflict, got {o:?}"),
+        }
+        // aborted: tree restored to main's version, clean status
+        assert_eq!(
+            std::fs::read_to_string(repo.join("foo")).unwrap(),
+            "main-edit\n"
+        );
+        let st = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["status", "--porcelain"])
+            .output()
+            .unwrap();
+        assert!(st.stdout.is_empty(), "worktree must be clean after merge --abort");
     }
 
     #[test]
