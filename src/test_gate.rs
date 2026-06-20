@@ -5,6 +5,7 @@
 use std::io::Read;
 use std::path::Path;
 use std::process::{Child, Command};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -38,19 +39,24 @@ fn shell(command: &str) -> Command {
 /// forever (nobody reading) and be falsely timed out. Appending into a shared sink (rather than
 /// returning at EOF) lets the timeout path SNAPSHOT whatever was drained so far WITHOUT joining — so
 /// a grandchild that inherits the pipe and outlives the killed shell can't make the timeout hang.
+/// The `stop` flag (set on timeout) makes the thread quit appending after the next read, so a
+/// surviving grandchild that keeps spewing can't grow the (now-snapshotted) sink unbounded.
 fn spawn_drain<R: Read + Send + 'static>(
     pipe: Option<R>,
     sink: Arc<Mutex<Vec<u8>>>,
+    stop: Arc<AtomicBool>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         if let Some(mut p) = pipe {
             let mut chunk = [0u8; 8192];
-            while let Ok(n) = p.read(&mut chunk) {
-                if n == 0 {
-                    break;
-                }
-                if let Ok(mut g) = sink.lock() {
-                    g.extend_from_slice(&chunk[..n]);
+            while !stop.load(Ordering::Relaxed) {
+                match p.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if let Ok(mut g) = sink.lock() {
+                            g.extend_from_slice(&chunk[..n]);
+                        }
+                    }
                 }
             }
         }
@@ -97,8 +103,9 @@ pub fn run_tests(worktree: &Path, command: &str, timeout_secs: Option<u64>) -> T
     // Timeout path: drain stdout+stderr on threads into a shared sink so a verbose-but-passing suite
     // can't fill the pipe buffer, block, and be falsely timed out.
     let sink = Arc::new(Mutex::new(Vec::<u8>::new()));
-    let ho = spawn_drain(child.stdout.take(), sink.clone());
-    let he = spawn_drain(child.stderr.take(), sink.clone());
+    let stop = Arc::new(AtomicBool::new(false));
+    let ho = spawn_drain(child.stdout.take(), sink.clone(), stop.clone());
+    let he = spawn_drain(child.stderr.take(), sink.clone(), stop.clone());
     let deadline = Instant::now() + Duration::from_secs(secs);
     let mut exit_ok = None;
     let mut timed_out = false;
@@ -112,11 +119,15 @@ pub fn run_tests(worktree: &Path, command: &str, timeout_secs: Option<u64>) -> T
                 if Instant::now() >= deadline {
                     timed_out = true;
                     kill_command(&mut child);
+                    // tell the detached drain threads to stop appending: a surviving grandchild that
+                    // keeps writing must not grow the (about-to-be-snapshotted) sink unbounded.
+                    stop.store(true, Ordering::Relaxed);
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
             Err(e) => {
+                stop.store(true, Ordering::Relaxed);
                 kill_command(&mut child);
                 return red(format!("test command wait failed: {e}"));
             }
