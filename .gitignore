@@ -1,4 +1,6 @@
 /target
+# alternate CARGO_TARGET_DIR dirs used for review/gate builds — never commit build artifacts
+/target-*
 **/*.rs.bk
 Cargo.lock
 .DS_Store
