@@ -14,7 +14,7 @@ fn abort_flag() -> Arc<AtomicBool> {
 }
 
 const USAGE: &str = "usage:\n  \
-    ensemble run \"<task>\" [--crew <crew.toml>] [--repo <path>]\n  \
+    ensemble run \"<task>\" [--crew <crew.toml>] [--repo <path>] [--merge [--into <target>]]\n  \
     ensemble run-many \"<task1>\" \"<task2>\" ... [--crew <crew.toml>] [--repo <path>]\n  \
     ensemble dispatch \"<task1>\" ... --ledger <db> [--crew <crew.toml>] [--repo <path>]   (durable, resumable)\n  \
     ensemble ledger <status|recover> --ledger <db> [--stale-secs N]\n  \
@@ -22,7 +22,7 @@ const USAGE: &str = "usage:\n  \
     ensemble mesh   (this node's CLIs + which agents each tailnet peer hosts)\n  \
     ensemble doctor   (check this machine is ready: which AI CLIs + tailscale are on PATH, is-git-repo)\n  \
     ensemble agent <name> \"<task>\" [--node auto|<host>] [--repo <path>] [--json]   (delegate ONE turn to one CLI)\n  \
-    ensemble merge <branch> [--into <target>] [--repo <path>]   (land a kept branch; conflict → escalate, never auto-resolve)\n  \
+    ensemble merge <branch> [--into <target>] [--repo <path>] [--resolver <agent>]   (land a kept branch; conflict → escalate, or --resolver runs ONE AI round)\n  \
     ensemble serve [--bind <addr>]   (default: this node's tailnet IP:7878; loopback if no tailnet)\n  \
     ensemble up [--bind <addr>]   (quick start: show the mesh, then serve in the foreground)\n\n\
     run/run-many/dispatch auto-discover tailnet `serve` hosts for any agent without an explicit\n  \
@@ -134,7 +134,23 @@ fn run_single(args: &[String]) {
         Decision::Landed => {
             print!("LANDED after {} round(s)", out.rounds);
             if let Some(b) = &out.branch {
-                print!(" → work kept on branch `{b}` (merge it with: git merge {b})");
+                if has_flag(args, "--merge") {
+                    // Auto-land the kept branch onto --into (default main). A conflict here is a SOFT
+                    // failure — the work is safe on `b`; report it (the operator can resolve, or
+                    // `ensemble merge {b} --resolver <agent>`). The run itself still LANDED (exit 0).
+                    let into = parse_flag(args, "--into").unwrap_or_else(|| "main".to_string());
+                    match ensemble::merge_branch(Path::new(&repo), b, &into) {
+                        Ok(ensemble::MergeOutcome::Landed) => print!(" → merged into `{into}`"),
+                        Ok(ensemble::MergeOutcome::Conflict(paths)) => print!(
+                            " → kept on `{b}`; auto-merge into `{into}` CONFLICTED on [{}] — \
+                             resolve, or: ensemble merge {b} --resolver <agent>",
+                            paths.join(", ")
+                        ),
+                        Err(e) => print!(" → kept on `{b}`; auto-merge into `{into}` failed: {e}"),
+                    }
+                } else {
+                    print!(" → work kept on branch `{b}` (land it with: ensemble merge {b})");
+                }
             }
             println!();
         }
@@ -285,7 +301,26 @@ fn ledger_cmd(args: &[String]) {
 
 /// Value-less switches: they take NO following value, so the arg parser must advance past them by
 /// one (not two) — otherwise `--no-discover "task"` would swallow the task as a phantom flag value.
-const BARE_SWITCHES: &[&str] = &["--no-discover", "--json"];
+const BARE_SWITCHES: &[&str] = &["--no-discover", "--json", "--merge"];
+
+/// The prompt handed to a `--resolver <agent>` CLI on a merge conflict: it runs in the conflicted
+/// (mid-merge) worktree and must edit the listed files to a coherent merged result with NO markers,
+/// WITHOUT staging/committing (merge_with_resolver validates + completes the merge itself). Pure.
+fn build_resolver_prompt(branch: &str, into: &str, paths: &[String]) -> String {
+    let mut p = format!(
+        "You are resolving a git MERGE CONFLICT from merging branch `{branch}` into `{into}`.\n\
+         These files contain conflict markers (<<<<<<<, =======, >>>>>>>):\n"
+    );
+    for path in paths {
+        p.push_str(&format!("  - {path}\n"));
+    }
+    p.push_str(
+        "\nFor EACH file, edit it into a single correct, coherent merged result that preserves the \
+         intent of BOTH sides, and REMOVE every conflict marker. Do NOT run `git add`, `git commit`, \
+         or `git merge --continue` — just leave the resolved files on disk. Do not touch other files.\n",
+    );
+    p
+}
 
 /// Collect positional task arguments: everything after the subcommand that is neither a `--flag`
 /// nor a value flag's value. Bare switches (e.g. `--no-discover`) consume no value.
@@ -505,13 +540,16 @@ fn agent_cmd(args: &[String]) {
     }
 }
 
-/// `ensemble merge <branch> [--into <target>] [--repo <path>]` — land a kept branch onto `into`
-/// (default main): fast-forward or true-merge. A conflict is NEVER auto-resolved — it aborts (the
-/// worktree is restored) and the conflicting paths are reported for the operator (an AI-resolver
-/// round is the next slice). Exit 0 = landed, 3 = conflict (escalated), 1 = error.
+/// `ensemble merge <branch> [--into <target>] [--repo <path>] [--resolver <agent>]` — land a kept
+/// branch onto `into` (default main): fast-forward or true-merge. On conflict: without `--resolver`
+/// it aborts (worktree restored) and reports the conflicting paths; with `--resolver <agent>` it runs
+/// ONE AI-resolver round (that local CLI edits the conflicted files), completing the merge ONLY if
+/// provably clean, else restoring + escalating (decision 2). NEVER force/auto-accept. Exit 0 = landed,
+/// 3 = conflict (escalated), 1 = error.
 fn merge_cmd(args: &[String]) {
     require_value_if_present(args, "--into");
     require_value_if_present(args, "--repo");
+    require_value_if_present(args, "--resolver");
     let pos = positional_tasks(args);
     if pos.len() != 1 {
         eprintln!("ensemble merge needs exactly <branch>\n{USAGE}");
@@ -520,7 +558,30 @@ fn merge_cmd(args: &[String]) {
     let branch = &pos[0];
     let into = parse_flag(args, "--into").unwrap_or_else(|| "main".to_string());
     let repo = parse_flag(args, "--repo").unwrap_or_else(|| ".".to_string());
-    match ensemble::merge_branch(Path::new(&repo), branch, &into) {
+    let repo_path = Path::new(&repo);
+
+    let outcome = if let Some(agent) = parse_flag(args, "--resolver") {
+        // The resolver edits the conflicted files IN PLACE, so it must be a LOCAL adapter (no remote
+        // discovery). A bad agent name is a clean upfront error, not a conflict-escalation.
+        let (adapter, _label) = match resolve_one(&agent, None, false) {
+            Some(x) => x,
+            None => {
+                eprintln!("ensemble merge: no local adapter for resolver agent '{agent}'");
+                std::process::exit(2);
+            }
+        };
+        ensemble::merge_with_resolver(repo_path, branch, &into, |rp, paths| {
+            let prompt = build_resolver_prompt(branch, &into, paths);
+            adapter
+                .run(&prompt, rp)
+                .map(|_| ())
+                .map_err(|e| std::io::Error::other(e.to_string()))
+        })
+    } else {
+        ensemble::merge_branch(repo_path, branch, &into)
+    };
+
+    match outcome {
         Ok(ensemble::MergeOutcome::Landed) => println!("merged {branch} into {into}"),
         Ok(ensemble::MergeOutcome::Conflict(paths)) => {
             eprintln!("merge conflict: {branch} into {into} NOT landed (escalated). Conflicting paths:");
@@ -631,6 +692,44 @@ mod tests {
             "--no-discover"
         ));
         assert!(!has_flag(&argv(&["ensemble", "run", "x"]), "--no-discover"));
+    }
+
+    #[test]
+    fn merge_is_a_bare_switch_resolver_is_a_value_flag() {
+        // `--merge` consumes no value (the task after it survives); `--resolver <agent>` consumes its.
+        assert_eq!(
+            positional_tasks(&argv(&["ensemble", "run", "--merge", "do it"])),
+            vec!["do it".to_string()]
+        );
+        assert_eq!(
+            positional_tasks(&argv(&[
+                "ensemble", "merge", "--resolver", "claude", "ensemble/x",
+            ])),
+            vec!["ensemble/x".to_string()]
+        );
+        // combined: --merge (bare) before a value flag, task survives
+        assert_eq!(
+            positional_tasks(&argv(&[
+                "ensemble", "run", "--merge", "--into", "main", "the task",
+            ])),
+            vec!["the task".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolver_prompt_lists_paths_and_forbids_committing() {
+        let p = build_resolver_prompt(
+            "ensemble/z",
+            "main",
+            &["src/a.rs".to_string(), "src/b.rs".to_string()],
+        );
+        assert!(p.contains("ensemble/z") && p.contains("main"), "names the branch + target");
+        assert!(p.contains("src/a.rs") && p.contains("src/b.rs"), "lists every conflicting path");
+        assert!(p.contains("REMOVE every conflict marker"), "asks to remove markers");
+        assert!(
+            p.contains("Do NOT run `git add`") && p.contains("git commit"),
+            "forbids staging/committing (resolver is edit-only)"
+        );
     }
 
     #[test]
