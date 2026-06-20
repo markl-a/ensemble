@@ -74,37 +74,78 @@ pub enum MergeOutcome {
     Conflict(Vec<String>),
 }
 
+/// True if `repo` is mid-merge (MERGE_HEAD set). Worktree-safe (asks git, not a `.git/` path).
+fn is_mid_merge(repo: &Path) -> bool {
+    Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "--verify", "--quiet", "MERGE_HEAD"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 /// Land `branch` onto `into` in `repo`: fast-forward when possible, else a true merge. A conflict is
-/// never auto-resolved — the merge is aborted (tree restored) and the conflicting paths are returned
-/// so the caller can escalate (or spawn a resolver round).
+/// NEVER auto-resolved — the merge is aborted (worktree restored) and the conflicting paths returned
+/// so the caller can escalate (or spawn a resolver round). REFUSES a dirty or already-merging worktree
+/// up front, so a conflict-abort provably restores a PRISTINE state (this lands onto a real branch, so
+/// it is strict). On success it leaves `repo` checked out on `into`.
 pub fn merge_branch(repo: &Path, branch: &str, into: &str) -> std::io::Result<MergeOutcome> {
-    // Put `into` at HEAD so the merge lands there.
+    // Preflight: clean + not mid-merge, else a later `merge --abort` would restore to dirt, not clean.
+    if !git_capture(repo, &["status", "--porcelain"])?.stdout.is_empty() {
+        return Err(std::io::Error::other(
+            "worktree not clean — commit or stash before `ensemble merge`",
+        ));
+    }
+    if is_mid_merge(repo) {
+        return Err(std::io::Error::other(
+            "a merge is already in progress — finish it or `git merge --abort` first",
+        ));
+    }
+
     git_run(repo, &["checkout", "--quiet", into])?;
-    let out = Command::new("git")
+    let merge = Command::new("git")
         .arg("-C")
         .arg(repo)
         .args(["merge", "--no-edit", branch])
         .output()?;
-    if out.status.success() {
+    if merge.status.success() {
         return Ok(MergeOutcome::Landed);
     }
-    // A real conflict lists unmerged paths; a non-zero exit with none is some other failure.
-    let conflicts: Vec<String> = git_capture(repo, &["diff", "--name-only", "--diff-filter=U"])
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
+
+    // The merge failed. Capture conflicts BEFORE aborting (abort wipes the unmerged index); a failed
+    // capture is itself fatal. Then ALWAYS abort any in-progress merge, surfacing an abort failure —
+    // never return while `into` is left half-merged.
+    let conflicts: Vec<String> =
+        match git_capture(repo, &["diff", "--name-only", "--diff-filter=U"]) {
+            Ok(o) => String::from_utf8_lossy(&o.stdout)
                 .lines()
                 .map(String::from)
-                .collect()
-        })
-        .unwrap_or_default();
+                .collect(),
+            Err(e) => {
+                if is_mid_merge(repo) {
+                    let _ = git_run(repo, &["merge", "--abort"]);
+                }
+                return Err(std::io::Error::other(format!(
+                    "could not query conflicts after a failed merge: {e}"
+                )));
+            }
+        };
+    if is_mid_merge(repo) {
+        git_run(repo, &["merge", "--abort"]).map_err(|e| {
+            std::io::Error::other(format!(
+                "merge of {branch} into {into} failed AND `git merge --abort` failed — {into} may be \
+                 left mid-merge, resolve manually: {e}"
+            ))
+        })?;
+    }
     if conflicts.is_empty() {
+        // A non-conflict failure (e.g. unknown branch) — nothing was merged, nothing to abort.
         return Err(std::io::Error::other(format!(
             "git merge {branch} into {into}: {}",
-            String::from_utf8_lossy(&out.stderr)
+            String::from_utf8_lossy(&merge.stderr)
         )));
     }
-    // Never auto-resolve: abort (restoring the worktree) and report the paths for escalation.
-    let _ = git_run(repo, &["merge", "--abort"]);
     Ok(MergeOutcome::Conflict(conflicts))
 }
 
@@ -448,6 +489,23 @@ mod tests {
             .output()
             .unwrap();
         assert!(st.stdout.is_empty(), "worktree must be clean after merge --abort");
+    }
+
+    #[test]
+    fn merge_refuses_dirty_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+        git(repo, &["checkout", "-q", "-b", "ensemble/d"]);
+        std::fs::write(repo.join("x"), "X").unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-q", "-m", "x"]);
+        git(repo, &["checkout", "-q", "main"]);
+        std::fs::write(repo.join("seed"), "uncommitted-edit").unwrap(); // dirty worktree
+        assert!(
+            merge_branch(repo, "ensemble/d", "main").is_err(),
+            "must refuse to merge onto a dirty worktree"
+        );
     }
 
     #[test]
