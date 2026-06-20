@@ -37,7 +37,7 @@ pub use remote_adapter::RemoteAdapter;
 pub use repo_sync::{
     apply_result, bundle_rev, gc_node_scratch, head_sha, is_git_worktree, orphan_scratch,
 };
-pub use serve::serve;
+pub use serve::{resolve_bind, serve, BindAddr};
 pub use test_gate::{run_tests, TestOutcome};
 pub use verdict::{parse_verdict, Verdict};
 pub use wire::{RunRequest, RunResponse};

@@ -21,7 +21,7 @@ const USAGE: &str = "usage:\n  \
     ensemble nodes   (probe the tailnet for `serve` hosts and the agents they offer)\n  \
     ensemble doctor   (check this machine is ready: which AI CLIs + tailscale are on PATH, is-git-repo)\n  \
     ensemble agent <name> \"<task>\" [--node auto|<host>] [--repo <path>] [--json]   (delegate ONE turn to one CLI)\n  \
-    ensemble serve [--bind <addr>]   (default 0.0.0.0:7878 — host this node's local agents)\n\n\
+    ensemble serve [--bind <addr>]   (default: this node's tailnet IP:7878; loopback if no tailnet)\n\n\
     run/run-many/dispatch auto-discover tailnet `serve` hosts for any agent without an explicit\n  \
     [agents.<n>] node = ... in crew.toml; pass --no-discover to stay local.";
 
@@ -55,9 +55,19 @@ fn main() {
 /// (the 4-adapter registry) over `/health` + `/run`. A `RemoteAdapter` on another machine drives
 /// them. Plain HTTP over the tailnet (WireGuard encrypts). Blocks forever.
 fn serve_cmd(args: &[String]) {
-    let bind = parse_flag(args, "--bind").unwrap_or_else(|| "0.0.0.0:7878".to_string());
-    println!("ensemble serve on {bind}");
-    if let Err(e) = ensemble::serve(&bind, adapters()) {
+    let explicit = parse_flag(args, "--bind");
+    // Default to the tailnet interface so serve is reachable only over the tailnet, not the LAN.
+    let self_ips = ensemble::discovery::self_tailscale_ips();
+    let bind = ensemble::resolve_bind(&self_ips, explicit.as_deref(), 7878);
+    if let ensemble::BindAddr::Loopback(_) = bind {
+        eprintln!(
+            "ensemble: no tailnet IP found (is tailscale up?) — binding loopback only (local). \
+             Pass --bind <addr> to override."
+        );
+    }
+    let addr = bind.addr().to_string();
+    println!("ensemble serve on {addr}");
+    if let Err(e) = ensemble::serve(&addr, adapters()) {
         eprintln!("serve: {e}");
         std::process::exit(1);
     }
