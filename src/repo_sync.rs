@@ -161,7 +161,10 @@ fn is_text_content_conflict(repo: &Path, p: &str) -> bool {
 /// preserve stray tracked edits the way a bare `merge --abort` might. Then sweep the resolver's
 /// untracked scratch (safe: `preflight_clean` proved the tree had no untracked files before, and
 /// `git clean` skips gitignored paths like `.ensemble/`). BOTH steps surface failure so a caller
-/// never reports escalation over a half-restored `into`.
+/// never reports escalation over a half-restored `into`. (If `reset` succeeds but `clean` fails on a
+/// benign undeletable untracked file, the caller's escalation becomes an Err rather than a
+/// `Conflict` — the SAFE direction: tracked state + the merge ref are already restored, and we would
+/// rather over-report than silently leave resolver scratch behind.)
 fn restore_to(repo: &Path, pre_sha: &str) -> std::io::Result<()> {
     git_run(repo, &["reset", "--hard", "--quiet", pre_sha])?;
     git_run(repo, &["clean", "-fdq"])?;
