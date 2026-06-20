@@ -132,7 +132,9 @@ impl Adapter for ExecAdapter {
         // NOT let the child's pipe buffers fill while anyone blocks: a reply larger than the OS pipe
         // buffer (~64 KiB) would otherwise deadlock the child (blocked on write) against us. The
         // readers EOF only when the child AND every descendant holding the write end have exited or
-        // been killed (`kill_tree`), so joining them is bounded by the deadline.
+        // been killed (`kill_tree`). On the common path the join is deadline-bounded (Windows kills
+        // the whole tree; the direct child on Unix); a Unix-forked helper that inherits and keeps
+        // the pipe open could still delay the join — the residual limitation noted on `kill_tree`.
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         let out_reader = std::thread::spawn(move || {
