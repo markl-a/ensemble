@@ -47,8 +47,9 @@ impl Adapter for AgyAdapter {
             .map_err(|e| AdapterError::Flaked(format!("openpty: {e}")))?;
 
         let mut cmd = CommandBuilder::new("agy");
-        cmd.arg("-p");
-        cmd.arg(prompt);
+        for a in agy_argv(prompt, self.timeout) {
+            cmd.arg(a);
+        }
         cmd.cwd(cwd);
 
         let mut child = match pair.slave.spawn_command(cmd) {
@@ -111,6 +112,21 @@ impl Adapter for AgyAdapter {
     }
 }
 
+/// agy's argv (without the leading "agy"): `--print-timeout <N>s` BEFORE `-p <prompt>`. The
+/// `--print-timeout` is the proven agy_pty.py fix — without it, agy under a PTY can take the
+/// MCP-init / cold-auth code path and STALL forever (antigravity-cli#76), tripping our wall-clock
+/// kill as a flake. `N` = our timeout minus ~15s (min 10s) so agy self-terminates its model call
+/// just before we would hard-kill it.
+fn agy_argv(prompt: &str, timeout: Duration) -> Vec<String> {
+    let print_to = timeout.as_secs().saturating_sub(15).max(10);
+    vec![
+        "--print-timeout".into(),
+        format!("{print_to}s"),
+        "-p".into(),
+        prompt.into(),
+    ]
+}
+
 /// Strip ANSI/OSC escape sequences and bare control chars (keep \n \t) — agy's PTY output is a
 /// TUI stream. Hand-rolled (no regex dep).
 pub(crate) fn strip_ansi(s: &str) -> String {
@@ -167,5 +183,18 @@ mod tests {
     #[test]
     fn adapter_name_is_agy() {
         assert_eq!(AgyAdapter::new().name(), "agy");
+    }
+
+    #[test]
+    fn agy_argv_puts_print_timeout_before_p() {
+        // the agy_pty.py fix: --print-timeout <N>s must precede -p so agy self-terminates first.
+        let argv = agy_argv("say PONG", Duration::from_secs(180));
+        assert_eq!(argv, vec!["--print-timeout", "165s", "-p", "say PONG"]);
+    }
+
+    #[test]
+    fn agy_argv_clamps_short_timeout_to_10s() {
+        let argv = agy_argv("x", Duration::from_secs(5));
+        assert_eq!(argv[1], "10s");
     }
 }
