@@ -23,9 +23,32 @@ pub fn render_mesh(local_clis: &[String], hosts: &[(String, Vec<String>)]) -> St
     s
 }
 
+/// Render the `ensemble up` startup banner: where it's serving, then the indented mesh view, then a
+/// "serving… Ctrl-C to stop" footer. Pure (the command prints this, then blocks on `serve`).
+pub fn render_up(addr: &str, local_clis: &[String], hosts: &[(String, Vec<String>)]) -> String {
+    let mesh = render_mesh(local_clis, hosts);
+    let indented = mesh
+        .lines()
+        .map(|l| format!("  {l}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("ensemble up — serving on {addr}\n{indented}\n(serving… Ctrl-C to stop)")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn render_up_shows_banner_indented_mesh_and_footer() {
+        let out = render_up("100.87.70.65:7878", &["codex".to_string()], &[]);
+        assert!(
+            out.contains("ensemble up — serving on 100.87.70.65:7878"),
+            "got:\n{out}"
+        );
+        assert!(out.contains("\n  local CLIs : codex"), "indented; got:\n{out}");
+        assert!(out.contains("(serving"), "footer; got:\n{out}");
+    }
 
     #[test]
     fn renders_local_and_tailnet() {

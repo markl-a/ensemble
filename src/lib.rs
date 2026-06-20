@@ -34,7 +34,7 @@ pub use doctor::{check_tools, is_ready, present_clis, run_checks, ToolStatus};
 pub use exec_adapter::ExecAdapter;
 pub use gate::{decide, GateDecision, RoleVerdict};
 pub use ledger::{Counts, Ledger, LedgerError, Task, TaskState};
-pub use mesh::render_mesh;
+pub use mesh::{render_mesh, render_up};
 pub use remote_adapter::RemoteAdapter;
 pub use repo_sync::{
     apply_result, bundle_rev, gc_node_scratch, head_sha, is_git_worktree, orphan_scratch,

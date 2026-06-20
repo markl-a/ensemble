@@ -22,7 +22,8 @@ const USAGE: &str = "usage:\n  \
     ensemble mesh   (this node's CLIs + which agents each tailnet peer hosts)\n  \
     ensemble doctor   (check this machine is ready: which AI CLIs + tailscale are on PATH, is-git-repo)\n  \
     ensemble agent <name> \"<task>\" [--node auto|<host>] [--repo <path>] [--json]   (delegate ONE turn to one CLI)\n  \
-    ensemble serve [--bind <addr>]   (default: this node's tailnet IP:7878; loopback if no tailnet)\n\n\
+    ensemble serve [--bind <addr>]   (default: this node's tailnet IP:7878; loopback if no tailnet)\n  \
+    ensemble up [--bind <addr>]   (quick start: show the mesh, then serve in the foreground)\n\n\
     run/run-many/dispatch auto-discover tailnet `serve` hosts for any agent without an explicit\n  \
     [agents.<n>] node = ... in crew.toml; pass --no-discover to stay local.";
 
@@ -46,6 +47,7 @@ fn main() {
         Some("doctor") => doctor_cmd(&args),
         Some("agent") => agent_cmd(&args),
         Some("serve") => serve_cmd(&args),
+        Some("up") => up_cmd(&args),
         _ => {
             eprintln!("{USAGE}");
             std::process::exit(2);
@@ -81,6 +83,34 @@ fn mesh_cmd(_args: &[String]) {
     let local = ensemble::present_clis();
     let hosts = ensemble::discover_mesh(7878);
     println!("{}", ensemble::render_mesh(&local, &hosts));
+}
+
+/// `ensemble up [--bind <addr>]` — the quick-start: resolve the bind (tailnet-only by default),
+/// print the mesh (local CLIs + tailnet hosts), then serve in the FOREGROUND until Ctrl-C. The
+/// permanent/boot-started path is `serve --install-service` (tick C), not `up`.
+fn up_cmd(args: &[String]) {
+    let explicit = parse_flag(args, "--bind");
+    let self_ips = ensemble::discovery::self_tailscale_ips();
+    let bind = ensemble::resolve_bind(&self_ips, explicit.as_deref(), 7878);
+    if let ensemble::BindAddr::Loopback(_) = bind {
+        eprintln!(
+            "ensemble: no tailnet IP found (is tailscale up?) — serving loopback only (local). \
+             Pass --bind <addr> to override."
+        );
+    }
+    let addr = bind.addr().to_string();
+    let local = ensemble::present_clis();
+    let hosts = ensemble::discover_mesh(7878);
+    println!("{}", ensemble::render_up(&addr, &local, &hosts));
+    // Belt-and-suspenders flush before the long blocking serve. Rust's stdout is line-buffered
+    // (LineWriter), so println!'s trailing newline already flushed the banner — this just makes the
+    // ordering explicit at a blocking boundary.
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    if let Err(e) = ensemble::serve(&addr, adapters()) {
+        eprintln!("serve: {e}");
+        std::process::exit(1);
+    }
 }
 
 /// `ensemble run "<task>" [--crew <p>] [--repo <p>]` — a single task, isolated in its own worktree.
