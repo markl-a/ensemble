@@ -2,8 +2,8 @@ use crate::adapter::{Adapter, AdapterError, AgentOutput};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::io::Read;
 use std::path::Path;
-use std::sync::mpsc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// Drives Google Antigravity (`agy`) headlessly UNDER A REAL PTY. `agy -p` emits zero bytes to a
 /// non-TTY stdout (upstream antigravity-cli#76), so a plain exec yields Empty; a PTY makes the
@@ -72,43 +72,58 @@ impl Adapter for AgyAdapter {
             .try_clone_reader()
             .map_err(|e| AdapterError::Flaked(format!("clone reader: {e}")))?;
 
-        let (tx, rx) = mpsc::channel();
+        // Drain the PTY into a SHARED buffer on a detached thread.
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let buf_w = Arc::clone(&buf);
         std::thread::spawn(move || {
-            let mut buf = Vec::new();
             let mut chunk = [0u8; 8192];
             loop {
                 match reader.read(&mut chunk) {
-                    Ok(0) => break, // EOF: child exited
-                    Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                    Ok(0) => break,
+                    Ok(n) => buf_w.lock().unwrap().extend_from_slice(&chunk[..n]),
                     Err(_) => break,
                 }
             }
-            let _ = tx.send(buf);
         });
 
-        let raw = match rx.recv_timeout(self.timeout) {
-            Ok(buf) => buf,
-            Err(_) => {
-                let _ = child.kill();
-                return Err(AdapterError::Flaked(format!(
-                    "agy timed out after {:?}",
-                    self.timeout
-                )));
+        // Wait on the CHILD's exit, NOT the master's EOF: portable-pty's Windows ConPTY master can
+        // stay open after agy exits, so an EOF-only wait hung to the full timeout (and discarded the
+        // answer agy had already produced). Mirror agy_pty.py: poll is-alive, salvage the buffer.
+        let deadline = Instant::now() + self.timeout;
+        let mut timed_out = false;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break, // agy exited cleanly
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                _ => {
+                    let _ = child.kill();
+                    timed_out = true;
+                    break;
+                }
             }
-        };
-        let _ = child.wait();
+        }
+        // Let the reader flush the last bytes the child wrote before exiting, then release the master.
+        std::thread::sleep(Duration::from_millis(150));
         drop(pair.master);
 
-        let text = strip_ansi(&String::from_utf8_lossy(&raw))
-            .trim()
-            .to_string();
-        if text.is_empty() {
-            return Err(AdapterError::Empty);
+        let raw = buf.lock().unwrap().clone();
+        let text = strip_ansi(&String::from_utf8_lossy(&raw)).trim().to_string();
+        if !text.is_empty() {
+            // We got an answer — return it even if we had to kill a lingering agy (salvage).
+            return Ok(AgentOutput {
+                agent: "agy".into(),
+                text,
+            });
         }
-        Ok(AgentOutput {
-            agent: "agy".into(),
-            text,
-        })
+        if timed_out {
+            return Err(AdapterError::Flaked(format!(
+                "agy timed out after {:?} with no output",
+                self.timeout
+            )));
+        }
+        Err(AdapterError::Empty)
     }
 }
 
