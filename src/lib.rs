@@ -49,4 +49,4 @@ pub use serve::{resolve_bind, serve, BindAddr};
 pub use test_gate::{run_tests, TestOutcome};
 pub use verdict::{parse_verdict, Verdict};
 pub use wire::{RunRequest, RunResponse};
-pub use worktree::Worktree;
+pub use worktree::{ensure_kept_worktree, KeptWorktree, Worktree};

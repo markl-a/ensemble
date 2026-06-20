@@ -134,6 +134,17 @@ fn tools_list() -> Value {
                 "required": ["kind", "body"],
                 "additionalProperties": false
             }
+        },
+        {
+            "name": "ensemble_worktree",
+            "description": "Create (or idempotently re-attach to) THIS member's persistent git worktree for an isolated task branch in this repo. Returns {path, branch, slug}. The worktree persists on disk across calls and `ensemble mcp` restarts; edit + commit there, then land it with `ensemble merge`. Idempotent per (member, task).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task": { "type": "string", "description": "short label for the workspace/branch (default \"work\")" }
+                },
+                "additionalProperties": false
+            }
         }
     ]})
 }
@@ -148,6 +159,7 @@ fn tools_call(params: &Value, ctx: &Ctx) -> Result<Value, RpcError> {
         "ensemble_mesh" => tool_mesh(),
         "ensemble_board_read" => tool_board_read(&args, ctx)?,
         "ensemble_board_post" => tool_board_post(&args, ctx)?,
+        "ensemble_worktree" => tool_worktree(&args, ctx)?,
         other => return Err(RpcError::invalid_params(format!("unknown tool: {other}"))),
     };
     // MCP tool result: a content list. We return one text item (JSON-or-text payload).
@@ -225,6 +237,32 @@ fn required_str<'a>(args: &'a Value, field: &str) -> Result<&'a str, RpcError> {
             }
         }
     }
+}
+
+/// Create (or idempotently re-attach to) THIS member's persistent worktree for an OPTIONAL `task`
+/// label (default `"work"`), keyed by `(ctx.name, task)` so it survives across calls and `ensemble
+/// mcp` restarts (see `worktree::ensure_kept_worktree`). An ABSENT or `null` `task` defaults to
+/// `"work"` (matching `ensemble_board_read`'s optional `since`); a present non-string OR blank `task`
+/// is a client error (-32602); a git/worktree failure is internal (-32603). Returns `{path, branch, slug}`.
+fn tool_worktree(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
+    if !(args.is_null() || args.is_object()) {
+        return Err(RpcError::invalid_params("arguments must be an object"));
+    }
+    let task = match args.get("task") {
+        None | Some(Value::Null) => "work",
+        Some(v) => {
+            let s = v
+                .as_str()
+                .ok_or_else(|| RpcError::invalid_params("`task` must be a string"))?;
+            if s.trim().is_empty() {
+                return Err(RpcError::invalid_params("`task` must not be empty"));
+            }
+            s
+        }
+    };
+    let wt = crate::worktree::ensure_kept_worktree(&ctx.repo, &ctx.name, task)
+        .map_err(|e| RpcError::internal(format!("worktree: {e}")))?;
+    Ok(json!({ "path": wt.path.to_string_lossy(), "branch": wt.branch, "slug": wt.slug }).to_string())
 }
 
 /// Turn one raw stdin line into the JSON-RPC response line to write, or `None` for a NOTIFICATION
@@ -566,5 +604,120 @@ mod tests {
             FileBoard::open(tmp.path()).is_empty().unwrap(),
             "validation happens BEFORE the post, so nothing is written"
         );
+    }
+
+    /// Initialize a real git repo with one commit (the worktree tool needs a HEAD to branch from).
+    fn git_repo(dir: &std::path::Path) {
+        let run = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(dir)
+                    .args(args)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success(),
+                "git {args:?} failed"
+            );
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "t@t"]);
+        run(&["config", "user.name", "t"]);
+        std::fs::write(dir.join("f"), "x").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "init"]);
+    }
+
+    #[test]
+    fn tools_list_includes_worktree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = call(r#"{"jsonrpc":"2.0","id":30,"method":"tools/list"}"#, &ctx(tmp.path())).unwrap();
+        let names: Vec<&str> = r["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"ensemble_worktree"));
+    }
+
+    #[test]
+    fn worktree_tool_creates_a_persistent_worktree_for_this_member() {
+        let tmp = tempfile::tempdir().unwrap();
+        git_repo(tmp.path());
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":31,"method":"tools/call","params":{"name":"ensemble_worktree","arguments":{"task":"feature-x"}}}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
+        let payload: Value =
+            serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(payload["branch"], "ensemble/tester/feature-x", "branch carries the member");
+        assert_eq!(payload["slug"], "tester/feature-x");
+        let path = payload["path"].as_str().unwrap();
+        assert!(std::path::Path::new(path).exists(), "the worktree dir persists (not RAII-removed)");
+    }
+
+    #[test]
+    fn worktree_tool_is_idempotent_per_member_and_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        git_repo(tmp.path());
+        let c = ctx(tmp.path());
+        let one = call(
+            r#"{"jsonrpc":"2.0","id":32,"method":"tools/call","params":{"name":"ensemble_worktree","arguments":{"task":"x"}}}"#,
+            &c,
+        )
+        .unwrap();
+        let two = call(
+            r#"{"jsonrpc":"2.0","id":33,"method":"tools/call","params":{"name":"ensemble_worktree","arguments":{"task":"x"}}}"#,
+            &c,
+        )
+        .unwrap();
+        let p1: Value = serde_json::from_str(one["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        let p2: Value = serde_json::from_str(two["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(p1["path"], p2["path"], "same member+task re-attaches to the same worktree");
+    }
+
+    #[test]
+    fn worktree_tool_defaults_task_when_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        git_repo(tmp.path());
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":34,"method":"tools/call","params":{"name":"ensemble_worktree"}}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
+        let payload: Value =
+            serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(payload["slug"], "tester/work", "an absent task defaults to 'work'");
+    }
+
+    #[test]
+    fn worktree_tool_treats_null_task_as_absent() {
+        // consistent with ensemble_board_read's optional `since` (null == not provided -> default).
+        let tmp = tempfile::tempdir().unwrap();
+        git_repo(tmp.path());
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":36,"method":"tools/call","params":{"name":"ensemble_worktree","arguments":{"task":null}}}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
+        let payload: Value =
+            serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(payload["slug"], "tester/work", "a null task defaults to 'work'");
+    }
+
+    #[test]
+    fn worktree_tool_rejects_a_blank_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        git_repo(tmp.path());
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":35,"method":"tools/call","params":{"name":"ensemble_worktree","arguments":{"task":"  "}}}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
+        assert_eq!(r["error"]["code"], -32602);
+        assert!(r["error"]["message"].as_str().unwrap().contains("task"));
     }
 }
