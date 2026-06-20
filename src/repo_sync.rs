@@ -101,46 +101,45 @@ fn preflight_clean(repo: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// The paths git still reports as UNMERGED (conflicted index entries) in `repo`.
-fn unmerged_paths(repo: &Path) -> Vec<String> {
-    git_capture(repo, &["diff", "--name-only", "--diff-filter=U"])
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .map(String::from)
-                .collect()
+/// The paths git still reports as UNMERGED (conflicted index entries) in `repo`. A query failure is
+/// surfaced (not swallowed) so a caller never treats "couldn't ask git" as "nothing unmerged".
+fn unmerged_paths(repo: &Path) -> std::io::Result<Vec<String>> {
+    let o = git_capture(repo, &["diff", "--name-only", "--diff-filter=U"])?;
+    Ok(String::from_utf8_lossy(&o.stdout)
+        .lines()
+        .map(String::from)
+        .collect())
+}
+
+/// Does the working-tree file at `p` still contain a git conflict marker? `<<<<<<<` / `>>>>>>>`
+/// (7 chars) are git's own boundary markers and effectively never start a real source line, so their
+/// presence is positive proof a content resolution is incomplete. BYTE scan (not UTF-8 decode) so a
+/// non-UTF-8 file with ASCII markers can't slip past. Unreadable/missing → no markers (the conflict,
+/// for that path, was resolved by deletion).
+fn path_has_conflict_markers(repo: &Path, p: &str) -> bool {
+    std::fs::read(repo.join(p))
+        .map(|bytes| {
+            bytes
+                .split(|&b| b == b'\n')
+                .any(|line| line.starts_with(b"<<<<<<<") || line.starts_with(b">>>>>>>"))
         })
-        .unwrap_or_default()
+        .unwrap_or(false)
 }
 
-/// Does any of `paths` still contain a git conflict marker in the working tree? `<<<<<<<` / `>>>>>>>`
-/// (7 chars) are git's own boundary markers and effectively never appear at the start of a real
-/// source line — so their presence is positive proof the resolution is incomplete. (A path that
-/// can't be read as text — deleted or binary after resolution — carries no markers.) This is the
-/// guard that makes "never commit a half-resolved merge" airtight, independent of staging/commit state.
 fn files_have_conflict_markers(repo: &Path, paths: &[String]) -> bool {
-    paths.iter().any(|p| {
-        std::fs::read_to_string(repo.join(p))
-            .map(|c| {
-                c.lines()
-                    .any(|l| l.starts_with("<<<<<<<") || l.starts_with(">>>>>>>"))
-            })
-            .unwrap_or(false)
-    })
+    paths.iter().any(|p| path_has_conflict_markers(repo, p))
 }
 
-/// Restore `repo`'s `into` branch to its pre-merge state: abort an in-progress merge, else hard-reset
-/// to the captured `pre_sha` (undoing any commit the resolver made). Then remove the resolver's
-/// untracked scratch (safe: `preflight_clean` proved there were no untracked files before, and
-/// `git clean` skips gitignored paths like `.ensemble/`). Surfaces a failed restore as an Err so a
-/// caller never reports success over a half-restored `into`.
+/// Restore `repo`'s `into` branch to EXACTLY its pre-merge commit `pre_sha`. A single `reset --hard`
+/// clears any in-progress merge (MERGE_HEAD) AND undoes a commit the resolver may have made — one
+/// path that is correct whether we are mid-merge or the resolver already committed, and that can't
+/// preserve stray tracked edits the way a bare `merge --abort` might. Then sweep the resolver's
+/// untracked scratch (safe: `preflight_clean` proved the tree had no untracked files before, and
+/// `git clean` skips gitignored paths like `.ensemble/`). BOTH steps surface failure so a caller
+/// never reports escalation over a half-restored `into`.
 fn restore_to(repo: &Path, pre_sha: &str) -> std::io::Result<()> {
-    if is_mid_merge(repo) {
-        git_run(repo, &["merge", "--abort"])?;
-    } else {
-        git_run(repo, &["reset", "--hard", "--quiet", pre_sha])?;
-    }
-    let _ = git_run(repo, &["clean", "-fdq"]); // best-effort untracked sweep
+    git_run(repo, &["reset", "--hard", "--quiet", pre_sha])?;
+    git_run(repo, &["clean", "-fdq"])?;
     Ok(())
 }
 
@@ -204,18 +203,37 @@ pub fn merge_branch(repo: &Path, branch: &str, into: &str) -> std::io::Result<Me
 
 /// Land `branch` onto `into`, but on a CONFLICT run ONE AI-resolver round (`resolve`, given the repo
 /// + the conflicting paths, edits files in place) before deciding — the locked conflict policy
-/// (design decision 2). The resolution is COMPLETED only if it is provably clean: no conflict marker
-/// survives in any conflicting file AND nothing is left unmerged; otherwise (markers remain, a path
-/// stays unmerged, or `resolve` itself errors) the merge is restored to `into`'s pre-merge state and
-/// `Conflict(paths)` is returned so the caller escalates to the operator. NEVER force / auto-accept,
-/// and NEVER commit a half-resolved merge. `resolve` should ONLY edit files (it need not `git add`
-/// or commit); a resolver that commits on its own is still validated and, if it left markers, undone.
+/// (design decision 2). The resolution is COMPLETED only if it is PROVABLY clean: no git conflict
+/// marker survives in any conflicting file AND nothing is left unmerged; otherwise the merge is
+/// restored to `into`'s exact pre-merge commit and `Conflict(paths)` is returned so the caller
+/// escalates. NEVER force / auto-accept, and NEVER commit a half-resolved merge.
+///
+/// Only CONTENT conflicts (those carrying `<<<<<<<`/`>>>>>>>` markers) are handed to the resolver: a
+/// markerless STRUCTURAL conflict (modify/delete, rename, binary, submodule) cannot be safely
+/// resolved by a text-editing CLI and — crucially — `git add` would silently "resolve" it to an
+/// arbitrary side, so any structural conflict escalates immediately WITHOUT running the resolver.
+/// `resolve` should ONLY edit the conflicting files (it need not `git add`/commit); a resolver that
+/// commits on its own is still validated by the marker scan and, if it left markers, undone.
 pub fn merge_with_resolver(
     repo: &Path,
     branch: &str,
     into: &str,
     resolve: impl FnOnce(&Path, &[String]) -> std::io::Result<()>,
 ) -> std::io::Result<MergeOutcome> {
+    // Restore `into` to pre_sha, folding a restore failure into `base` so it's never lost.
+    fn fail_restoring(
+        repo: &Path,
+        pre_sha: &str,
+        into: &str,
+        base: String,
+    ) -> std::io::Error {
+        let mut msg = base;
+        if let Err(re) = restore_to(repo, pre_sha) {
+            msg.push_str(&format!("; AND restore failed — {into} may be left mid-merge: {re}"));
+        }
+        std::io::Error::other(msg)
+    }
+
     preflight_clean(repo)?;
     git_run(repo, &["checkout", "--quiet", into])?;
     // Capture into's tip BEFORE merging so we can hard-reset to it even if the resolver commits.
@@ -230,24 +248,21 @@ pub fn merge_with_resolver(
         return Ok(MergeOutcome::Landed); // clean / fast-forward — resolver not needed
     }
 
-    // Capture conflicts BEFORE touching the merge state (abort/reset wipes the unmerged index).
-    let conflicts: Vec<String> = match git_capture(repo, &["diff", "--name-only", "--diff-filter=U"])
-    {
-        Ok(o) => String::from_utf8_lossy(&o.stdout)
-            .lines()
-            .map(String::from)
-            .collect(),
+    // Capture conflicts BEFORE touching the merge state (restore wipes the unmerged index).
+    let conflicts: Vec<String> = match unmerged_paths(repo) {
+        Ok(c) => c,
         Err(e) => {
-            let mut msg = format!("could not query conflicts after a failed merge: {e}");
-            if let Err(re) = restore_to(repo, &pre_sha) {
-                msg.push_str(&format!("; AND restore failed — {into} may be left mid-merge: {re}"));
-            }
-            return Err(std::io::Error::other(msg));
+            return Err(fail_restoring(
+                repo,
+                &pre_sha,
+                into,
+                format!("could not query conflicts after a failed merge: {e}"),
+            ))
         }
     };
     if conflicts.is_empty() {
-        // A non-conflict failure (e.g. unknown branch) — nothing merged; restore is a no-op but keep
-        // the invariant that we never leave a half state, then surface the original error.
+        // A non-conflict failure (e.g. unknown branch) — nothing merged; keep the never-half-state
+        // invariant, then surface the original error.
         restore_to(repo, &pre_sha)?;
         return Err(std::io::Error::other(format!(
             "git merge {branch} into {into}: {}",
@@ -255,24 +270,49 @@ pub fn merge_with_resolver(
         )));
     }
 
-    // ── ONE AI-resolver round ── the resolver edits the conflicted files in place.
+    // STRUCTURAL (markerless) conflicts can't be safely text-resolved AND `git add` would auto-pick a
+    // side — escalate the whole merge without running the resolver.
+    if conflicts
+        .iter()
+        .any(|p| !path_has_conflict_markers(repo, p))
+    {
+        restore_to(repo, &pre_sha)?;
+        return Ok(MergeOutcome::Conflict(conflicts));
+    }
+
+    // ── ONE AI-resolver round ── the resolver edits the conflicted (content) files in place.
     if resolve(repo, &conflicts).is_err() {
         restore_to(repo, &pre_sha)?;
         return Ok(MergeOutcome::Conflict(conflicts)); // resolver failed → escalate
     }
 
-    // Stage the resolution (also marks resolved index entries). A staging failure → restore + Err.
-    if let Err(e) = git_run(repo, &["add", "-A"]) {
-        let mut msg = format!("staging the AI resolution failed: {e}");
-        if let Err(re) = restore_to(repo, &pre_sha) {
-            msg.push_str(&format!("; AND restore failed — {into} may be left mid-merge: {re}"));
-        }
-        return Err(std::io::Error::other(msg));
+    // Stage ONLY the named conflict paths (not `-A`: that would auto-resolve anything and sweep in
+    // resolver scratch). For a content conflict this marks the resolver's edit as resolved.
+    let mut add_args: Vec<&str> = vec!["add", "--"];
+    add_args.extend(conflicts.iter().map(|s| s.as_str()));
+    if let Err(e) = git_run(repo, &add_args) {
+        return Err(fail_restoring(
+            repo,
+            &pre_sha,
+            into,
+            format!("staging the AI resolution failed: {e}"),
+        ));
     }
 
-    // GUARD: refuse to complete unless provably clean — no surviving conflict marker in any
-    // conflicting file, and nothing left unmerged. Either means the resolution is incomplete.
-    if files_have_conflict_markers(repo, &conflicts) || !unmerged_paths(repo).is_empty() {
+    // GUARD: refuse to complete unless PROVABLY clean — no surviving conflict marker in any
+    // conflicting file, and nothing left unmerged (a query failure is itself fatal-with-restore).
+    let still_unmerged = match unmerged_paths(repo) {
+        Ok(u) => u,
+        Err(e) => {
+            return Err(fail_restoring(
+                repo,
+                &pre_sha,
+                into,
+                format!("could not re-check unmerged paths after resolution: {e}"),
+            ))
+        }
+    };
+    if files_have_conflict_markers(repo, &conflicts) || !still_unmerged.is_empty() {
         restore_to(repo, &pre_sha)?;
         return Ok(MergeOutcome::Conflict(conflicts)); // still conflicting → escalate
     }
@@ -280,11 +320,12 @@ pub fn merge_with_resolver(
     // Clean resolution — complete the merge commit (only if the resolver didn't already commit).
     if is_mid_merge(repo) {
         if let Err(e) = git_run(repo, &["commit", "--no-edit", "--quiet"]) {
-            let mut msg = format!("committing the resolved merge failed: {e}");
-            if let Err(re) = restore_to(repo, &pre_sha) {
-                msg.push_str(&format!("; AND restore failed — {into} may be left mid-merge: {re}"));
-            }
-            return Err(std::io::Error::other(msg));
+            return Err(fail_restoring(
+                repo,
+                &pre_sha,
+                into,
+                format!("committing the resolved merge failed: {e}"),
+            ));
         }
     }
     Ok(MergeOutcome::Landed)
@@ -753,6 +794,36 @@ mod tests {
         .unwrap();
         assert_eq!(out, MergeOutcome::Landed);
         assert!(repo.join("b").exists() && repo.join("c").exists());
+    }
+
+    #[test]
+    fn structural_modify_delete_conflict_escalates_without_running_resolver() {
+        // branch modifies foo; main deletes foo → a markerless modify/delete conflict. A text
+        // resolver can't safely resolve it AND `git add` would auto-pick a side, so it must escalate
+        // WITHOUT invoking the resolver, and restore main (foo stays deleted).
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+        std::fs::write(repo.join("foo"), "orig\n").unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-q", "-m", "add foo"]);
+        git(repo, &["checkout", "-q", "-b", "ensemble/m"]);
+        std::fs::write(repo.join("foo"), "branch-mod\n").unwrap();
+        git(repo, &["add", "."]);
+        git(repo, &["commit", "-q", "-m", "modify foo on branch"]);
+        git(repo, &["checkout", "-q", "main"]);
+        git(repo, &["rm", "-q", "foo"]);
+        git(repo, &["commit", "-q", "-m", "delete foo on main"]);
+        let pre = head_sha(repo).unwrap();
+
+        let out = merge_with_resolver(repo, "ensemble/m", "main", |_r, _p| {
+            panic!("resolver must NOT run on a markerless structural conflict");
+        })
+        .unwrap();
+        assert_eq!(out, MergeOutcome::Conflict(vec!["foo".to_string()]));
+        assert_eq!(head_sha(repo).unwrap(), pre, "main restored to its pre-merge tip");
+        assert!(!repo.join("foo").exists(), "foo stays deleted (main's side)");
+        assert!(is_clean(repo) && !mid_merge(repo));
     }
 
     #[test]
