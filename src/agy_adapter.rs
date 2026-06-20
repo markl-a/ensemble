@@ -117,9 +117,13 @@ impl Adapter for AgyAdapter {
                 }
             }
         }
-        // Close the master to force the reader to EOF, then wait (bounded) for it to finish draining —
-        // a deterministic FULL capture (no magic sleep, no leaked/blocked thread). On a clean Unix
-        // exit the reader already hit EOF, so `done` is immediate; on Windows the drop releases it.
+        // Close the master, then wait (bounded) for the reader to finish draining. On a clean Unix
+        // exit the reader already hit EOF, so `done` arrives immediately and the capture is total.
+        // KNOWN LIMITATION (Windows ConPTY): the cloned reader may NOT see EOF even after agy exits,
+        // so `done` never arrives, the recv times out, and we snapshot what the reader has buffered
+        // (agy writes its whole answer BEFORE exiting, so the answer is present) — that reader thread
+        // then lingers until the process ends. portable-pty has no is-alive-aware read; the fully
+        // robust path is the pywinpty agy_pty.py driver (a possible future adapter backend).
         drop(pair.master);
         let _ = done_rx.recv_timeout(Duration::from_secs(2));
 
@@ -147,8 +151,10 @@ impl Adapter for AgyAdapter {
 fn agy_argv(prompt: &str, timeout: Duration) -> Vec<String> {
     let t = timeout.as_secs();
     // print-timeout must stay STRICTLY BELOW our wall-clock kill so agy self-terminates its model
-    // call first; the `.min(t-2)` cap preserves that invariant even for small timeouts.
-    let print_to = t.saturating_sub(15).max(10).min(t.saturating_sub(2));
+    // call first; `.min(t-2)` enforces that and `.max(1)` avoids "0s" (which some CLIs read as
+    // *infinite*). The invariant holds for any realistic timeout (t >= 3; AgyAdapter uses 180s) — a
+    // degenerate t <= 2 just lets the wall-clock kill do the bounding.
+    let print_to = t.saturating_sub(15).max(10).min(t.saturating_sub(2)).max(1);
     vec![
         "--print-timeout".into(),
         format!("{print_to}s"),
