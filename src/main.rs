@@ -323,33 +323,51 @@ fn adapters_for(crew: &CrewConfig, discover: bool) -> HashMap<String, Box<dyn Ad
     m
 }
 
-/// Resolve a SINGLE agent to an adapter (for `ensemble agent`). Priority: an explicit node (a full
-/// URL used verbatim, or a bare host → `http://<host>:7878`) > a discovered tailnet host (when
-/// `discover`) > the local CLI by name. `None` if nothing resolves.
+/// Resolve a SINGLE agent to an adapter + a label for the ACTUAL target it resolved to (for
+/// `ensemble agent`). Priority: an explicit node (a full URL used verbatim, or a bare host →
+/// `http://<host>:7878`) > a discovered tailnet host (when `discover`) > the local CLI by name
+/// (label `"local"`). `None` if nothing resolves. Returning the label keeps the JSON `node` field
+/// consistent with the resolution actually performed.
 fn resolve_one(
     name: &str,
     explicit_node: Option<&str>,
     discover: bool,
-) -> Option<Box<dyn Adapter>> {
+) -> Option<(Box<dyn Adapter>, String)> {
     if let Some(node) = explicit_node {
         let url = if node.starts_with("http://") || node.starts_with("https://") {
             node.to_string()
         } else {
             format!("http://{node}:7878")
         };
-        return Some(Box::new(RemoteAdapter::new(name, &url)));
+        return Some((Box::new(RemoteAdapter::new(name, &url)), url));
     }
     if discover {
         if let Some(url) = ensemble::discovery::discover_agent_hosts(7878).get(name) {
-            return Some(Box::new(RemoteAdapter::new(name, url)));
+            return Some((Box::new(RemoteAdapter::new(name, url)), url.clone()));
         }
     }
-    match name {
-        "codex" => Some(Box::new(ExecAdapter::codex())),
-        "claude" => Some(Box::new(ExecAdapter::claude())),
-        "opencode" => Some(Box::new(ExecAdapter::opencode())),
-        "agy" => Some(Box::new(AgyAdapter::new())),
-        _ => None,
+    let local: Box<dyn Adapter> = match name {
+        "codex" => Box::new(ExecAdapter::codex()),
+        "claude" => Box::new(ExecAdapter::claude()),
+        "opencode" => Box::new(ExecAdapter::opencode()),
+        "agy" => Box::new(AgyAdapter::new()),
+        _ => return None,
+    };
+    Some((local, "local".to_string()))
+}
+
+/// If `flag` is present in `args`, its next token must be a real value (not another `--flag`).
+/// Exits with a usage error otherwise — so `--node --json` can't silently consume `--json`.
+fn require_value_if_present(args: &[String], flag: &str) {
+    if let Some(i) = args.iter().position(|a| a == flag) {
+        let ok = args
+            .get(i + 1)
+            .map(|v| !v.starts_with("--"))
+            .unwrap_or(false);
+        if !ok {
+            eprintln!("{flag} requires a value");
+            std::process::exit(2);
+        }
     }
 }
 
@@ -358,9 +376,13 @@ fn resolve_one(
 /// via the existing git-sync). The primitive an interactive conductor (Claude Code/codex) shells
 /// out to. `--json` emits a one-line machine-readable result; the exit code encodes the failure kind.
 fn agent_cmd(args: &[String]) {
-    let pos = positional_tasks(args); // [name, task]
-    if pos.len() < 2 {
-        eprintln!("{USAGE}");
+    require_value_if_present(args, "--node");
+    require_value_if_present(args, "--repo");
+    let pos = positional_tasks(args); // exactly [name, task]
+    if pos.len() != 2 {
+        eprintln!(
+            "ensemble agent needs exactly <name> \"<task>\" (quote a multi-word task)\n{USAGE}"
+        );
         std::process::exit(2);
     }
     let name = pos[0].clone();
@@ -371,20 +393,21 @@ fn agent_cmd(args: &[String]) {
     // --node <host|url> = explicit; --node auto (or absent, unless --no-discover) = discover.
     let explicit = node.as_deref().filter(|n| *n != "auto");
     let discover = explicit.is_none() && !has_flag(args, "--no-discover");
-    let node_label = match &explicit {
-        Some(n) if n.starts_with("http") => (*n).to_string(),
-        Some(n) => format!("http://{n}:7878"),
-        None if discover => "auto".to_string(),
-        None => "local".to_string(),
-    };
 
-    let adapter = match resolve_one(&name, explicit, discover) {
-        Some(a) => a,
+    let (adapter, node_label) = match resolve_one(&name, explicit, discover) {
+        Some(x) => x,
         None => {
+            // No adapter resolved — report the target we ATTEMPTED (same scheme rules as resolve_one).
+            let attempted = match &explicit {
+                Some(n) if n.starts_with("http://") || n.starts_with("https://") => n.to_string(),
+                Some(n) => format!("http://{n}:7878"),
+                None if discover => "auto".to_string(),
+                None => "local".to_string(),
+            };
             if json {
                 println!(
                     "{}",
-                    serde_json::json!({"agent": name, "node": node_label, "ok": false,
+                    serde_json::json!({"agent": name, "node": attempted, "ok": false,
                         "text": "", "branch": serde_json::Value::Null, "error_kind": "NoAdapter"})
                 );
             } else {
@@ -505,17 +528,22 @@ mod tests {
 
     #[test]
     fn resolve_one_explicit_url_wins() {
-        // A full URL is used verbatim → RemoteAdapter named for the agent (.name() == agent name).
-        let a = resolve_one("codex", Some("http://1.2.3.4:9999"), false).unwrap();
+        // A full URL is used verbatim → RemoteAdapter named for the agent; label = the URL.
+        let (a, label) = resolve_one("codex", Some("http://1.2.3.4:9999"), false).unwrap();
         assert_eq!(a.name(), "codex");
+        assert_eq!(label, "http://1.2.3.4:9999");
     }
 
     #[test]
     fn resolve_one_bare_host_maps_to_default_port_url() {
-        // A bare host (no scheme) → http://<host>:7878 RemoteAdapter. Resolution must not fall
-        // through to a local adapter even though "claude" is a known local name.
-        let a = resolve_one("claude", Some("ayaneo"), false).unwrap();
+        // A bare host (no scheme) → http://<host>:7878; must not fall through to a local adapter
+        // even though "claude" is a known local name. The label reflects the real target.
+        let (a, label) = resolve_one("claude", Some("ayaneo"), false).unwrap();
         assert_eq!(a.name(), "claude");
+        assert_eq!(label, "http://ayaneo:7878");
+        // a bare host that merely starts with "http" is still a bare host (not a URL)
+        let (_b, label2) = resolve_one("claude", Some("httpbox"), false).unwrap();
+        assert_eq!(label2, "http://httpbox:7878");
     }
 
     #[test]
@@ -526,11 +554,12 @@ mod tests {
 
     #[test]
     fn resolve_one_known_local_name_without_discover_is_local_adapter() {
-        // Each known local name resolves to its local adapter when there's no node and no discovery.
+        // Each known local name resolves to its local adapter (label "local") with no node/discovery.
         for n in ["codex", "claude", "opencode", "agy"] {
-            let a = resolve_one(n, None, false)
+            let (a, label) = resolve_one(n, None, false)
                 .unwrap_or_else(|| panic!("{n} should resolve to a local adapter"));
             assert_eq!(a.name(), n);
+            assert_eq!(label, "local");
         }
     }
 }
