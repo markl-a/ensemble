@@ -19,6 +19,7 @@ const USAGE: &str = "usage:\n  \
     ensemble dispatch \"<task1>\" ... --ledger <db> [--crew <crew.toml>] [--repo <path>]   (durable, resumable)\n  \
     ensemble ledger <status|recover> --ledger <db> [--stale-secs N]\n  \
     ensemble nodes   (probe the tailnet for `serve` hosts and the agents they offer)\n  \
+    ensemble mesh   (this node's CLIs + which agents each tailnet peer hosts)\n  \
     ensemble doctor   (check this machine is ready: which AI CLIs + tailscale are on PATH, is-git-repo)\n  \
     ensemble agent <name> \"<task>\" [--node auto|<host>] [--repo <path>] [--json]   (delegate ONE turn to one CLI)\n  \
     ensemble serve [--bind <addr>]   (default: this node's tailnet IP:7878; loopback if no tailnet)\n\n\
@@ -41,6 +42,7 @@ fn main() {
         Some("dispatch") => dispatch_cmd(&args),
         Some("ledger") => ledger_cmd(&args),
         Some("nodes") => nodes_cmd(&args),
+        Some("mesh") => mesh_cmd(&args),
         Some("doctor") => doctor_cmd(&args),
         Some("agent") => agent_cmd(&args),
         Some("serve") => serve_cmd(&args),
@@ -71,6 +73,14 @@ fn serve_cmd(args: &[String]) {
         eprintln!("serve: {e}");
         std::process::exit(1);
     }
+}
+
+/// `ensemble mesh` — print which AI CLIs are on THIS node + which agents each discovered tailnet
+/// peer hosts. Read-only (no side effects).
+fn mesh_cmd(_args: &[String]) {
+    let local = ensemble::present_clis();
+    let hosts = ensemble::discover_mesh(7878);
+    println!("{}", ensemble::render_mesh(&local, &hosts));
 }
 
 /// `ensemble run "<task>" [--crew <p>] [--repo <p>]` — a single task, isolated in its own worktree.

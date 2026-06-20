@@ -214,16 +214,21 @@ pub fn build_agent_hosts(nodes: &[(String, Vec<String>)]) -> HashMap<String, Str
     map
 }
 
-/// Auto-discover agent hosts on the tailnet: for each ONLINE peer, probe `http://<endpoint>:<port>/health`
-/// (in parallel) and record which agents it hosts (first host wins). Empty if tailscale is absent or
-/// nobody serves (→ the caller falls back to local). Uses MagicDNS names, falling back to TailscaleIPs.
-pub fn discover_agent_hosts(port: u16) -> HashMap<String, String> {
+/// Probe every ONLINE tailnet peer's `http://<endpoint>:<port>/health` (in parallel) and return each
+/// reachable host's `(endpoint_url, hosted_agents)` — the raw mesh view. Empty if tailscale is absent
+/// or nobody serves. Uses MagicDNS names, falling back to TailscaleIPs.
+pub fn discover_mesh(port: u16) -> Vec<(String, Vec<String>)> {
     let online: Vec<Node> = discover_nodes().into_iter().filter(|n| n.online).collect();
-    let nodes: Vec<(String, Vec<String>)> = probe_all(&online, port, probe_agents)
+    probe_all(&online, port, probe_agents)
         .into_iter()
         .filter(|(_, agents)| !agents.is_empty())
-        .collect();
-    build_agent_hosts(&nodes)
+        .collect()
+}
+
+/// Auto-discover agent hosts on the tailnet, collapsed to agent→host with FIRST-host-wins (the
+/// conductor's view). Empty if tailscale is absent or nobody serves (→ the caller falls back to local).
+pub fn discover_agent_hosts(port: u16) -> HashMap<String, String> {
+    build_agent_hosts(&discover_mesh(port))
 }
 
 /// Parse this node's own TailscaleIPs out of `tailscale status --json` (`Self.TailscaleIPs`).

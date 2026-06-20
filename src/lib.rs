@@ -12,6 +12,7 @@ pub mod doctor;
 pub mod exec_adapter;
 pub mod gate;
 pub mod ledger;
+pub mod mesh;
 pub mod remote_adapter;
 pub mod repo_sync;
 pub mod serve;
@@ -26,13 +27,14 @@ pub use blackboard::{Blackboard, Message};
 pub use conductor::{Conductor, Decision, RunOutcome};
 pub use crew::{AgentConfig, CrewConfig, CrewError, GatePolicy, OnFlake, RoleConfig, TestConfig};
 pub use discovery::{
-    build_agent_hosts, discover_agent_hosts, discover_nodes, parse_health_agents, probe_agents,
-    Node,
+    build_agent_hosts, discover_agent_hosts, discover_mesh, discover_nodes, parse_health_agents,
+    probe_agents, Node,
 };
-pub use doctor::{check_tools, is_ready, run_checks, ToolStatus};
+pub use doctor::{check_tools, is_ready, present_clis, run_checks, ToolStatus};
 pub use exec_adapter::ExecAdapter;
 pub use gate::{decide, GateDecision, RoleVerdict};
 pub use ledger::{Counts, Ledger, LedgerError, Task, TaskState};
+pub use mesh::render_mesh;
 pub use remote_adapter::RemoteAdapter;
 pub use repo_sync::{
     apply_result, bundle_rev, gc_node_scratch, head_sha, is_git_worktree, orphan_scratch,

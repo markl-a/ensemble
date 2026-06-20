@@ -86,6 +86,15 @@ pub fn run_checks() -> Vec<ToolStatus> {
     out
 }
 
+/// The AI CLIs actually on PATH (the names a crew can drive locally). Used by `ensemble mesh`.
+pub fn present_clis() -> Vec<String> {
+    check_tools(on_path)
+        .into_iter()
+        .filter(|t| t.ok)
+        .map(|t| t.name)
+        .collect()
+}
+
 /// True if `tool` is resolvable on PATH. Uses `where` on Windows / `command -v` on Unix — a cheap
 /// PATH lookup that does NOT spawn the tool itself (so an un-logged-in CLI still counts as present).
 fn on_path(tool: &str) -> bool {
