@@ -4,6 +4,11 @@
 AI-CLI collaborative dev crew), THEN advance the phantom-mesh main roadmap. This file is the
 queue a recurring cron drains — **one double-gated task per tick.**
 
+## ▶ CURRENT FOCUS (2026-06-21) — finish Phase 1 of the two-phase plan
+Spec: `docs/specs/2026-06-20-two-phase-real-tests-design.md` + `docs/specs/2026-06-20-ensemble-mcp-design.md`.
+DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver ✅ (merge_with_resolver + `ensemble merge --resolver`)** · step 5 exec-timeout ✅ · **step 3 `ensemble mcp` slice 1 ✅** (JSON-RPC stdio + FileBoard + mesh + board_read).
+**NEXT (resume here):** `ensemble mcp` **slice ② `ensemble_board_post`** (write tool over the gated `FileBoard::post`) → ③ `ensemble_claim`(ledger)+`ensemble_worktree`(kept, not the RAII-drop-removes one) → ④ `ensemble_merge`+`ensemble_run`. Then **step 4 live 4-CLI proof** (needs the operator's machine + real CLIs). Build pattern: TDD on the pure `dispatch`/handler, then double-gate (codex from an empty temp cwd + claude via stdin), commit-to-branch-first, ff to main. WSL build/test: `cd /mnt/d/Projects/ensemble && CARGO_TARGET_DIR=$HOME/ensemble-target cargo test`.
+
 ## Priority queue (work the top undone item)
 
 0. [active] **OSS onboarding — "install → just works"** (operator-driven; spec
