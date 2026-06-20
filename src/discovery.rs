@@ -226,9 +226,52 @@ pub fn discover_agent_hosts(port: u16) -> HashMap<String, String> {
     build_agent_hosts(&nodes)
 }
 
+/// Parse this node's own TailscaleIPs out of `tailscale status --json` (`Self.TailscaleIPs`).
+/// Empty when logged out / unparsable. Hermetic.
+pub fn parse_self_ips(json: &str) -> Vec<String> {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| {
+            v.get("Self")
+                .and_then(|s| s.get("TailscaleIPs"))
+                .and_then(|t| t.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+        })
+        .unwrap_or_default()
+}
+
+/// This node's tailnet IPs (empty if tailscale is absent/logged out or wedges past the timeout).
+pub fn self_tailscale_ips() -> Vec<String> {
+    let mut c = Command::new("tailscale");
+    c.args(["status", "--json"]);
+    match capture_bounded(c, STATUS_TIMEOUT) {
+        Some(out) => parse_self_ips(&out),
+        None => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_self_ips_reads_self_tailscale_ips() {
+        let json = r#"{ "Self": { "HostName": "yoyogood",
+            "TailscaleIPs": ["100.87.70.65", "fd7a:1::5"] }, "Peer": {} }"#;
+        assert_eq!(parse_self_ips(json), vec!["100.87.70.65", "fd7a:1::5"]);
+    }
+
+    #[test]
+    fn parse_self_ips_empty_when_logged_out() {
+        let json = r#"{ "Self": { "HostName": "yoyogood", "TailscaleIPs": null }, "Peer": {} }"#;
+        assert!(parse_self_ips(json).is_empty());
+        assert!(parse_self_ips("not json").is_empty());
+    }
+
     #[test]
     fn parses_tailscale_peers() {
         let json = r#"{ "Peer": {
