@@ -74,6 +74,41 @@ impl Conductor {
                 }
             }
 
+            // ── TEST GATE (firewall A) ── the project's real tests must be GREEN before the AI
+            // reviewers run. RED bounces the traceback back to the implementer (don't spend reviewer
+            // turns on code that doesn't pass); a suite that never goes green can NEVER land.
+            if let Some(test) = &self.crew.test {
+                let t = crate::test_gate::run_tests(cwd, &test.command, test.timeout_secs);
+                bb.post(
+                    "test",
+                    if t.passed {
+                        "test_pass"
+                    } else {
+                        "test_failure"
+                    },
+                    &t.output,
+                );
+                if !t.passed {
+                    if round + 1 >= max {
+                        return RunOutcome {
+                            decision: Decision::Escalated(format!(
+                                "tests never passed after {} round(s)",
+                                round + 1
+                            )),
+                            rounds: round + 1,
+                            blackboard: bb,
+                            branch: None,
+                        };
+                    }
+                    feedback = vec![format!(
+                        "Your changes did not pass the test suite. Fix WITHOUT breaking existing \
+                         behaviour. Test output:\n{}",
+                        t.output
+                    )];
+                    continue;
+                }
+            }
+
             // 2) reviewers — a flaked reviewer is EXCLUDED (logged), never counted as approval.
             // When the primary adapter errors, consult `on_flake`: Retry re-runs the same agent
             // once; Substitute falls back to the agent's configured backup. A verdict only enters
