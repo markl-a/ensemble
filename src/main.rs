@@ -24,14 +24,15 @@ const USAGE: &str = "usage:\n  \
     [agents.<n>] node = ... in crew.toml; pass --no-discover to stay local.";
 
 fn main() {
-    // Firewall B: install the Ctrl-C handler once — it flips the shared abort flag so a running
-    // conductor stops cleanly at the next round boundary (worktrees are discarded on the way out).
-    {
+    let args: Vec<String> = std::env::args().collect();
+    let sub = args.get(1).map(|s| s.as_str());
+    // Firewall B: only the conductor-driven commands honor the abort flag, so install the Ctrl-C
+    // handler ONLY for them. Installing it for `serve`/`ledger`/`nodes` would swallow their default
+    // Ctrl-C termination (they never read the flag), leaving them un-interruptible.
+    if matches!(sub, Some("run") | Some("run-many") | Some("dispatch")) {
         let flag = abort_flag();
         let _ = ctrlc::set_handler(move || flag.store(true, Ordering::Relaxed));
     }
-    let args: Vec<String> = std::env::args().collect();
-    let sub = args.get(1).map(|s| s.as_str());
     match sub {
         Some("run") => run_single(&args),
         Some("run-many") => run_many(&args),

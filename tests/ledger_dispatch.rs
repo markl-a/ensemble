@@ -1,6 +1,8 @@
 use ensemble::ledger::Ledger;
 use ensemble::*;
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 struct Writer {
     name: String,
@@ -94,6 +96,41 @@ fn conductor() -> Conductor {
         }),
     );
     Conductor::new(crew(), m)
+}
+
+#[test]
+fn aborted_dispatch_stops_cleanly_without_failing_the_queue() {
+    // a conductor whose abort flag is already set (as if Ctrl-C fired)
+    let mut m: HashMap<String, Box<dyn Adapter>> = HashMap::new();
+    m.insert(
+        "codex".into(),
+        Box::new(Writer {
+            name: "codex".into(),
+            file: "out.txt".into(),
+        }),
+    );
+    m.insert(
+        "claude".into(),
+        Box::new(Lgtm {
+            name: "claude".into(),
+        }),
+    );
+    let c = Conductor::new(crew(), m).with_abort(Arc::new(AtomicBool::new(true)));
+
+    let tmp = git_repo();
+    let mut ledger = Ledger::open(&tmp.path().join("ledger.db")).unwrap();
+    let tasks = vec!["t1".to_string(), "t2".to_string()];
+    let counts =
+        ensemble::dispatch::run(&mut ledger, &c, &tasks, tmp.path(), "w", &|| 1000, 0).unwrap();
+    assert_eq!(
+        counts.failed, 0,
+        "an aborted dispatch must NOT fail-mark the queue"
+    );
+    assert_eq!(counts.done, 0, "nothing should complete after abort");
+    assert_eq!(
+        counts.queued, 2,
+        "tasks remain queued/recoverable after a clean abort"
+    );
 }
 
 #[test]

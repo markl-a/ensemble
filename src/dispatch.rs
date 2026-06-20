@@ -34,8 +34,18 @@ pub fn run(
         ledger.enqueue(&task_id(t), t, clock())?;
     }
     ledger.recover_orphans(stale_before)?;
-    while let Some(task) = ledger.claim(worker, clock())? {
+    while !conductor.aborted() {
+        let task = match ledger.claim(worker, clock())? {
+            Some(t) => t,
+            None => break, // queue drained
+        };
         let out = conductor.run_in_repo(&task.descr, repo);
+        // Operator abort (firewall B): the conductor aborted this run. Leave the claim as-is so
+        // `recover_orphans` requeues it later, and stop claiming new work — do NOT fail-mark the
+        // rest of the queue.
+        if conductor.aborted() {
+            break;
+        }
         match out.decision {
             Decision::Landed => {
                 let branch = out.branch.as_deref().unwrap_or("");

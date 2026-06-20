@@ -54,6 +54,12 @@ impl Conductor {
         self
     }
 
+    /// Whether the operator has aborted (firewall B). A driver loop (e.g. `dispatch`) checks this to
+    /// stop claiming new work rather than fail-marking the whole queue.
+    pub fn aborted(&self) -> bool {
+        self.abort.load(Ordering::Relaxed)
+    }
+
     fn adapter_for_role(&self, role: &str) -> Option<&dyn Adapter> {
         let agent = &self.crew.roles.get(role)?.agent;
         self.adapters.get(agent).map(|b| b.as_ref())
@@ -155,7 +161,9 @@ impl Conductor {
                 same = 1;
                 last_sig = Some(sig);
             }
-            if self.crew.gate.stall_limit > 0 && same >= self.crew.gate.stall_limit {
+            // `.max(2)` so a misconfigured `stall_limit = 1` can't trip at round 0 (the first round
+            // has nothing to compare against) — the minimum meaningful value is 2 identical rounds.
+            if self.crew.gate.stall_limit > 0 && same >= self.crew.gate.stall_limit.max(2) {
                 return RunOutcome {
                     decision: Decision::Escalated(format!(
                         "circuit-broken: no progress across {same} identical rounds"
@@ -255,12 +263,23 @@ impl Conductor {
             // 3) gate
             match decide(&verdicts, &self.crew.gate, round) {
                 GateDecision::Land => {
+                    // Honor an operator abort that arrived mid-round: don't land work the operator
+                    // asked to stop (firewall B). A budget overrun on a SUCCESSFUL round still lands
+                    // — we don't discard completed work for the wall-clock net.
+                    if self.abort.load(Ordering::Relaxed) {
+                        return RunOutcome {
+                            decision: Decision::Escalated("aborted by operator".to_string()),
+                            rounds: round + 1,
+                            blackboard: bb,
+                            branch: None,
+                        };
+                    }
                     return RunOutcome {
                         decision: Decision::Landed,
                         rounds: round + 1,
                         blackboard: bb,
                         branch: None,
-                    }
+                    };
                 }
                 GateDecision::Escalate(why) => {
                     return RunOutcome {
