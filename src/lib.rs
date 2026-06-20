@@ -40,7 +40,7 @@ pub use mesh::{render_mesh, render_up};
 pub use remote_adapter::RemoteAdapter;
 pub use repo_sync::{
     apply_result, bundle_rev, gc_node_scratch, head_sha, is_git_worktree, merge_branch,
-    orphan_scratch, MergeOutcome,
+    merge_with_resolver, orphan_scratch, MergeOutcome,
 };
 pub use serve::{resolve_bind, serve, BindAddr};
 pub use test_gate::{run_tests, TestOutcome};
