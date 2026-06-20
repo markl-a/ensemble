@@ -153,7 +153,15 @@ pub fn parse_health_agents(json: &str) -> Vec<String> {
 /// GET `<base_url>/health` and return the agents that node hosts (empty if unreachable / not serving).
 pub fn probe_agents(base_url: &str) -> Vec<String> {
     let url = format!("{}/health", base_url.trim_end_matches('/'));
-    match ureq::get(&url).timeout(Duration::from_secs(2)).call() {
+    // Bound the CONNECT, not just the overall request: ureq's request `.timeout()` does not bound the
+    // TCP connect, so a peer that silently drops :7878 (an idle iOS/Android device, a firewall) hangs
+    // ~30s — and since `ensemble nodes` is gated on the SLOWEST parallel probe, one such peer made the
+    // whole discovery take ~30s on a real multi-device tailnet. `timeout_connect` caps each probe.
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_millis(800))
+        .timeout(Duration::from_secs(2))
+        .build();
+    match agent.get(&url).call() {
         Ok(r) => r
             .into_string()
             .map(|s| parse_health_agents(&s))
@@ -409,5 +417,20 @@ mod tests {
         agents.sort();
         assert_eq!(agents, vec!["claude".to_string(), "codex".to_string()]);
         h.join().unwrap();
+    }
+
+    #[test]
+    fn probe_agents_gives_up_fast_on_an_unreachable_host() {
+        // 192.0.2.1 is RFC5737 TEST-NET-1 (unrouted) → the SYN is dropped, so the connect must be
+        // bounded and give up in ~1s. The OS default connect timeout (~21s on Windows) made
+        // `ensemble nodes` take ~30s on a tailnet that has idle iOS/Android peers dropping :7878.
+        let start = Instant::now();
+        let agents = probe_agents("http://192.0.2.1:7878");
+        assert!(agents.is_empty());
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "probe must bound its connect; took {:?}",
+            start.elapsed()
+        );
     }
 }
