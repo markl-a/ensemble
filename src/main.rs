@@ -117,6 +117,7 @@ fn up_cmd(args: &[String]) {
 
 /// `ensemble run "<task>" [--crew <p>] [--repo <p>]` — a single task, isolated in its own worktree.
 fn run_single(args: &[String]) {
+    require_value_if_present(args, "--into"); // used by --merge; reject a value-less `--into`
     let task = match positional_tasks(args) {
         tasks if tasks.len() == 1 => tasks[0].clone(),
         _ => {
@@ -136,14 +137,20 @@ fn run_single(args: &[String]) {
             if let Some(b) = &out.branch {
                 if has_flag(args, "--merge") {
                     // Auto-land the kept branch onto --into (default main). A conflict here is a SOFT
-                    // failure — the work is safe on `b`; report it (the operator can resolve, or
-                    // `ensemble merge {b} --resolver <agent>`). The run itself still LANDED (exit 0).
+                    // failure — the work is safe on `b`; report it (the operator can resolve, or run
+                    // the suggested `ensemble merge`). The run itself still LANDED (exit 0).
                     let into = parse_flag(args, "--into").unwrap_or_else(|| "main".to_string());
+                    // carry a non-default target into the retry hint so it merges onto the same branch
+                    let into_arg = if into == "main" {
+                        String::new()
+                    } else {
+                        format!(" --into {into}")
+                    };
                     match ensemble::merge_branch(Path::new(&repo), b, &into) {
                         Ok(ensemble::MergeOutcome::Landed) => print!(" → merged into `{into}`"),
                         Ok(ensemble::MergeOutcome::Conflict(paths)) => print!(
                             " → kept on `{b}`; auto-merge into `{into}` CONFLICTED on [{}] — \
-                             resolve, or: ensemble merge {b} --resolver <agent>",
+                             resolve, or: ensemble merge {b}{into_arg} --resolver <agent>",
                             paths.join(", ")
                         ),
                         Err(e) => print!(" → kept on `{b}`; auto-merge into `{into}` failed: {e}"),
