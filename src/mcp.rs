@@ -121,6 +121,19 @@ fn tools_list() -> Value {
                 },
                 "additionalProperties": false
             }
+        },
+        {
+            "name": "ensemble_board_post",
+            "description": "Post a message to the shared crew blackboard for this repo, attributed to THIS member. `kind` is a short tag (e.g. result | verdict | question | plan | finding); `body` is the message (excerpted if very long). Returns the new board length as `next` — the cursor to poll `ensemble_board_read` from.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "kind": { "type": "string", "description": "short tag, e.g. result | verdict | question | plan | finding" },
+                    "body": { "type": "string", "description": "the message text" }
+                },
+                "required": ["kind", "body"],
+                "additionalProperties": false
+            }
         }
     ]})
 }
@@ -134,6 +147,7 @@ fn tools_call(params: &Value, ctx: &Ctx) -> Result<Value, RpcError> {
     let text = match name {
         "ensemble_mesh" => tool_mesh(),
         "ensemble_board_read" => tool_board_read(&args, ctx)?,
+        "ensemble_board_post" => tool_board_post(&args, ctx)?,
         other => return Err(RpcError::invalid_params(format!("unknown tool: {other}"))),
     };
     // MCP tool result: a content list. We return one text item (JSON-or-text payload).
@@ -170,6 +184,47 @@ fn tool_board_read(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
         .map(|(i, m)| json!({ "index": i, "from": m.from, "kind": m.kind, "body": m.body }))
         .collect();
     Ok(json!({ "messages": messages, "next": next }).to_string())
+}
+
+/// Post one message to the repo's shared crew blackboard as THIS member (`ctx.name` — the author is
+/// the server's identity, never a client-supplied field, so a member can't impersonate another).
+/// `kind` and `body` are required non-blank strings; any missing/null/non-string/blank field is a
+/// client error (-32602), checked BEFORE the post so a malformed call never writes a junk line.
+/// Returns `{posted, next}` where `next` is the cursor positioned immediately AFTER this member's
+/// message, computed atomically UNDER the board's append lock (see `FileBoard::post`) — so polling
+/// `ensemble_board_read` from `next` returns every later message in order, with no skips and without
+/// re-returning this post, even when other members post concurrently.
+fn tool_board_post(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
+    if !args.is_object() {
+        return Err(RpcError::invalid_params(
+            "arguments must be an object with `kind` and `body`",
+        ));
+    }
+    let kind = required_str(args, "kind")?;
+    let body = required_str(args, "body")?;
+    let next = FileBoard::open(&ctx.repo)
+        .post(&ctx.name, kind, body)
+        .map_err(|e| RpcError::internal(format!("board post: {e}")))?;
+    Ok(json!({ "posted": true, "next": next }).to_string())
+}
+
+/// Pull a REQUIRED, non-blank string field from a tools/call `arguments` object, mapping each failure
+/// mode (absent, null, non-string, blank) to a precise -32602 message that names the field — so a
+/// client sees what was wrong, not a generic "unknown tool".
+fn required_str<'a>(args: &'a Value, field: &str) -> Result<&'a str, RpcError> {
+    match args.get(field) {
+        None | Some(Value::Null) => Err(RpcError::invalid_params(format!("`{field}` is required"))),
+        Some(v) => {
+            let s = v
+                .as_str()
+                .ok_or_else(|| RpcError::invalid_params(format!("`{field}` must be a string")))?;
+            if s.trim().is_empty() {
+                Err(RpcError::invalid_params(format!("`{field}` must not be empty")))
+            } else {
+                Ok(s)
+            }
+        }
+    }
 }
 
 /// Turn one raw stdin line into the JSON-RPC response line to write, or `None` for a NOTIFICATION
@@ -402,5 +457,114 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn tools_list_includes_board_post_requiring_kind_and_body() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = call(r#"{"jsonrpc":"2.0","id":20,"method":"tools/list"}"#, &ctx(tmp.path())).unwrap();
+        let tools = r["result"]["tools"].as_array().unwrap();
+        let post = tools
+            .iter()
+            .find(|t| t["name"] == "ensemble_board_post")
+            .expect("board_post is listed as a tool");
+        let req = post["inputSchema"]["required"].as_array().unwrap();
+        assert!(
+            req.iter().any(|v| v == "kind") && req.iter().any(|v| v == "body"),
+            "board_post declares kind+body required: {req:?}"
+        );
+    }
+
+    #[test]
+    fn board_post_tool_appends_under_this_members_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"ensemble_board_post","arguments":{"kind":"result","body":"shipped the parser"}}}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
+        let text = r["result"]["content"][0]["text"].as_str().unwrap();
+        let payload: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(payload["posted"], true);
+        assert_eq!(payload["next"], 1, "the board length after the post is the new cursor");
+        // the message actually landed on the shared board, attributed to ctx.name (NOT a client field)
+        let posted = FileBoard::open(tmp.path()).read_since(0).unwrap();
+        assert_eq!(posted.len(), 1);
+        assert_eq!(posted[0].from, "tester", "attributed to this member, not client-supplied");
+        assert_eq!(posted[0].kind, "result");
+        assert_eq!(posted[0].body, "shipped the parser");
+    }
+
+    #[test]
+    fn board_post_then_board_read_roundtrip_through_tools() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = ctx(tmp.path());
+        call(
+            r#"{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"ensemble_board_post","arguments":{"kind":"question","body":"anyone on auth?"}}}"#,
+            &c,
+        )
+        .unwrap();
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":23,"method":"tools/call","params":{"name":"ensemble_board_read"}}"#,
+            &c,
+        )
+        .unwrap();
+        let payload: Value =
+            serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(payload["next"], 1);
+        assert_eq!(payload["messages"][0]["body"], "anyone on auth?");
+        assert_eq!(payload["messages"][0]["from"], "tester");
+    }
+
+    #[test]
+    fn board_post_requires_a_body() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":24,"method":"tools/call","params":{"name":"ensemble_board_post","arguments":{"kind":"result"}}}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
+        assert_eq!(r["error"]["code"], -32602);
+        let msg = r["error"]["message"].as_str().unwrap();
+        assert!(msg.contains("body"), "names the missing field, not 'unknown tool': {msg}");
+    }
+
+    #[test]
+    fn board_post_requires_a_kind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":25,"method":"tools/call","params":{"name":"ensemble_board_post","arguments":{"body":"orphan"}}}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
+        assert_eq!(r["error"]["code"], -32602);
+        assert!(r["error"]["message"].as_str().unwrap().contains("kind"));
+    }
+
+    #[test]
+    fn board_post_rejects_a_non_string_body() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":26,"method":"tools/call","params":{"name":"ensemble_board_post","arguments":{"kind":"result","body":123}}}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
+        assert_eq!(r["error"]["code"], -32602);
+        assert!(r["error"]["message"].as_str().unwrap().contains("body"));
+    }
+
+    #[test]
+    fn board_post_rejects_a_blank_body_without_writing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":27,"method":"tools/call","params":{"name":"ensemble_board_post","arguments":{"kind":"result","body":"   "}}}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
+        assert_eq!(r["error"]["code"], -32602, "a blank body is a client error, not a silent empty post");
+        assert!(
+            FileBoard::open(tmp.path()).is_empty().unwrap(),
+            "validation happens BEFORE the post, so nothing is written"
+        );
     }
 }

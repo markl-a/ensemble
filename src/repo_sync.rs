@@ -230,7 +230,7 @@ pub fn merge_branch(repo: &Path, branch: &str, into: &str) -> std::io::Result<Me
 }
 
 /// Land `branch` onto `into`, but on a CONFLICT run ONE AI-resolver round (`resolve`, given the repo
-/// + the conflicting paths, edits files in place) before deciding — the locked conflict policy
+/// and the conflicting paths, edits files in place) before deciding — the locked conflict policy
 /// (design decision 2). The resolution is COMPLETED only if it is PROVABLY clean: no git conflict
 /// marker survives in any conflicting file AND nothing is left unmerged; otherwise the merge is
 /// restored to `into`'s exact pre-merge commit and `Conflict(paths)` is returned so the caller
