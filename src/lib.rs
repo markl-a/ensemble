@@ -14,6 +14,7 @@ pub mod ledger;
 pub mod remote_adapter;
 pub mod repo_sync;
 pub mod serve;
+pub mod test_gate;
 pub mod verdict;
 pub mod wire;
 pub mod worktree;
@@ -22,7 +23,7 @@ pub use adapter::{Adapter, AdapterError, AgentOutput, MockAdapter};
 pub use agy_adapter::AgyAdapter;
 pub use blackboard::{Blackboard, Message};
 pub use conductor::{Conductor, Decision, RunOutcome};
-pub use crew::{AgentConfig, CrewConfig, CrewError, GatePolicy, OnFlake, RoleConfig};
+pub use crew::{AgentConfig, CrewConfig, CrewError, GatePolicy, OnFlake, RoleConfig, TestConfig};
 pub use discovery::{
     build_agent_hosts, discover_agent_hosts, discover_nodes, parse_health_agents, probe_agents,
     Node,
@@ -33,6 +34,7 @@ pub use ledger::{Counts, Ledger, LedgerError, Task, TaskState};
 pub use remote_adapter::RemoteAdapter;
 pub use repo_sync::{apply_result, bundle_rev, head_sha, is_git_worktree};
 pub use serve::serve;
+pub use test_gate::{run_tests, TestOutcome};
 pub use verdict::{parse_verdict, Verdict};
 pub use wire::{RunRequest, RunResponse};
 pub use worktree::Worktree;

@@ -39,6 +39,18 @@ pub struct AgentConfig {
     pub node: Option<String>,
 }
 
+/// The automated test gate (firewall A). When set, the project's real test `command` must pass
+/// (exit 0 = GREEN) before a task can land; a RED suite bounces the traceback back to the
+/// implementer. Absent ⇒ no test gate (AI review is the only gate, as before).
+#[derive(Debug, Clone, Deserialize)]
+pub struct TestConfig {
+    /// shell command run in the worktree; exit 0 = GREEN.
+    pub command: String,
+    /// optional hard timeout; a test command that exceeds it is treated as RED ("timed out").
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct CrewConfig {
     pub gate: GatePolicy,
@@ -46,6 +58,9 @@ pub struct CrewConfig {
     pub roles: HashMap<String, RoleConfig>,
     #[serde(default)]
     pub agents: HashMap<String, AgentConfig>,
+    /// Optional automated test gate (firewall A).
+    #[serde(default)]
+    pub test: Option<TestConfig>,
 }
 
 fn de_on_flake<'de, D: serde::Deserializer<'de>>(d: D) -> Result<OnFlake, D::Error> {
@@ -189,6 +204,31 @@ mod tests {
             agent = "claude"
         "#;
         assert!(CrewConfig::from_toml(toml).is_err());
+    }
+
+    #[test]
+    fn parses_optional_test_gate() {
+        let toml = r#"
+            pipeline = ["implement","review"]
+            [gate]
+            min_approvals = 1
+            max_rounds = 2
+            on_flake = "exclude"
+            [roles.implement]
+            agent = "codex"
+            [roles.review]
+            agent = "claude"
+            [test]
+            command = "cargo test --quiet"
+        "#;
+        let c = CrewConfig::from_toml(toml).unwrap();
+        assert_eq!(c.test.as_ref().unwrap().command, "cargo test --quiet");
+        // absent [test] → None (backward compatible)
+        let c2 = CrewConfig::from_toml(
+            "pipeline=[\"i\"]\n[gate]\nmin_approvals=1\nmax_rounds=1\non_flake=\"exclude\"\n[roles.i]\nagent=\"codex\"",
+        )
+        .unwrap();
+        assert!(c2.test.is_none());
     }
 
     #[test]
