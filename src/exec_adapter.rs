@@ -83,6 +83,23 @@ impl ExecAdapter {
         c.args(&self.args);
         c
     }
+
+    /// Kill the timed-out child so no survivor keeps the captured pipes open (which would hang the
+    /// reader joins). Windows: the child is `cmd /C <program>`; `taskkill /F /T` walks the tree from
+    /// the STILL-LIVE cmd pid FIRST — killing cmd before taskkill would orphan the grandchild CLI
+    /// and break the enumeration — then `child.kill()` cleans up cmd itself. Unix: we exec the
+    /// program directly, so `child.kill()` reaps it; a CLI that forks a helper which inherits and
+    /// holds the stdout pipe could still delay the reader joins (a documented limitation — a
+    /// process-group kill was tried but misbehaved under the test harness).
+    fn kill_tree(child: &mut std::process::Child) {
+        #[cfg(windows)]
+        {
+            let _ = Command::new("taskkill")
+                .args(["/F", "/T", "/PID", &child.id().to_string()])
+                .output();
+        }
+        let _ = child.kill();
+    }
 }
 
 impl Adapter for ExecAdapter {
@@ -111,15 +128,11 @@ impl Adapter for ExecAdapter {
             }
             Err(e) => return Err(AdapterError::Flaked(e.to_string())),
         };
-        if let Some(mut stdin) = child.stdin.take() {
-            // Best-effort: a broken pipe (CLI exited before reading) shows up as empty output
-            // below. Dropping `stdin` closes it (EOF), so the CLI stops reading and proceeds.
-            let _ = stdin.write_all(prompt.as_bytes());
-        }
-        // Drain stdout/stderr on dedicated threads. We must NOT let the child's pipe buffers fill
-        // while we poll for exit — a reply larger than the OS pipe buffer (~64 KiB) would deadlock
-        // the child (blocked on write) against us (blocked on wait). The readers EOF when the child
-        // exits or is killed (pipes close), so joining them is always bounded.
+        // Drain stdout/stderr on dedicated threads, STARTED BEFORE the stdin write below — we must
+        // NOT let the child's pipe buffers fill while anyone blocks: a reply larger than the OS pipe
+        // buffer (~64 KiB) would otherwise deadlock the child (blocked on write) against us. The
+        // readers EOF only when the child AND every descendant holding the write end have exited or
+        // been killed (`kill_tree`), so joining them is bounded by the deadline.
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         let out_reader = std::thread::spawn(move || {
@@ -136,6 +149,16 @@ impl Adapter for ExecAdapter {
             }
             buf
         });
+        // Deliver the prompt on a WRITER thread so a CLI that never drains stdin cannot block the
+        // main thread before it reaches the deadline loop. Dropping `stdin` (on completion, or when
+        // the child is killed and the write fails with a broken pipe) closes it → EOF for the CLI.
+        let stdin = child.stdin.take();
+        let prompt_bytes = prompt.as_bytes().to_vec();
+        let writer = std::thread::spawn(move || {
+            if let Some(mut si) = stdin {
+                let _ = si.write_all(&prompt_bytes);
+            }
+        });
 
         // Poll for exit until the per-command deadline. A turn that never returns is killed and
         // reported Flaked rather than hanging the whole run (the conductor's wall-clock budget only
@@ -146,17 +169,9 @@ impl Adapter for ExecAdapter {
                 Ok(Some(_status)) => break,
                 Ok(None) => {
                     if Instant::now() >= deadline {
-                        let _ = child.kill();
-                        // On Windows the child is `cmd /C <program>`; killing cmd does NOT reap the
-                        // grandchild CLI, so taskkill the whole tree by pid. (On Unix we exec the
-                        // program directly — `kill` is sufficient.)
-                        #[cfg(windows)]
-                        {
-                            let _ = Command::new("taskkill")
-                                .args(["/F", "/T", "/PID", &child.id().to_string()])
-                                .output();
-                        }
+                        Self::kill_tree(&mut child);
                         let _ = child.wait(); // reap so the readers' pipes close
+                        let _ = writer.join();
                         let _ = out_reader.join();
                         let _ = err_reader.join();
                         return Err(AdapterError::Flaked(format!(
@@ -168,12 +183,16 @@ impl Adapter for ExecAdapter {
                     std::thread::sleep(Duration::from_millis(50));
                 }
                 Err(e) => {
-                    let _ = child.kill();
+                    Self::kill_tree(&mut child);
                     let _ = child.wait();
+                    let _ = writer.join();
+                    let _ = out_reader.join();
+                    let _ = err_reader.join();
                     return Err(AdapterError::Flaked(e.to_string()));
                 }
             }
         }
+        let _ = writer.join();
         let stdout_buf = out_reader.join().unwrap_or_default();
         let stderr_buf = err_reader.join().unwrap_or_default();
         let text = String::from_utf8_lossy(&stdout_buf).trim().to_string();
