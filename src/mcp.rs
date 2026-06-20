@@ -30,18 +30,30 @@ impl Semaphore {
     fn new(n: usize) -> Self {
         Self { permits: Mutex::new(n), cv: Condvar::new() }
     }
-    /// Block until a permit is free, then take it.
-    fn acquire(&self) {
+    /// Block until a permit is free, take it, and return an RAII guard that releases it on Drop —
+    /// so the permit is returned whether the handler completes normally, PANICS (Drop runs during
+    /// unwind), or is dropped unspawned. Without the guard a panicking tool call would leak its
+    /// permit and, after MAX_INFLIGHT panics, wedge the reader forever on `acquire`.
+    fn acquire(self: &Arc<Self>) -> PermitGuard {
         let mut p = self.permits.lock().unwrap_or_else(|e| e.into_inner());
         while *p == 0 {
             p = self.cv.wait(p).unwrap_or_else(|e| e.into_inner());
         }
         *p -= 1;
+        PermitGuard(self.clone())
     }
     fn release(&self) {
         let mut p = self.permits.lock().unwrap_or_else(|e| e.into_inner());
         *p += 1;
         self.cv.notify_one();
+    }
+}
+
+/// Returns a `Semaphore` permit on Drop (panic-safe).
+struct PermitGuard(Arc<Semaphore>);
+impl Drop for PermitGuard {
+    fn drop(&mut self) {
+        self.0.release();
     }
 }
 
@@ -174,7 +186,13 @@ pub fn handle_message(line: &str, ctx: &Ctx) -> Option<String> {
     };
     // No `id` member at all ⇒ notification (no response). `id: null` IS a request id (respond).
     let id = req.get("id")?.clone();
-    let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    // A request must carry a string `method`; a missing/non-string one is a malformed request.
+    let method = match req.get("method").and_then(|m| m.as_str()) {
+        Some(m) => m,
+        None => {
+            return Some(error_response(id, -32600, "invalid request: missing or non-string method"))
+        }
+    };
     let params = req.get("params").cloned().unwrap_or(Value::Null);
     let resp = match dispatch(method, &params, ctx) {
         Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
@@ -190,11 +208,15 @@ fn error_response(id: Value, code: i64, message: impl Into<String>) -> String {
 }
 
 /// Serve the MCP protocol over stdin/stdout until EOF. Each request runs on its own thread (so a long
-/// tool call doesn't block a concurrent quick one); responses are written under a stdout `Mutex`, one
-/// complete line each, so concurrent responses never interleave (JSON-RPC pairs by id, so out-of-order
-/// is legal). Finished threads are reaped each iteration (the handle vec stays bounded to in-flight
-/// requests), and any in-flight threads are JOINED at EOF so their responses flush before we exit —
-/// otherwise a piped batch could lose the responses to its last requests. Blocks until stdin closes.
+/// tool call doesn't block a concurrent quick one — the handler computes its payload BEFORE taking the
+/// stdout lock, which it holds only for the `writeln!`); responses are written under a stdout `Mutex`,
+/// one complete line each, so concurrent responses never interleave (JSON-RPC pairs by id, so
+/// out-of-order is legal). A counting semaphore caps concurrency at MAX_INFLIGHT: the "doesn't block"
+/// guarantee holds BELOW saturation — with that many already-stuck long calls the reader blocks on
+/// `acquire` (intended backpressure). Each request holds an RAII permit (released even on a handler
+/// panic). Finished threads are reaped each iteration (the handle vec stays bounded to in-flight
+/// requests); in-flight threads are JOINED at EOF so their responses flush before we exit (else a
+/// piped batch could lose the responses to its last requests). Blocks until stdin closes.
 pub fn serve_stdio(ctx: Ctx) -> std::io::Result<()> {
     let ctx = Arc::new(ctx);
     let out = Arc::new(Mutex::new(std::io::stdout()));
@@ -206,29 +228,27 @@ pub fn serve_stdio(ctx: Ctx) -> std::io::Result<()> {
         if line.trim().is_empty() {
             continue;
         }
-        // Backpressure: block here until an in-flight slot frees, bounding live threads to MAX_INFLIGHT.
-        sem.acquire();
+        // Backpressure: block until an in-flight slot frees. The RAII permit returns its slot on the
+        // thread's normal end, a panic (Drop runs during unwind), OR if `work` is dropped unspawned.
+        let permit = sem.acquire();
         let ctx = ctx.clone();
         let out = out.clone();
-        let sem2 = sem.clone();
         let work = move || {
+            let _permit = permit; // released on drop — normal, panic, or unspawned
             if let Some(resp) = handle_message(&line, &ctx) {
-                if let Ok(mut o) = out.lock() {
-                    let _ = writeln!(o, "{resp}");
-                    let _ = o.flush();
-                }
+                // Recover from a poisoned stdout mutex (a prior panic-while-writing) so later
+                // responses still flush, rather than being silently dropped forever.
+                let mut o = out.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = writeln!(o, "{resp}");
+                let _ = o.flush();
             }
-            sem2.release();
         };
         // `Builder::spawn` returns a Result (it does NOT panic like `thread::spawn`). On the rare
-        // resource-exhaustion failure the moved `work` is dropped WITHOUT releasing its permit, so we
-        // release here and drop the request (the client can retry); concurrency stays bounded.
+        // resource-exhaustion failure the moved `work` is dropped, and its permit's Drop releases the
+        // slot, so we just drop the request (the client can retry); concurrency stays bounded.
         match std::thread::Builder::new().spawn(work) {
             Ok(h) => handles.push(h),
-            Err(e) => {
-                eprintln!("ensemble mcp: thread spawn failed, dropping request: {e}");
-                sem.release();
-            }
+            Err(e) => eprintln!("ensemble mcp: thread spawn failed, dropping request: {e}"),
         }
         handles.retain(|h| !h.is_finished()); // reap completed threads; keep the vec in-flight-sized
     }
@@ -239,8 +259,28 @@ pub fn serve_stdio(ctx: Ctx) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
+impl Semaphore {
+    fn available(&self) -> usize {
+        *self.permits.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permit_is_released_even_on_handler_panic() {
+        // the RAII guard must return the permit during unwind — else MAX_INFLIGHT panics wedge serve.
+        let sem = Arc::new(Semaphore::new(2));
+        assert_eq!(sem.available(), 2);
+        let s = sem.clone();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _permit = s.acquire(); // available → 1
+            panic!("handler boom"); // unwind drops _permit → release
+        }));
+        assert_eq!(sem.available(), 2, "permit returned during unwind, not leaked");
+    }
 
     fn ctx(repo: &std::path::Path) -> Ctx {
         Ctx { repo: repo.to_path_buf(), name: "tester".into() }
@@ -283,6 +323,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let r = call(r#"{"jsonrpc":"2.0","id":3,"method":"bogus/thing"}"#, &ctx(tmp.path())).unwrap();
         assert_eq!(r["error"]["code"], -32601);
+    }
+
+    #[test]
+    fn request_with_missing_method_is_invalid_request() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = call(r#"{"jsonrpc":"2.0","id":7}"#, &ctx(tmp.path())).unwrap();
+        assert_eq!(r["error"]["code"], -32600, "a request with no method is -32600 Invalid Request");
     }
 
     #[test]
