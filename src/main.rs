@@ -19,6 +19,7 @@ const USAGE: &str = "usage:\n  \
     ensemble dispatch \"<task1>\" ... --ledger <db> [--crew <crew.toml>] [--repo <path>]   (durable, resumable)\n  \
     ensemble ledger <status|recover> --ledger <db> [--stale-secs N]\n  \
     ensemble nodes   (probe the tailnet for `serve` hosts and the agents they offer)\n  \
+    ensemble doctor   (check this machine is ready: which AI CLIs + tailscale are on PATH, is-git-repo)\n  \
     ensemble agent <name> \"<task>\" [--node auto|<host>] [--repo <path>] [--json]   (delegate ONE turn to one CLI)\n  \
     ensemble serve [--bind <addr>]   (default 0.0.0.0:7878 — host this node's local agents)\n\n\
     run/run-many/dispatch auto-discover tailnet `serve` hosts for any agent without an explicit\n  \
@@ -40,6 +41,7 @@ fn main() {
         Some("dispatch") => dispatch_cmd(&args),
         Some("ledger") => ledger_cmd(&args),
         Some("nodes") => nodes_cmd(&args),
+        Some("doctor") => doctor_cmd(&args),
         Some("agent") => agent_cmd(&args),
         Some("serve") => serve_cmd(&args),
         _ => {
@@ -465,6 +467,28 @@ fn nodes_cmd(_args: &[String]) {
     entries.sort();
     for (agent, url) in entries {
         println!("  {agent} -> {url}");
+    }
+}
+
+/// `ensemble doctor` — print a readiness report for THIS machine (which AI CLIs + tailscale are on
+/// PATH, is the cwd a git repo) and exit non-zero if the mesh can't run here, so a script can gate
+/// on it (`ensemble doctor && ensemble run ...`).
+fn doctor_cmd(_args: &[String]) {
+    let st = ensemble::doctor::run_checks();
+    println!("ensemble doctor — environment readiness:");
+    for t in &st {
+        let mark = if t.ok { "ok     " } else { "MISSING" };
+        if t.hint.is_empty() {
+            println!("  [{mark}] {}", t.name);
+        } else {
+            println!("  [{mark}] {}  — {}", t.name, t.hint);
+        }
+    }
+    if ensemble::doctor::is_ready(&st) {
+        println!("\nready: a crew can run here.");
+    } else {
+        eprintln!("\nNOT ready: need a git repo in the cwd AND at least one AI CLI on PATH.");
+        std::process::exit(1);
     }
 }
 

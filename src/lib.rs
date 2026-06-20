@@ -8,6 +8,7 @@ pub mod conductor;
 pub mod crew;
 pub mod discovery;
 pub mod dispatch;
+pub mod doctor;
 pub mod exec_adapter;
 pub mod gate;
 pub mod ledger;
@@ -28,6 +29,7 @@ pub use discovery::{
     build_agent_hosts, discover_agent_hosts, discover_nodes, parse_health_agents, probe_agents,
     Node,
 };
+pub use doctor::{check_tools, is_ready, run_checks, ToolStatus};
 pub use exec_adapter::ExecAdapter;
 pub use gate::{decide, GateDecision, RoleVerdict};
 pub use ledger::{Counts, Ledger, LedgerError, Task, TaskState};
