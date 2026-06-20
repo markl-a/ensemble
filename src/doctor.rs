@@ -73,7 +73,7 @@ pub fn run_checks() -> Vec<ToolStatus> {
             "optional: install tailscale for cross-machine discovery".to_string()
         },
     });
-    let git = cwd_is_git_repo();
+    let git = crate::repo_sync::is_git_worktree(Path::new("."));
     out.push(ToolStatus {
         name: GIT_REPO.to_string(),
         ok: git,
@@ -98,16 +98,6 @@ fn on_path(tool: &str) -> bool {
         .args(args)
         .output()
         .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-/// True if the current directory is inside a git work tree.
-fn cwd_is_git_repo() -> bool {
-    Command::new("git")
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .current_dir(Path::new("."))
-        .output()
-        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
         .unwrap_or(false)
 }
 
