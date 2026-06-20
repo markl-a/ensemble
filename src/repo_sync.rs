@@ -123,12 +123,15 @@ pub fn merge_branch(repo: &Path, branch: &str, into: &str) -> std::io::Result<Me
                 .map(String::from)
                 .collect(),
             Err(e) => {
+                let mut msg = format!("could not query conflicts after a failed merge: {e}");
                 if is_mid_merge(repo) {
-                    let _ = git_run(repo, &["merge", "--abort"]);
+                    if let Err(ae) = git_run(repo, &["merge", "--abort"]) {
+                        msg.push_str(&format!(
+                            "; AND `git merge --abort` failed — {into} may be left mid-merge: {ae}"
+                        ));
+                    }
                 }
-                return Err(std::io::Error::other(format!(
-                    "could not query conflicts after a failed merge: {e}"
-                )));
+                return Err(std::io::Error::other(msg));
             }
         };
     if is_mid_merge(repo) {
