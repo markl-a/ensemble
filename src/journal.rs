@@ -49,21 +49,67 @@ pub fn render(msgs: &[Message], outcome: &str, detail: &str, rounds: u32) -> Str
     s
 }
 
-/// The journal path for a run slug: `<repo>/.ensemble/runs/<slug>.jsonl`.
+/// Reduce a slug to ONE safe filename component inside `.ensemble/runs`. `write_run`/`journal_path`
+/// are public, so a caller-supplied slug must never escape the runs dir via path separators or `..`.
+/// (The internal caller `Worktree::slug()` is already sanitized; this guards the public surface.)
+/// Note: this does NOT truncate — truncating could chop the seq suffix and reintroduce collisions.
+fn sanitize_slug(slug: &str) -> String {
+    let cleaned: String = slug
+        .chars()
+        .map(|c| match c {
+            c if c.is_ascii_alphanumeric() => c,
+            '-' | '_' | '.' => c,
+            _ => '-',
+        })
+        .collect();
+    // strip leading/trailing dots so "", ".", ".." can never name a traversal/hidden entry
+    let trimmed = cleaned.trim_matches('.');
+    if trimmed.is_empty() {
+        "run".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// The canonical journal path for a run slug: `<repo>/.ensemble/runs/<safe-slug>.jsonl`.
 pub fn journal_path(repo: &Path, slug: &str) -> PathBuf {
     repo.join(".ensemble")
         .join("runs")
-        .join(format!("{slug}.jsonl"))
+        .join(format!("{}.jsonl", sanitize_slug(slug)))
 }
 
-/// Write a run's JSONL to its journal path, creating `.ensemble/runs/` if needed. Returns the path.
+/// Write a run's JSONL under `.ensemble/runs/` and return the path it landed at. NEVER truncates an
+/// existing journal: the worktree seq counter is process-local, so a later process can reuse a slug
+/// once the prior run's branch is gone — so we create-new and disambiguate to `<slug>.1.jsonl`,
+/// `<slug>.2.jsonl`, … keeping every run's record intact.
 pub fn write_run(repo: &Path, slug: &str, jsonl: &str) -> io::Result<PathBuf> {
-    let path = journal_path(repo, slug);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+    use std::io::Write;
+    let dir = repo.join(".ensemble").join("runs");
+    fs::create_dir_all(&dir)?;
+    let stem = sanitize_slug(slug);
+    for n in 0u32..=u32::MAX {
+        let path = if n == 0 {
+            dir.join(format!("{stem}.jsonl")) // == journal_path(repo, slug)
+        } else {
+            dir.join(format!("{stem}.{n}.jsonl"))
+        };
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut f) => {
+                f.write_all(jsonl.as_bytes())?;
+                return Ok(path);
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
     }
-    fs::write(&path, jsonl)?;
-    Ok(path)
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "exhausted journal filename disambiguation",
+    ))
 }
 
 /// Parse a journal back into entries (blank lines skipped) — for reading a run's transcript.
@@ -133,6 +179,34 @@ mod tests {
         assert!(path.exists(), "journal file must exist after write_run");
         let back = fs::read_to_string(&path).unwrap();
         assert_eq!(back, jsonl, "written bytes must match the rendered JSONL");
+    }
+
+    #[test]
+    fn write_run_never_overwrites_an_existing_run() {
+        // a later process can reuse a slug once the prior branch is gone — the second run's journal
+        // must NOT clobber the first (the seq counter is process-local, so slugs aren't globally unique).
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        let a = write_run(repo, "dup", "AAA\n").unwrap();
+        let b = write_run(repo, "dup", "BBB\n").unwrap();
+        assert_ne!(a, b, "a second same-slug run must land in its own file");
+        assert_eq!(fs::read_to_string(&a).unwrap(), "AAA\n", "first journal preserved");
+        assert_eq!(fs::read_to_string(&b).unwrap(), "BBB\n");
+        let n = fs::read_dir(repo.join(".ensemble/runs")).unwrap().count();
+        assert_eq!(n, 2, "both runs kept");
+    }
+
+    #[test]
+    fn journal_path_confines_a_hostile_slug_to_the_runs_dir() {
+        let repo = Path::new("/tmp/repo");
+        let runs = repo.join(".ensemble").join("runs");
+        let p = journal_path(repo, "../../etc/passwd");
+        assert!(p.starts_with(&runs), "slug must not escape the runs dir: {p:?}");
+        assert_eq!(p.parent().unwrap(), runs, "must be a direct child of runs");
+        assert!(
+            !p.components().any(|c| c.as_os_str() == ".."),
+            "no traversal component may survive: {p:?}"
+        );
     }
 
     #[test]
