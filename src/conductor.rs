@@ -5,6 +5,9 @@ use crate::gate::{decide, GateDecision, RoleVerdict};
 use crate::verdict::parse_verdict;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Instant;
 
 #[derive(Debug)]
 pub enum Decision {
@@ -25,11 +28,30 @@ pub struct RunOutcome {
 pub struct Conductor {
     crew: CrewConfig,
     adapters: HashMap<String, Box<dyn Adapter>>,
+    /// Firewall B: a Ctrl-C handler flips this; the conductor bails cleanly at the next round
+    /// boundary. Defaults to a never-set flag (so a plain `Conductor::new` is unaffected).
+    abort: Arc<AtomicBool>,
+}
+
+/// Firewall B: true when `elapsed_secs` has exceeded a wall-clock budget (`budget == 0` ⇒ no budget).
+fn over_budget(elapsed_secs: u64, budget: u64) -> bool {
+    budget > 0 && elapsed_secs >= budget
 }
 
 impl Conductor {
     pub fn new(crew: CrewConfig, adapters: HashMap<String, Box<dyn Adapter>>) -> Self {
-        Self { crew, adapters }
+        Self {
+            crew,
+            adapters,
+            abort: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Wire an external abort flag (set by a Ctrl-C handler) so a run stops cleanly at the next
+    /// round boundary (firewall B).
+    pub fn with_abort(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.abort = flag;
+        self
     }
 
     fn adapter_for_role(&self, role: &str) -> Option<&dyn Adapter> {
@@ -42,16 +64,44 @@ impl Conductor {
         let mut bb = Blackboard::new();
         let mut feedback: Vec<String> = Vec::new();
         let max = self.crew.gate.max_rounds.max(1);
+        let started = Instant::now();
+        let mut last_sig: Option<String> = None; // firewall B: previous round's progress signature
+        let mut same = 0u32; // consecutive identical-signature rounds
 
         for round in 0..max {
+            // ── Firewall B: abort (Ctrl-C) + wall-clock budget, checked at each round boundary ──
+            if self.abort.load(Ordering::Relaxed) {
+                return RunOutcome {
+                    decision: Decision::Escalated("aborted by operator".to_string()),
+                    rounds: round,
+                    blackboard: bb,
+                    branch: None,
+                };
+            }
+            if over_budget(started.elapsed().as_secs(), self.crew.gate.max_task_secs) {
+                return RunOutcome {
+                    decision: Decision::Escalated(format!(
+                        "timed out after {}s",
+                        self.crew.gate.max_task_secs
+                    )),
+                    rounds: round,
+                    blackboard: bb,
+                    branch: None,
+                };
+            }
+
             // 1) implementer
             let impl_role = self.crew.implementer_role();
             let impl_prompt = build_prompt(task, &bb, &feedback, impl_role, false);
+            let impl_text;
             match self
                 .adapter_for_role(impl_role)
                 .map(|a| a.run(&impl_prompt, cwd))
             {
-                Some(Ok(out)) => bb.post(&out.agent, "result", &out.text),
+                Some(Ok(out)) => {
+                    impl_text = out.text.clone();
+                    bb.post(&out.agent, "result", &out.text);
+                }
                 Some(Err(e)) => {
                     return RunOutcome {
                         decision: Decision::Escalated(format!(
@@ -77,8 +127,12 @@ impl Conductor {
             // ── TEST GATE (firewall A) ── the project's real tests must be GREEN before the AI
             // reviewers run. RED bounces the traceback back to the implementer (don't spend reviewer
             // turns on code that doesn't pass); a suite that never goes green can NEVER land.
+            let mut test_passed = true;
+            let mut test_out = String::new();
             if let Some(test) = &self.crew.test {
                 let t = crate::test_gate::run_tests(cwd, &test.command);
+                test_passed = t.passed;
+                test_out = t.output.clone();
                 bb.post(
                     "test",
                     if t.passed {
@@ -88,25 +142,50 @@ impl Conductor {
                     },
                     &t.output,
                 );
-                if !t.passed {
-                    if round + 1 >= max {
-                        return RunOutcome {
-                            decision: Decision::Escalated(format!(
-                                "tests never passed after {} round(s)",
-                                round + 1
-                            )),
-                            rounds: round + 1,
-                            blackboard: bb,
-                            branch: None,
-                        };
-                    }
-                    feedback = vec![format!(
-                        "Your changes did not pass the test suite. Fix WITHOUT breaking existing \
-                         behaviour. Test output:\n{}",
-                        t.output
-                    )];
-                    continue;
+            }
+
+            // ── CIRCUIT BREAKER (firewall B) ── break early on NO PROGRESS: the implementer's output
+            // and the test result are byte-identical to the previous round (it's spinning). Trips
+            // before grinding to `max_rounds`. Repeated identical test failures are the sharpest
+            // signal — so this sits before the red-bounce below.
+            let sig = format!("{impl_text}\u{1}{test_out}");
+            if last_sig.as_deref() == Some(sig.as_str()) {
+                same += 1;
+            } else {
+                same = 1;
+                last_sig = Some(sig);
+            }
+            if self.crew.gate.stall_limit > 0 && same >= self.crew.gate.stall_limit {
+                return RunOutcome {
+                    decision: Decision::Escalated(format!(
+                        "circuit-broken: no progress across {same} identical rounds"
+                    )),
+                    rounds: round + 1,
+                    blackboard: bb,
+                    branch: None,
+                };
+            }
+
+            // test RED → bounce the traceback back to the implementer, skip reviewers this round; a
+            // suite that never goes green can NEVER land.
+            if !test_passed {
+                if round + 1 >= max {
+                    return RunOutcome {
+                        decision: Decision::Escalated(format!(
+                            "tests never passed after {} round(s)",
+                            round + 1
+                        )),
+                        rounds: round + 1,
+                        blackboard: bb,
+                        branch: None,
+                    };
                 }
+                feedback = vec![format!(
+                    "Your changes did not pass the test suite. Fix WITHOUT breaking existing \
+                     behaviour. Test output:\n{}",
+                    test_out
+                )];
+                continue;
             }
 
             // 2) reviewers — a flaked reviewer is EXCLUDED (logged), never counted as approval.
@@ -331,5 +410,19 @@ fn build_prompt(
         }
         p.push_str("\nAfter doing it, briefly state what you produced.\n");
         p
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::over_budget;
+
+    #[test]
+    fn over_budget_respects_a_zero_disabled_budget() {
+        assert!(!over_budget(0, 0)); // 0 budget = disabled
+        assert!(!over_budget(9_999, 0)); // disabled even at large elapsed
+        assert!(!over_budget(2, 3)); // under budget
+        assert!(over_budget(3, 3)); // at budget
+        assert!(over_budget(5, 3)); // over budget
     }
 }
