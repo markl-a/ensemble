@@ -160,6 +160,10 @@ non-LLM trust anchor.
   - **auto-discovery ✅** `run/dispatch` default-ON probe each tailnet `serve` peer's `/health` and
     route any agent without an explicit `[agents.<n>] node` to the discovered host (explicit >
     discovered > local). `ensemble nodes` lists hosts; `--no-discover` opts out. No hand-written URLs.
+  - **firewalls ✅ (swarm-hardening)** (A) automated TEST gate — `[test] command` must pass GREEN
+    before a task lands, RED bounces the traceback to the implementer (`src/test_gate.rs`); (B)
+    circuit breaker — `[gate] stall_limit` (no-progress early-break) + `max_task_secs` (wall-clock
+    budget) + Ctrl-C clean abort. Spec/plan: `docs/specs|plans/2026-06-20-firewalls-*`.
   - **3b-1 ✅** cross-machine **git-sync via git bundles**: a remote agent runs on the
     orchestrator's base commit (bundled over the `/run` wire) and its edits flow back into the
     orchestrator's worktree — the Adapter abstraction holds, so the conductor + Phase-2c

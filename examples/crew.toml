@@ -10,6 +10,14 @@ pipeline = ["implement", "review", "debug"]
 min_approvals = 2        # how many reviewers must APPROVE for a task to land
 max_rounds    = 2        # bounded convergence; escalate to a human after this many CHANGES loops
 on_flake      = "exclude"  # a flaked/empty/rate-limited agent: "retry" | "substitute" | "exclude"
+# firewall B (circuit breaker), both optional, 0 = disabled:
+stall_limit   = 0        # break early after N consecutive no-progress rounds (identical output)
+max_task_secs = 0        # wall-clock budget per task in seconds (a coarse token-budget stand-in)
+
+# firewall A (optional automated test gate): the project's real tests must pass (exit 0) before a
+# task can land; a RED suite bounces the traceback back to the implementer. Absent = AI review only.
+# [test]
+# command = "cargo test --quiet"
 
 [roles.implement]
 agent = "codex"          # OpenAI Codex CLI writes the change

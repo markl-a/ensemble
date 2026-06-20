@@ -1,6 +1,17 @@
 use ensemble::*;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
+
+/// Process-wide abort flag (firewall B). A single Ctrl-C handler flips it; every Conductor reads it
+/// via `.with_abort(...)` and bails cleanly at the next round boundary.
+static ABORT: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+fn abort_flag() -> Arc<AtomicBool> {
+    ABORT
+        .get_or_init(|| Arc::new(AtomicBool::new(false)))
+        .clone()
+}
 
 const USAGE: &str = "usage:\n  \
     ensemble run \"<task>\" [--crew <crew.toml>] [--repo <path>]\n  \
@@ -13,6 +24,12 @@ const USAGE: &str = "usage:\n  \
     [agents.<n>] node = ... in crew.toml; pass --no-discover to stay local.";
 
 fn main() {
+    // Firewall B: install the Ctrl-C handler once — it flips the shared abort flag so a running
+    // conductor stops cleanly at the next round boundary (worktrees are discarded on the way out).
+    {
+        let flag = abort_flag();
+        let _ = ctrlc::set_handler(move || flag.store(true, Ordering::Relaxed));
+    }
     let args: Vec<String> = std::env::args().collect();
     let sub = args.get(1).map(|s| s.as_str());
     match sub {
@@ -53,7 +70,7 @@ fn run_single(args: &[String]) {
     let crew = load_crew(args);
     let repo = parse_flag(args, "--repo").unwrap_or_else(|| ".".to_string());
     let registry = adapters_for(&crew, !has_flag(args, "--no-discover"));
-    let c = Conductor::new(crew, registry);
+    let c = Conductor::new(crew, registry).with_abort(abort_flag());
     let out = c.run_in_repo(&task, Path::new(&repo));
     print_transcript(&out);
     match out.decision {
@@ -92,7 +109,7 @@ fn run_many(args: &[String]) {
     let crew = load_crew(args);
     let repo = parse_flag(args, "--repo").unwrap_or_else(|| ".".to_string());
     let registry = adapters_for(&crew, !has_flag(args, "--no-discover"));
-    let c = Conductor::new(crew, registry);
+    let c = Conductor::new(crew, registry).with_abort(abort_flag());
     let outs = c.run_many(&tasks, Path::new(&repo));
     let mut any_escalated = false;
     for (task, out) in tasks.iter().zip(outs.iter()) {
@@ -138,7 +155,8 @@ fn dispatch_cmd(args: &[String]) {
     let c = Conductor::new(
         crew.clone(),
         adapters_for(&crew, !has_flag(args, "--no-discover")),
-    );
+    )
+    .with_abort(abort_flag());
     let mut ledger = ensemble::ledger::Ledger::open(Path::new(&ledger_path)).unwrap_or_else(|e| {
         eprintln!("ledger {ledger_path}: {e}");
         std::process::exit(1);
