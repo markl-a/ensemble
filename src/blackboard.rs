@@ -1,5 +1,7 @@
+use serde::{Deserialize, Serialize};
+
 /// One message agents leave for each other on a task-run's shared channel.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
     pub from: String,
     pub kind: String, // "result" | "verdict" | "finding" | "question"

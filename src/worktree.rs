@@ -13,6 +13,9 @@ static SEQ: AtomicU64 = AtomicU64::new(0);
 pub struct Worktree {
     pub path: PathBuf,
     pub branch: String,
+    /// The unique slug (`sanitize(task_id)-<seq>`) — the branch is `ensemble/<slug>` and the per-run
+    /// journal is `.ensemble/runs/<slug>.jsonl`.
+    slug: String,
     repo: PathBuf,
     /// When false (default), the branch is deleted on Drop (the work is discarded). A LANDED run
     /// flips this via `keep()` so the committed work survives after the worktree dir is removed.
@@ -46,6 +49,7 @@ impl Worktree {
         Ok(Self {
             path,
             branch,
+            slug,
             repo: repo.to_path_buf(),
             keep_branch: false,
         })
@@ -53,6 +57,11 @@ impl Worktree {
 
     pub fn branch(&self) -> &str {
         &self.branch
+    }
+
+    /// The unique slug for this run (matches the `ensemble/<slug>` branch and the journal filename).
+    pub fn slug(&self) -> &str {
+        &self.slug
     }
 
     /// Keep the branch after this worktree is dropped (so a LANDED result persists).

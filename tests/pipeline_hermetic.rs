@@ -401,6 +401,92 @@ fn landed_run_persists_work_on_a_kept_branch() {
 }
 
 #[test]
+fn run_in_repo_writes_a_journal_of_the_collaboration() {
+    // design step 2: a worktree run records the blackboard transcript + a terminal decision to
+    // `.ensemble/runs/<slug>.jsonl`, so the operator can replay what the crew did.
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    for a in [
+        &["init", "-q"][..],
+        &["config", "user.email", "t@t"],
+        &["config", "user.name", "t"],
+    ] {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(a)
+            .output()
+            .unwrap();
+    }
+    std::fs::write(repo.join("seed"), "x").unwrap();
+    for a in [&["add", "."][..], &["commit", "-q", "-m", "init"]] {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(a)
+            .output()
+            .unwrap();
+    }
+    let mut map: std::collections::HashMap<String, Box<dyn Adapter>> =
+        std::collections::HashMap::new();
+    map.insert(
+        "codex".into(),
+        Box::new(WriterThenLgtm {
+            name: "codex".into(),
+            file: "out.txt".into(),
+            content: "DONE".into(),
+        }),
+    );
+    map.insert(
+        "claude".into(),
+        Box::new(WriterThenLgtm {
+            name: "claude".into(),
+            file: String::new(),
+            content: String::new(),
+        }),
+    );
+    let c = Conductor::new(crew(), map);
+
+    let out = c.run_in_repo("write out.txt", repo);
+    assert!(matches!(out.decision, Decision::Landed));
+
+    // exactly one run was journaled
+    let files: Vec<_> = std::fs::read_dir(repo.join(".ensemble/runs"))
+        .expect("a .ensemble/runs dir should be created")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().map(|x| x == "jsonl").unwrap_or(false))
+        .collect();
+    assert_eq!(files.len(), 1, "exactly one run journal: {files:?}");
+
+    let body = std::fs::read_to_string(&files[0]).unwrap();
+    let entries = ensemble::parse_journal(&body).expect("journal parses");
+    // the implementer's result and the reviewer's verdict are both recorded as Msg entries
+    assert!(
+        entries.iter().any(|e| matches!(
+            e, ensemble::JournalEntry::Msg(m) if m.from == "codex" && m.kind == "result"
+        )),
+        "implementer result must be journaled"
+    );
+    assert!(
+        entries.iter().any(|e| matches!(
+            e, ensemble::JournalEntry::Msg(m) if m.body.contains("VERDICT: LGTM")
+        )),
+        "reviewer verdict must be journaled"
+    );
+    // the LAST entry is the terminal landed decision, carrying the kept branch
+    match entries.last().expect("journal is non-empty") {
+        ensemble::JournalEntry::Decision {
+            outcome, detail, ..
+        } => {
+            assert_eq!(outcome, "landed");
+            assert_eq!(detail.as_str(), out.branch.as_deref().unwrap());
+        }
+        other => panic!("last journal entry must be the decision: {other:?}"),
+    }
+}
+
+#[test]
 fn commit_failure_escalates_never_a_silent_land() {
     // The persistence feature's whole point is "LANDED work survives". If the commit FAILS the
     // branch is discarded on Drop, so the work is lost — the run must Escalate (not report a clean

@@ -334,6 +334,16 @@ impl Conductor {
                         }
                     }
                 }
+                // Per-run journal (design step 2): the blackboard transcript + the terminal decision,
+                // written to `<repo>/.ensemble/runs/<slug>.jsonl` so the operator can replay what the
+                // crew did. Best-effort — a journal write failure must never change the run's outcome.
+                let (outcome, detail) = match &out.decision {
+                    Decision::Landed => ("landed", out.branch.clone().unwrap_or_default()),
+                    Decision::Escalated(why) => ("escalated", why.clone()),
+                };
+                let jsonl =
+                    crate::journal::render(out.blackboard.read_since(0), outcome, &detail, out.rounds);
+                let _ = crate::journal::write_run(repo, wt.slug(), &jsonl);
                 out // wt drops → worktree removed; branch kept iff we called keep()
             }
             Err(e) => {

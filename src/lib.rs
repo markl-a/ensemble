@@ -11,6 +11,7 @@ pub mod dispatch;
 pub mod doctor;
 pub mod exec_adapter;
 pub mod gate;
+pub mod journal;
 pub mod ledger;
 pub mod mesh;
 pub mod remote_adapter;
@@ -33,6 +34,7 @@ pub use discovery::{
 pub use doctor::{check_tools, is_ready, present_clis, run_checks, ToolStatus};
 pub use exec_adapter::ExecAdapter;
 pub use gate::{decide, GateDecision, RoleVerdict};
+pub use journal::{journal_path, parse as parse_journal, write_run, Entry as JournalEntry};
 pub use ledger::{Counts, Ledger, LedgerError, Task, TaskState};
 pub use mesh::{render_mesh, render_up};
 pub use remote_adapter::RemoteAdapter;
