@@ -59,6 +59,8 @@ mod tests {
             min_approvals: min,
             max_rounds: rounds,
             on_flake: OnFlake::Exclude,
+            stall_limit: 0,
+            max_task_secs: 0,
         }
     }
     fn rv(role: &str, agent: &str, v: Verdict) -> RoleVerdict {

@@ -18,6 +18,14 @@ pub struct GatePolicy {
     pub max_rounds: u32,
     #[serde(deserialize_with = "de_on_flake")]
     pub on_flake: OnFlake,
+    /// Firewall B: break early if the implementer makes no progress (byte-identical output + test
+    /// result) for this many consecutive rounds. 0 (default) = disabled; only `max_rounds` applies.
+    #[serde(default)]
+    pub stall_limit: u32,
+    /// Firewall B: a wall-clock budget per task in seconds — a practical stand-in for a token
+    /// budget. 0 (default) = disabled.
+    #[serde(default)]
+    pub max_task_secs: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -201,6 +209,31 @@ mod tests {
             agent = "claude"
         "#;
         assert!(CrewConfig::from_toml(toml).is_err());
+    }
+
+    #[test]
+    fn parses_firewall_b_gate_fields() {
+        let toml = r#"
+            pipeline = ["i"]
+            [gate]
+            min_approvals = 1
+            max_rounds = 5
+            on_flake = "exclude"
+            stall_limit = 2
+            max_task_secs = 30
+            [roles.i]
+            agent = "codex"
+        "#;
+        let c = CrewConfig::from_toml(toml).unwrap();
+        assert_eq!(c.gate.stall_limit, 2);
+        assert_eq!(c.gate.max_task_secs, 30);
+        // absent → 0 (disabled), backward compatible
+        let c2 = CrewConfig::from_toml(
+            "pipeline=[\"i\"]\n[gate]\nmin_approvals=1\nmax_rounds=1\non_flake=\"exclude\"\n[roles.i]\nagent=\"codex\"",
+        )
+        .unwrap();
+        assert_eq!(c2.gate.stall_limit, 0);
+        assert_eq!(c2.gate.max_task_secs, 0);
     }
 
     #[test]
