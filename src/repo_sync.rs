@@ -130,6 +130,31 @@ fn files_have_conflict_markers(repo: &Path, paths: &[String]) -> bool {
     paths.iter().any(|p| path_has_conflict_markers(repo, p))
 }
 
+/// Is `p` a conflict a text-editing resolver can SAFELY handle — i.e. a both-modified TEXT conflict?
+/// Decided by git's index stages (`ls-files -u`), NOT marker scan alone: a path qualifies only if
+/// BOTH stage 2 (ours) AND stage 3 (theirs) exist (a genuine two-sided conflict, excluding
+/// modify/delete & rename which have one side) AND git actually wrote textual markers (excluding
+/// BINARY both-modified, which has both stages but no markers). The stage check is what stops a
+/// structural conflict whose file merely contains a marker-like line from being misclassified as
+/// content. On any query failure, returns false → the conflict is treated as structural and escalates
+/// (the safe direction — never lands a bad merge).
+fn is_text_content_conflict(repo: &Path, p: &str) -> bool {
+    let out = match git_capture(repo, &["ls-files", "-u", "--", p]) {
+        Ok(o) => o,
+        Err(_) => return false,
+    };
+    let (mut ours, mut theirs) = (false, false);
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        // format: "<mode> <sha> <stage>\t<path>"
+        match line.split('\t').next().and_then(|m| m.split_whitespace().nth(2)) {
+            Some("2") => ours = true,
+            Some("3") => theirs = true,
+            _ => {}
+        }
+    }
+    ours && theirs && path_has_conflict_markers(repo, p)
+}
+
 /// Restore `repo`'s `into` branch to EXACTLY its pre-merge commit `pre_sha`. A single `reset --hard`
 /// clears any in-progress merge (MERGE_HEAD) AND undoes a commit the resolver may have made — one
 /// path that is correct whether we are mid-merge or the resolver already committed, and that can't
@@ -270,12 +295,10 @@ pub fn merge_with_resolver(
         )));
     }
 
-    // STRUCTURAL (markerless) conflicts can't be safely text-resolved AND `git add` would auto-pick a
-    // side — escalate the whole merge without running the resolver.
-    if conflicts
-        .iter()
-        .any(|p| !path_has_conflict_markers(repo, p))
-    {
+    // Hand the resolver ONLY both-modified TEXT conflicts. A structural/binary conflict (and a
+    // structural file that merely contains a marker-like line) is escalated WITHOUT running the
+    // resolver — `git add` would otherwise auto-pick a side.
+    if conflicts.iter().any(|p| !is_text_content_conflict(repo, p)) {
         restore_to(repo, &pre_sha)?;
         return Ok(MergeOutcome::Conflict(conflicts));
     }
@@ -286,8 +309,17 @@ pub fn merge_with_resolver(
         return Ok(MergeOutcome::Conflict(conflicts)); // resolver failed → escalate
     }
 
-    // Stage ONLY the named conflict paths (not `-A`: that would auto-resolve anything and sweep in
-    // resolver scratch). For a content conflict this marks the resolver's edit as resolved.
+    // The resolver's contract is EDIT-ONLY (don't `git add`/commit). If it left the repo no longer
+    // mid-merge it committed/aborted on its own — a self-completed merge we cannot cleanly validate
+    // (it could have committed markers then overwritten the worktree clean), so don't trust it:
+    // restore to the exact pre-merge commit and escalate. (Well-behaved resolvers stay mid-merge.)
+    if !is_mid_merge(repo) {
+        restore_to(repo, &pre_sha)?;
+        return Ok(MergeOutcome::Conflict(conflicts));
+    }
+
+    // Still mid-merge (expected). Stage ONLY the named conflict paths (not `-A`: that would
+    // auto-resolve anything and sweep in resolver scratch) — so what we validate IS what we commit.
     let mut add_args: Vec<&str> = vec!["add", "--"];
     add_args.extend(conflicts.iter().map(|s| s.as_str()));
     if let Err(e) = git_run(repo, &add_args) {
@@ -317,16 +349,14 @@ pub fn merge_with_resolver(
         return Ok(MergeOutcome::Conflict(conflicts)); // still conflicting → escalate
     }
 
-    // Clean resolution — complete the merge commit (only if the resolver didn't already commit).
-    if is_mid_merge(repo) {
-        if let Err(e) = git_run(repo, &["commit", "--no-edit", "--quiet"]) {
-            return Err(fail_restoring(
-                repo,
-                &pre_sha,
-                into,
-                format!("committing the resolved merge failed: {e}"),
-            ));
-        }
+    // Clean resolution, still mid-merge → complete the merge commit with exactly the staged content.
+    if let Err(e) = git_run(repo, &["commit", "--no-edit", "--quiet"]) {
+        return Err(fail_restoring(
+            repo,
+            &pre_sha,
+            into,
+            format!("committing the resolved merge failed: {e}"),
+        ));
     }
     Ok(MergeOutcome::Landed)
 }
@@ -843,6 +873,28 @@ mod tests {
         .unwrap();
         assert_eq!(out, MergeOutcome::Conflict(vec!["foo".to_string()]));
         assert_eq!(head_sha(repo).unwrap(), pre, "the resolver's bad merge commit was undone");
+        assert_eq!(std::fs::read_to_string(repo.join("foo")).unwrap(), "main-edit\n");
+        assert!(is_clean(repo) && !mid_merge(repo));
+    }
+
+    #[test]
+    fn resolver_committing_markers_then_cleaning_worktree_still_escalates() {
+        // The sneakiest attack: commit the merge WITH markers, then overwrite the worktree marker-free
+        // before returning. A worktree-only scan would see "clean" and land a marker-containing commit.
+        // Because the resolver left the repo not-mid-merge, we refuse to trust the self-commit at all.
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        setup_conflict(repo);
+        let pre = head_sha(repo).unwrap();
+        let out = merge_with_resolver(repo, "ensemble/z", "main", |r, _p| {
+            git(r, &["add", "-A"]); // stage foo WITH conflict markers
+            git(r, &["commit", "--no-edit", "-q"]); // commit the bad merge
+            std::fs::write(r.join("foo"), "looks-clean\n").unwrap(); // hide markers in the worktree
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(out, MergeOutcome::Conflict(vec!["foo".to_string()]));
+        assert_eq!(head_sha(repo).unwrap(), pre, "the bad self-commit was undone");
         assert_eq!(std::fs::read_to_string(repo.join("foo")).unwrap(), "main-edit\n");
         assert!(is_clean(repo) && !mid_merge(repo));
     }
