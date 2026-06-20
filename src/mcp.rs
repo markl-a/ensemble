@@ -12,10 +12,38 @@ use crate::board::FileBoard;
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 /// The MCP protocol version we advertise when a client doesn't request one.
 const DEFAULT_PROTOCOL: &str = "2025-06-18";
+
+/// Max in-flight request threads. A client could otherwise pipeline unboundedly and exhaust threads;
+/// the reader loop blocks (backpressure) once this many are running.
+const MAX_INFLIGHT: usize = 16;
+
+/// A tiny counting semaphore (std only) to cap concurrent request handlers.
+struct Semaphore {
+    permits: Mutex<usize>,
+    cv: Condvar,
+}
+impl Semaphore {
+    fn new(n: usize) -> Self {
+        Self { permits: Mutex::new(n), cv: Condvar::new() }
+    }
+    /// Block until a permit is free, then take it.
+    fn acquire(&self) {
+        let mut p = self.permits.lock().unwrap_or_else(|e| e.into_inner());
+        while *p == 0 {
+            p = self.cv.wait(p).unwrap_or_else(|e| e.into_inner());
+        }
+        *p -= 1;
+    }
+    fn release(&self) {
+        let mut p = self.permits.lock().unwrap_or_else(|e| e.into_inner());
+        *p += 1;
+        self.cv.notify_one();
+    }
+}
 
 /// Per-server config: the repo (= crew session) and this member's identity for board posts.
 pub struct Ctx {
@@ -107,7 +135,17 @@ fn tool_mesh() -> String {
 }
 
 fn tool_board_read(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
-    let since = args.get("since").and_then(|s| s.as_u64()).unwrap_or(0) as usize;
+    // arguments must be an object (or absent/null); a bad shape is a client error, not a silent reset.
+    if !(args.is_null() || args.is_object()) {
+        return Err(RpcError::invalid_params("arguments must be an object"));
+    }
+    let since = match args.get("since") {
+        None | Some(Value::Null) => 0usize,
+        Some(v) => v
+            .as_u64()
+            .ok_or_else(|| RpcError::invalid_params("`since` must be a non-negative integer"))?
+            as usize,
+    };
     let board = FileBoard::open(&ctx.repo);
     let all = board
         .read_since(0)
@@ -122,17 +160,20 @@ fn tool_board_read(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
     Ok(json!({ "messages": messages, "next": next }).to_string())
 }
 
-/// Turn one raw stdin line into the JSON-RPC response line to write, or `None` for a notification
-/// (no `id`) or an unparseable line (we can't know an id to attribute an error to). Pure — the full
-/// request→response mapping is testable without stdio.
+/// Turn one raw stdin line into the JSON-RPC response line to write, or `None` for a NOTIFICATION
+/// (a request with no `id` member — never gets a response). Pure — the full request→response mapping
+/// is testable without stdio.
+///
+/// JSON-RPC conformance: an unparseable line yields a `-32700` parse-error response with `id: null`
+/// (so a confused client isn't left hanging); a message WITH an `id` member is a request even if the
+/// id is `null`, so it always gets a response; only the absence of `id` makes it a notification.
 pub fn handle_message(line: &str, ctx: &Ctx) -> Option<String> {
-    let req: Value = serde_json::from_str(line).ok()?;
-    let id = req.get("id").cloned();
-    // A message with no `id` is a NOTIFICATION — handle side effects (none yet) and never respond.
-    let id = match id {
-        Some(id) if !id.is_null() => id,
-        _ => return None,
+    let req: Value = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(e) => return Some(error_response(Value::Null, -32700, format!("parse error: {e}"))),
     };
+    // No `id` member at all ⇒ notification (no response). `id: null` IS a request id (respond).
+    let id = req.get("id")?.clone();
     let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let params = req.get("params").cloned().unwrap_or(Value::Null);
     let resp = match dispatch(method, &params, ctx) {
@@ -140,6 +181,12 @@ pub fn handle_message(line: &str, ctx: &Ctx) -> Option<String> {
         Err(e) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": e.code, "message": e.message } }),
     };
     Some(resp.to_string())
+}
+
+/// A JSON-RPC error-response line for `id` (used for protocol-level errors like parse failures).
+fn error_response(id: Value, code: i64, message: impl Into<String>) -> String {
+    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message.into() } })
+        .to_string()
 }
 
 /// Serve the MCP protocol over stdin/stdout until EOF. Each request runs on its own thread (so a long
@@ -151,6 +198,7 @@ pub fn handle_message(line: &str, ctx: &Ctx) -> Option<String> {
 pub fn serve_stdio(ctx: Ctx) -> std::io::Result<()> {
     let ctx = Arc::new(ctx);
     let out = Arc::new(Mutex::new(std::io::stdout()));
+    let sem = Arc::new(Semaphore::new(MAX_INFLIGHT));
     let stdin = std::io::stdin();
     let mut handles: Vec<std::thread::JoinHandle<()>> = Vec::new();
     for line in stdin.lock().lines() {
@@ -158,16 +206,30 @@ pub fn serve_stdio(ctx: Ctx) -> std::io::Result<()> {
         if line.trim().is_empty() {
             continue;
         }
+        // Backpressure: block here until an in-flight slot frees, bounding live threads to MAX_INFLIGHT.
+        sem.acquire();
         let ctx = ctx.clone();
         let out = out.clone();
-        handles.push(std::thread::spawn(move || {
+        let sem2 = sem.clone();
+        let work = move || {
             if let Some(resp) = handle_message(&line, &ctx) {
                 if let Ok(mut o) = out.lock() {
                     let _ = writeln!(o, "{resp}");
                     let _ = o.flush();
                 }
             }
-        }));
+            sem2.release();
+        };
+        // `Builder::spawn` returns a Result (it does NOT panic like `thread::spawn`). On the rare
+        // resource-exhaustion failure the moved `work` is dropped WITHOUT releasing its permit, so we
+        // release here and drop the request (the client can retry); concurrency stays bounded.
+        match std::thread::Builder::new().spawn(work) {
+            Ok(h) => handles.push(h),
+            Err(e) => {
+                eprintln!("ensemble mcp: thread spawn failed, dropping request: {e}");
+                sem.release();
+            }
+        }
         handles.retain(|h| !h.is_finished()); // reap completed threads; keep the vec in-flight-sized
     }
     for h in handles {
@@ -234,9 +296,31 @@ mod tests {
     }
 
     #[test]
-    fn unparseable_line_is_ignored() {
+    fn unparseable_line_returns_a_parse_error_with_null_id() {
         let tmp = tempfile::tempdir().unwrap();
-        assert!(super::handle_message("this is not json", &ctx(tmp.path())).is_none());
+        let r = call("this is not json", &ctx(tmp.path())).unwrap();
+        assert_eq!(r["error"]["code"], -32700);
+        assert!(r["id"].is_null(), "a parse error carries a null id");
+    }
+
+    #[test]
+    fn id_null_is_a_request_not_a_notification() {
+        // a message WITH an id member (even null) is a request → gets a response; only a MISSING id
+        // is a notification.
+        let tmp = tempfile::tempdir().unwrap();
+        let r = call(r#"{"jsonrpc":"2.0","id":null,"method":"tools/list"}"#, &ctx(tmp.path())).unwrap();
+        assert!(r["result"]["tools"].is_array(), "id:null still gets a response");
+    }
+
+    #[test]
+    fn board_read_rejects_a_non_integer_since() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"ensemble_board_read","arguments":{"since":"oops"}}}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
+        assert_eq!(r["error"]["code"], -32602, "a bad `since` is invalid params, not a silent reset");
     }
 
     #[test]
