@@ -24,10 +24,18 @@
 
 ## Locked decisions (operator, 2026-06-20)
 
-1. **Mesh-aware prompt entry = an ensemble MCP server** (`ensemble mcp`), NOT a bespoke REPL. It exposes
-   the existing capabilities as MCP tools — `ensemble_mesh()` (machines + CLIs + status),
-   `ensemble_delegate(agent, task, node)`, `ensemble_run(task)` — so any MCP-client lead CLI
-   (claude / codex / opencode) becomes mesh-aware and can coordinate. agy has no MCP → stays subprocess.
+1. **Workers can be LIVE interactive CLIs OR ensemble-spawned — BOTH, through one substrate**
+   (operator: "最起碼要是活 CLI session，然後 ensemble 也能自己拉起 CLI"). The substrate is the
+   blackboard (shared state) + worktree-per-task + the `ensemble merge` verb, exposed to live CLIs via
+   an **ensemble MCP server** (`ensemble mcp`), NOT a bespoke REPL — the CLIs you already open ARE the
+   interface. A live CLI (claude / codex / opencode as an MCP client) becomes a first-class CREW MEMBER:
+   it reads the mesh + blackboard, claims/assigns work, gets its OWN worktree, posts results, and merges
+   — via MCP tools (`ensemble_mesh`, `ensemble_board_read`/`ensemble_board_post`, `ensemble_claim`,
+   `ensemble_worktree`, `ensemble_merge`, `ensemble_run`). ensemble ALSO drives headless CLI turns (the
+   adapters) as spawned workers over the SAME primitives. **Flow:** the operator prompts any live lead
+   CLI → it decomposes the task + posts assignments to the board → live members AND/OR spawned workers
+   each claim a part, work in their OWN worktree, coordinate via the board → results merge. A CLI with no
+   MCP-client mode or that flakes (agy on Windows) stays reachable as a spawned worker (the adapter path).
 2. **`ensemble merge` conflict policy = spawn ONE AI-resolver round** (a CLI attempts the resolution);
    only if it still conflicts, escalate cleanly to the operator. (Never silently force/auto-accept.)
 3. **`ensemble run "<prompt>"` is the Phase-1 task entry** (the prompt-as-arg IS the operator's prompt);
@@ -58,8 +66,12 @@
    Wire `Decision::Landed` so `ensemble run --merge` can auto-land. *(Phase-1 #1 blocker.)*
 2. **Per-run journal** — append the blackboard transcript + each round's test result + the final decision
    to `.ensemble/runs/<slug>.jsonl` (reuse `Message`). The operator can SEE the collaboration.
-3. **`ensemble mcp` server** — expose `ensemble_mesh` / `ensemble_delegate` / `ensemble_run` over MCP
-   (stdio, `rmcp`). The mesh-aware entry: a lead CLI (claude/codex/opencode) coordinates via these tools.
+3. **`ensemble mcp` server (the crew-participation API)** — expose the substrate over MCP (stdio,
+   `rmcp`): `ensemble_mesh`, `ensemble_board_read`/`ensemble_board_post`, `ensemble_claim`,
+   `ensemble_worktree`, `ensemble_merge`, `ensemble_run`. This makes a LIVE CLI a first-class crew member
+   (decision 1): the operator prompts it, it decomposes + posts assignments, and live members and/or
+   ensemble-spawned workers each claim a part in their own worktree. Build incrementally: read-only
+   `mesh`/`board_read` first, then `board_post`/`claim`/`worktree`/`merge`.
 4. **Live 4-CLI proof** — crew.toml: implement=codex, review=claude, debug=agy, `[test]`=the repo's real
    test; run a small real task in a throwaway repo (after `ensemble doctor` green). The live equivalent of
    pipeline_hermetic.rs with real adapters. Land + merge; the journal shows all 4 participated.
