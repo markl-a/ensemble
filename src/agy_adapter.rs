@@ -2,7 +2,7 @@ use crate::adapter::{Adapter, AdapterError, AgentOutput};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::io::Read;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Drives Google Antigravity (`agy`) headlessly UNDER A REAL PTY. `agy -p` emits zero bytes to a
@@ -72,58 +72,70 @@ impl Adapter for AgyAdapter {
             .try_clone_reader()
             .map_err(|e| AdapterError::Flaked(format!("clone reader: {e}")))?;
 
-        // Drain the PTY into a SHARED buffer on a detached thread.
+        // Drain the PTY into a SHARED buffer on a worker thread; it signals `done` when its read loop
+        // ends (EOF/err). The lock is poison-safe so a panicking holder can't crash the adapter.
         let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
         let buf_w = Arc::clone(&buf);
+        let (done_tx, done_rx) = mpsc::channel();
         std::thread::spawn(move || {
             let mut chunk = [0u8; 8192];
             loop {
                 match reader.read(&mut chunk) {
                     Ok(0) => break,
-                    Ok(n) => buf_w.lock().unwrap().extend_from_slice(&chunk[..n]),
+                    Ok(n) => buf_w
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .extend_from_slice(&chunk[..n]),
                     Err(_) => break,
                 }
             }
+            let _ = done_tx.send(());
         });
 
-        // Wait on the CHILD's exit, NOT the master's EOF: portable-pty's Windows ConPTY master can
-        // stay open after agy exits, so an EOF-only wait hung to the full timeout (and discarded the
-        // answer agy had already produced). Mirror agy_pty.py: poll is-alive, salvage the buffer.
+        // Wait on the CHILD's EXIT, not the master's EOF: portable-pty's Windows ConPTY master can
+        // stay open after agy exits, so an EOF-only wait hung to the full timeout. Poll is-alive,
+        // reaping on every exit/kill so we never leave a zombie.
         let deadline = Instant::now() + self.timeout;
-        let mut timed_out = false;
+        let mut fail: Option<String> = None;
         loop {
             match child.try_wait() {
-                Ok(Some(_)) => break, // agy exited cleanly
+                Ok(Some(_)) => break, // agy exited cleanly (try_wait reaps it)
                 Ok(None) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(50));
                 }
-                _ => {
+                Ok(None) => {
                     let _ = child.kill();
-                    timed_out = true;
+                    let _ = child.wait();
+                    fail = Some(format!("agy timed out after {:?}", self.timeout));
+                    break;
+                }
+                Err(e) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    fail = Some(format!("agy wait failed: {e}"));
                     break;
                 }
             }
         }
-        // Let the reader flush the last bytes the child wrote before exiting, then release the master.
-        std::thread::sleep(Duration::from_millis(150));
+        // Close the master to force the reader to EOF, then wait (bounded) for it to finish draining —
+        // a deterministic FULL capture (no magic sleep, no leaked/blocked thread). On a clean Unix
+        // exit the reader already hit EOF, so `done` is immediate; on Windows the drop releases it.
         drop(pair.master);
+        let _ = done_rx.recv_timeout(Duration::from_secs(2));
 
-        let raw = buf.lock().unwrap().clone();
+        if let Some(reason) = fail {
+            // A genuine hang/error: do NOT trust a partial answer from a killed model call.
+            return Err(AdapterError::Flaked(reason));
+        }
+        let raw = buf.lock().unwrap_or_else(|p| p.into_inner()).clone();
         let text = strip_ansi(&String::from_utf8_lossy(&raw)).trim().to_string();
-        if !text.is_empty() {
-            // We got an answer — return it even if we had to kill a lingering agy (salvage).
-            return Ok(AgentOutput {
-                agent: "agy".into(),
-                text,
-            });
+        if text.is_empty() {
+            return Err(AdapterError::Empty);
         }
-        if timed_out {
-            return Err(AdapterError::Flaked(format!(
-                "agy timed out after {:?} with no output",
-                self.timeout
-            )));
-        }
-        Err(AdapterError::Empty)
+        Ok(AgentOutput {
+            agent: "agy".into(),
+            text,
+        })
     }
 }
 
@@ -133,7 +145,10 @@ impl Adapter for AgyAdapter {
 /// kill as a flake. `N` = our timeout minus ~15s (min 10s) so agy self-terminates its model call
 /// just before we would hard-kill it.
 fn agy_argv(prompt: &str, timeout: Duration) -> Vec<String> {
-    let print_to = timeout.as_secs().saturating_sub(15).max(10);
+    let t = timeout.as_secs();
+    // print-timeout must stay STRICTLY BELOW our wall-clock kill so agy self-terminates its model
+    // call first; the `.min(t-2)` cap preserves that invariant even for small timeouts.
+    let print_to = t.saturating_sub(15).max(10).min(t.saturating_sub(2));
     vec![
         "--print-timeout".into(),
         format!("{print_to}s"),
@@ -208,8 +223,12 @@ mod tests {
     }
 
     #[test]
-    fn agy_argv_clamps_short_timeout_to_10s() {
-        let argv = agy_argv("x", Duration::from_secs(5));
-        assert_eq!(argv[1], "10s");
+    fn agy_argv_print_timeout_stays_below_wall_clock() {
+        // agy must self-terminate BEFORE our hard kill — print-timeout < wall-clock for any value.
+        for secs in [5u64, 20, 180] {
+            let argv = agy_argv("x", Duration::from_secs(secs));
+            let pt: u64 = argv[1].trim_end_matches('s').parse().unwrap();
+            assert!(pt < secs, "print_to {pt}s must be < wall-clock {secs}s");
+        }
     }
 }
