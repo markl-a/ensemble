@@ -5,6 +5,36 @@ use std::path::Path;
 
 type Local = HashMap<String, Box<dyn Adapter>>;
 
+/// Where `serve` will bind. `Explicit` = user `--bind`; `Tailnet` = the node's 100.x address
+/// (reachable only over the tailnet); `Loopback` = no tailnet IP, so local-only (never 0.0.0.0).
+#[derive(Debug, PartialEq, Eq)]
+pub enum BindAddr {
+    Explicit(String),
+    Tailnet(String),
+    Loopback(String),
+}
+
+impl BindAddr {
+    pub fn addr(&self) -> &str {
+        match self {
+            BindAddr::Explicit(a) | BindAddr::Tailnet(a) | BindAddr::Loopback(a) => a,
+        }
+    }
+}
+
+/// Decide the bind address: an explicit `--bind` wins; else the node's tailnet IPv4 (so serve is
+/// reachable only over the tailnet, not the LAN/public); else loopback (local-only) — NEVER widen
+/// to 0.0.0.0 implicitly.
+pub fn resolve_bind(self_ips: &[String], explicit: Option<&str>, port: u16) -> BindAddr {
+    if let Some(e) = explicit {
+        return BindAddr::Explicit(e.to_string());
+    }
+    match self_ips.iter().find(|ip| ip.contains('.')) {
+        Some(ipv4) => BindAddr::Tailnet(format!("{ipv4}:{port}")),
+        None => BindAddr::Loopback(format!("127.0.0.1:{port}")),
+    }
+}
+
 /// Run the agent-host forever on `bind` (e.g. "0.0.0.0:7878"), dispatching `/run` to `local`.
 pub fn serve(bind: &str, local: Local) -> std::io::Result<()> {
     let server = tiny_http::Server::http(bind)
@@ -149,6 +179,34 @@ mod tests {
     use super::*;
     use crate::adapter::{Adapter, MockAdapter};
     use std::collections::HashMap;
+
+    #[test]
+    fn resolve_bind_explicit_override_wins() {
+        let b = resolve_bind(&["100.1.2.3".into()], Some("0.0.0.0:9999"), 7878);
+        assert_eq!(b, BindAddr::Explicit("0.0.0.0:9999".into()));
+    }
+
+    #[test]
+    fn resolve_bind_prefers_tailnet_ipv4() {
+        let ips = vec!["fd7a:1::5".to_string(), "100.87.70.65".to_string()];
+        assert_eq!(
+            resolve_bind(&ips, None, 7878),
+            BindAddr::Tailnet("100.87.70.65:7878".into())
+        );
+    }
+
+    #[test]
+    fn resolve_bind_loopback_when_no_tailnet_ip() {
+        assert_eq!(
+            resolve_bind(&[], None, 7878),
+            BindAddr::Loopback("127.0.0.1:7878".into())
+        );
+    }
+
+    #[test]
+    fn resolve_bind_addr_accessor_returns_the_string() {
+        assert_eq!(resolve_bind(&[], None, 7878).addr(), "127.0.0.1:7878");
+    }
 
     struct FileWriter {
         name: String,
