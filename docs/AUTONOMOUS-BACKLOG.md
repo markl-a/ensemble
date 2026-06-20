@@ -16,7 +16,10 @@ queue a recurring cron drains — **one double-gated task per tick.**
    - thin result bundles (`git bundle create - <branch> --not <base_sha>`; carry `base_sha` in `RepoCtx`).
    - true-merge apply (not `--ff-only`) for multi-round / dirty-worktree cases + a conflict policy.
    - [x] prune `refs/ensemble/*` after a successful ff-merge ✅@ecaecc8 (best-effort `update-ref -d`; round-trip test asserts the namespace is empty).
-   - node scratch GC: sweep stale `ensemble-node-*` temp dirs on `serve` startup.
+   - [x] node scratch GC ✅@59e1ea6 (codex+claude LGTM): `serve()` startup (AFTER bind) sweeps `ensemble-node-*`
+     dirs left by a crashed/killed serve. PID-LIVENESS based (not age) — removes only dirs whose embedded owner
+     pid is provably dead; `pid_alive` strictly fail-safe (uncertainty → keep). Pure `orphan_scratch`/`scratch_pid`
+     unit-tested with mock liveness.
 3. [ ] **Phase 3c — per-node status dashboard (各做各的):** read-only view of which node is running what
    (health + current job + last verdict), over the existing tailnet HTTP. Disposable cache, not a source of truth.
 4. [ ] **Phase 4 — governance hardening:** signed / hash-chained proofpack of verdicts; anti-anchoring
@@ -24,10 +27,17 @@ queue a recurring cron drains — **one double-gated task per tick.**
 6. [ ] **Per-agent CLI config (operator-requested):** `[agents.<n>] model = "..."` / `args = [...]` / `program = "..."`
    / `timeout = N` in crew.toml — today the CLI binary/flags/model are hardcoded in ExecAdapter/AgyAdapter.
    Let crew.toml pick each AI's model + extra flags.
-7. [ ] **Discovery hardening (gate follow-ups):** `discover_nodes()` runs `tailscale status --json` with NO
+7. [partial/STASHED] **Discovery hardening (gate follow-ups):** `discover_nodes()` runs `tailscale status --json` with NO
    subprocess timeout → a wedged tailscaled would hang every `run` (now default-on hot path) — add a bounded
    wait. + discovery port is hardcoded 7878; add `[discovery] port` / `--disc-port`. + MagicDNS-off fallback to
    `TailscaleIPs`. + parallelize peer probes.
+   ⚠️ A `git stash` (stash@{0}, "draft: discovery hardening (item 7) — codex-authored during gate exec, UNVETTED")
+   already implements bounded `capture_bounded(STATUS_TIMEOUT=4s)`, `Node::endpoint()` TailscaleIP fallback, and
+   parallel `probe_all`. It was written by a `codex exec` GATE run that mutated the tree (NOT my task, NOT gated as
+   such), so it was stashed out, NOT landed. Next tick: `git stash pop`, review it as its own change, double-gate,
+   then land (+ still add the `[discovery] port` knob, which the draft does not cover). **Lesson: `codex exec
+   --dangerously-bypass-approvals-and-sandbox` can EDIT files during a "review"; always `git status` after a gate
+   and never commit changes you didn't author. Pass review-only instructions + verify the tree.**
 8. [x] **`ensemble doctor`** — env-readiness check ✅@fab543e (codex+claude LGTM). Pure core
    `check_tools`/`is_ready` (hermetic, 5 tests) + thin IO `run_checks` (PATH probe via `where`/`command -v`,
    git-repo via reused `repo_sync::is_git_worktree`); `ensemble doctor` prints a report, exits non-zero when
@@ -63,6 +73,7 @@ queue a recurring cron drains — **one double-gated task per tick.**
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-20 — **node-scratch GC LANDED @59e1ea6** (codex+claude LGTM; item 2 sub-task done). `serve()` startup sweeps `ensemble-node-*` dirs orphaned by a crashed/killed serve, AFTER bind. Design driven entirely by the gate: started age-based → codex flagged it could delete a LIVE long-running job's dir → reworked to PID-LIVENESS; then 3 more codex rounds closed fail-safe holes (/proc-missing reads all-dead, kill-0 EPERM read as dead, /proc-self authoritative check, tasklist success-gated). Pure `orphan_scratch`/`scratch_pid` mock-tested. ⚠️ DISCOVERED: a `codex exec` gate run silently EDITED `src/discovery.rs` (233 lines of item-7 discovery hardening) during a "review" — caught via `git status` (claude's review also flagged the unrelated diff). Stashed it out (stash@{0}, UNVETTED) so only the gated GC change landed; item 7 now has a draft to review+gate next tick. Lesson recorded in item 7.
 - 2026-06-20 — **F3 `ensemble doctor` LANDED @fab543e** (codex+claude LGTM). Env-readiness check: reports the 4 AI CLIs + tailscale on PATH + is-cwd-a-git-repo, exits non-zero when the mesh can't run here (no git repo OR zero CLIs) so a script can gate (`ensemble doctor && ensemble run …`). Pure core `check_tools`/`is_ready` (5 hermetic tests) + thin IO `run_checks`. ⚠️ Did NOT reuse the stalled-batch `feat/doctor` branch — it predated F1 and its diff would have reverted F1's adapter.rs/main.rs work; salvaged just the scaffold + tests onto a fresh `feat/doctor-v2` off current main. Gate (claude) caught a DRY dup — a private `cwd_is_git_repo` duplicating the exported `repo_sync::is_git_worktree` → reuse the exported helper; codex LGTM'd round 1 (even built+ran it natively). Remaining open: F2 thin-bundles (item 9), agent streaming (item 10, pending operator design-approval), per-agent config (item 6), discovery hardening (item 7).
 - 2026-06-20 — **F1 `ensemble agent` delegate verb LANDED @dfd46aa** (codex+claude LGTM). The interactive-conductor primitive: `ensemble agent <name> "<task>" [--node auto|<host>] [--repo] [--json]` → delegate ONE turn to a CLI (local or remote via discovery, edits land in --repo via git-sync); resolve_one returns (adapter,label); distinct exit codes per failure kind. Gate caught: >2-positional drop, `--node --json` value-swallow, inconsistent JSON node label — all fixed.
 - 2026-06-20 — ⚠️ **parallel worktree-build workflow STALLED** (lesson): the 3-agent Workflow (F1/F2/F3 each in an isolation:'worktree' agent doing TDD+WSL-build+push) made file edits but **never committed/built/pushed** — the agents stalled mid-TDD (wrote failing tests, didn't implement). Salvaged F1 manually (the agent's exit_code + tests were good) + finished it. F3 `ensemble doctor` partial scaffold preserved on branch `feat/doctor` (finish a future tick). F2 thin-bundles not started. **TAKEAWAY: parallel-agent Rust-build-in-worktree is unreliable here; prefer orchestrator-implements + parallel GATES, or hand agents smaller non-build tasks.**
