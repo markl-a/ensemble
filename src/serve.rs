@@ -9,6 +9,12 @@ type Local = HashMap<String, Box<dyn Adapter>>;
 pub fn serve(bind: &str, local: Local) -> std::io::Result<()> {
     let server = tiny_http::Server::http(bind)
         .map_err(|e| std::io::Error::other(format!("bind {bind}: {e}")))?;
+    // Reclaim node-scratch dirs whose owning serve is gone — only AFTER we hold the port, so a
+    // duplicate serve that fails to bind can never sweep the live server's dirs.
+    let swept = crate::repo_sync::gc_node_scratch();
+    if swept > 0 {
+        println!("ensemble: swept {swept} stale node-scratch dir(s)");
+    }
     serve_loop(server, local, None);
     Ok(())
 }

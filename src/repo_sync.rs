@@ -8,6 +8,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// The filesystem name prefix every node-side scratch repo carries (see `NodeJobDir::new`). GC keys
+/// off it to find leftovers without touching anything else in the temp dir.
+const NODE_SCRATCH_PREFIX: &str = "ensemble-node-";
+
 /// A git bundle — raw bytes, transferable over any byte channel.
 pub type Bundle = Vec<u8>;
 
@@ -181,6 +185,129 @@ impl Drop for NodeJobDir {
     }
 }
 
+/// Parse the owner pid embedded in a node-scratch dir name `ensemble-node-<job>-<pid>-<seq>`. `<job>`
+/// is sanitized but may itself contain '-' and digits, so the pid is the SECOND-to-last '-'-separated
+/// field (seq is the last, job is everything before). Returns None if the shape doesn't match — and a
+/// None pid is never swept, so an unrecognized name is always kept.
+fn scratch_pid(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix(NODE_SCRATCH_PREFIX)?;
+    let mut tail = rest.rsplitn(3, '-'); // [seq, pid, job(maybe-with-dashes)]
+    let _seq = tail.next()?;
+    let pid = tail.next()?;
+    tail.next()?; // a job segment must precede the pid (else this isn't our shape)
+    pid.parse::<u32>().ok()
+}
+
+/// PURE: pick the node-scratch dirs that are safe to delete. An entry `(name, pid)` qualifies iff its
+/// name has the node-scratch prefix, its owner pid is known, that pid is NOT this process (`self_pid`),
+/// and `is_alive(pid)` is false — i.e. the owning `serve` is provably gone, so its `NodeJobDir` Drop
+/// will never fire. Liveness (not age) is the key: a long-running live job is never swept. Deterministic
+/// given the predicate, so fully unit-testable.
+pub fn orphan_scratch(
+    entries: &[(String, Option<u32>)],
+    is_alive: impl Fn(u32) -> bool,
+    self_pid: u32,
+) -> Vec<&str> {
+    entries
+        .iter()
+        .filter(|(name, pid)| {
+            name.starts_with(NODE_SCRATCH_PREFIX)
+                && matches!(pid, Some(p) if *p != self_pid && !is_alive(*p))
+        })
+        .map(|(name, _)| name.as_str())
+        .collect()
+}
+
+/// Is process `pid` currently alive? Used to spare a live job's scratch dir from GC. STRICTLY
+/// fail-safe: returns `false` (→ eligible for sweep) ONLY on positive proof the process is gone;
+/// every uncertain case (probe unavailable, permission denied, unknown error) returns `true` so a
+/// live — or merely indeterminate — owner's dir is never deleted.
+fn pid_alive(pid: u32) -> bool {
+    #[cfg(target_os = "linux")]
+    let alive = {
+        // Trust /proc only when it is positively authoritative — proven by OUR OWN pid being visible
+        // there. A chroot/container with an empty or non-procfs /proc dir fails this, so we can't tell
+        // → keep. Only when /proc/self resolves is a missing /proc/<pid> real proof of death.
+        if Path::new("/proc/self").exists() {
+            Path::new("/proc").join(pid.to_string()).exists()
+        } else {
+            true
+        }
+    };
+    #[cfg(all(unix, not(target_os = "linux")))]
+    let alive = match Command::new("kill").args(["-0", &pid.to_string()]).output() {
+        Ok(o) if o.status.success() => true, // signalable → alive
+        // `kill -0` failed: ESRCH ("no such process") is proof of death; EPERM (alive but not
+        // signalable) and any other/locale-translated error → keep (assume alive).
+        Ok(o) => !String::from_utf8_lossy(&o.stderr)
+            .to_lowercase()
+            .contains("no such process"),
+        Err(_) => true, // couldn't even run `kill` → can't tell → keep
+    };
+    #[cfg(windows)]
+    let alive = match Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+        .output()
+    {
+        // Trust the result ONLY on a successful enumeration: a matching row contains the pid → alive;
+        // the "no tasks" INFO line does not → dead. A nonzero exit / enumeration error or a spawn
+        // failure means we can't tell → keep.
+        Ok(o) if o.status.success() => {
+            String::from_utf8_lossy(&o.stdout).contains(&pid.to_string())
+        }
+        _ => true,
+    };
+    #[cfg(not(any(unix, windows)))]
+    let alive = {
+        let _ = pid;
+        true
+    };
+    alive
+}
+
+/// Sweep node-scratch dirs left in the system temp dir by a crashed / killed `serve` whose owning
+/// process is gone (a clean run removes its own via `NodeJobDir`'s Drop). Best-effort: unreadable
+/// entries and failed removes are skipped, never fatal. Returns how many dirs were removed. Call once
+/// on `serve` startup, AFTER the port is bound (so a duplicate serve that fails to bind never sweeps).
+pub fn gc_node_scratch() -> usize {
+    gc_node_scratch_in(&std::env::temp_dir(), pid_alive, std::process::id())
+}
+
+/// `gc_node_scratch` with an explicit temp root + liveness predicate + self pid, so it is hermetically
+/// testable without depending on real process ids.
+fn gc_node_scratch_in(temp: &Path, is_alive: impl Fn(u32) -> bool, self_pid: u32) -> usize {
+    let read = match std::fs::read_dir(temp) {
+        Ok(r) => r,
+        Err(_) => return 0,
+    };
+    // Collect (name, pid, path) for directories only — a node-prefixed *file* is never ours to remove.
+    let mut dirs: Vec<(String, Option<u32>, PathBuf)> = Vec::new();
+    for ent in read.flatten() {
+        let path = ent.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = match ent.file_name().into_string() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        let pid = scratch_pid(&name);
+        dirs.push((name, pid, path));
+    }
+    let listing: Vec<(String, Option<u32>)> =
+        dirs.iter().map(|(n, p, _)| (n.clone(), *p)).collect();
+    let doomed: std::collections::HashSet<&str> = orphan_scratch(&listing, is_alive, self_pid)
+        .into_iter()
+        .collect();
+    let mut removed = 0;
+    for (name, _, path) in &dirs {
+        if doomed.contains(name.as_str()) && std::fs::remove_dir_all(path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,5 +402,48 @@ mod tests {
     fn is_git_worktree_detects_non_repo() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(!is_git_worktree(tmp.path()));
+    }
+
+    #[test]
+    fn scratch_pid_parses_owner_pid() {
+        assert_eq!(scratch_pid("ensemble-node-codex-0-111-7"), Some(111));
+        assert_eq!(scratch_pid("ensemble-node-a-1-0"), Some(1));
+        assert_eq!(scratch_pid("other-dir"), None);
+        // no job segment before the pid → not our shape → None (kept)
+        assert_eq!(scratch_pid("ensemble-node-111-0"), None);
+    }
+
+    #[test]
+    fn orphan_scratch_sweeps_only_dead_foreign_node_dirs() {
+        let entries = vec![
+            ("ensemble-node-codex-0-111-0".to_string(), Some(111u32)), // dead → swept
+            ("ensemble-node-claude-1-222-3".to_string(), Some(222u32)), // alive → kept
+            ("ensemble-node-mine-1-999-0".to_string(), Some(999u32)),  // our own pid → kept
+            ("ensemble-stage-main-333-0.bundle".to_string(), Some(333)), // wrong prefix → kept
+            ("some-other".to_string(), None),                          // unrelated → kept
+        ];
+        // only pid 222 is alive; self_pid = 999
+        let doomed = orphan_scratch(&entries, |p| p == 222, 999);
+        assert_eq!(doomed, vec!["ensemble-node-codex-0-111-0"]);
+    }
+
+    #[test]
+    fn gc_removes_dead_keeps_live_and_ignores_files() {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        std::fs::create_dir(r.join("ensemble-node-x-100-0")).unwrap(); // pid 100 dead → swept
+        std::fs::create_dir(r.join("ensemble-node-y-200-1")).unwrap(); // pid 200 alive → kept
+        std::fs::create_dir(r.join("keep-me")).unwrap(); // unrelated → kept
+        std::fs::write(r.join("ensemble-node-not-a-dir"), b"x").unwrap(); // file → ignored
+
+        let removed = gc_node_scratch_in(r, |p| p == 200, 0);
+        assert_eq!(removed, 1, "only the dead-owner node dir is removed");
+        assert!(!r.join("ensemble-node-x-100-0").exists());
+        assert!(r.join("ensemble-node-y-200-1").exists(), "live job kept");
+        assert!(r.join("keep-me").exists(), "unrelated dir untouched");
+        assert!(
+            r.join("ensemble-node-not-a-dir").exists(),
+            "a node-prefixed FILE is never ours to remove"
+        );
     }
 }
