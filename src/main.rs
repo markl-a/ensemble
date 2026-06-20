@@ -24,7 +24,8 @@ const USAGE: &str = "usage:\n  \
     ensemble agent <name> \"<task>\" [--node auto|<host>] [--repo <path>] [--json]   (delegate ONE turn to one CLI)\n  \
     ensemble merge <branch> [--into <target>] [--repo <path>] [--resolver <agent>]   (land a kept branch; conflict → escalate, or --resolver runs ONE AI round)\n  \
     ensemble serve [--bind <addr>]   (default: this node's tailnet IP:7878; loopback if no tailnet)\n  \
-    ensemble up [--bind <addr>]   (quick start: show the mesh, then serve in the foreground)\n\n\
+    ensemble up [--bind <addr>]   (quick start: show the mesh, then serve in the foreground)\n  \
+    ensemble mcp [--repo <path>] [--name <agent>]   (stdio MCP server: make a LIVE CLI a crew member — mesh + shared board)\n\n\
     run/run-many/dispatch auto-discover tailnet `serve` hosts for any agent without an explicit\n  \
     [agents.<n>] node = ... in crew.toml; pass --no-discover to stay local.";
 
@@ -48,6 +49,7 @@ fn main() {
         Some("doctor") => doctor_cmd(&args),
         Some("agent") => agent_cmd(&args),
         Some("merge") => merge_cmd(&args),
+        Some("mcp") => mcp_cmd(&args),
         Some("serve") => serve_cmd(&args),
         Some("up") => up_cmd(&args),
         _ => {
@@ -601,6 +603,25 @@ fn merge_cmd(args: &[String]) {
             eprintln!("merge failed: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+/// `ensemble mcp [--repo <path>] [--name <agent>]` — run a stdio MCP server that exposes the
+/// crew-participation API (slice 1: `ensemble_mesh` + `ensemble_board_read`), so a LIVE CLI launching
+/// it as an MCP server becomes a first-class crew member. Session = the repo; the shared board lives
+/// at `<repo>/.ensemble/board.jsonl`. Blocks on stdin until EOF.
+fn mcp_cmd(args: &[String]) {
+    require_value_if_present(args, "--repo");
+    require_value_if_present(args, "--name");
+    let repo = parse_flag(args, "--repo").unwrap_or_else(|| ".".to_string());
+    let name = parse_flag(args, "--name").unwrap_or_else(|| format!("mcp-{}", std::process::id()));
+    let ctx = ensemble::mcp::Ctx {
+        repo: std::path::PathBuf::from(repo),
+        name,
+    };
+    if let Err(e) = ensemble::mcp::serve_stdio(ctx) {
+        eprintln!("ensemble mcp: {e}");
+        std::process::exit(1);
     }
 }
 

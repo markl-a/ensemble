@@ -1,0 +1,275 @@
+//! `ensemble mcp` — a minimal, hand-rolled MCP (Model Context Protocol) server over stdio that makes
+//! a LIVE CLI a first-class crew member (design `2026-06-20-ensemble-mcp-design.md`). Newline-delimited
+//! JSON-RPC 2.0 on stdin/stdout; each request is dispatched on its OWN thread (responses serialized by
+//! a stdout `Mutex`) so a long tool call never blocks a concurrent quick one — the operator's
+//! "async but as real-time as possible" goal, without dragging in an async runtime (ensemble's
+//! primitives are synchronous + blocking, so a thread is the natural concurrency unit).
+//!
+//! Slice 1 implements the protocol subset (`initialize`, `notifications/initialized`, `tools/list`,
+//! `tools/call`) + the read-only tools `ensemble_mesh` and `ensemble_board_read`.
+
+use crate::board::FileBoard;
+use serde_json::{json, Value};
+use std::io::{BufRead, Write};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+/// The MCP protocol version we advertise when a client doesn't request one.
+const DEFAULT_PROTOCOL: &str = "2025-06-18";
+
+/// Per-server config: the repo (= crew session) and this member's identity for board posts.
+pub struct Ctx {
+    pub repo: PathBuf,
+    pub name: String,
+}
+
+/// A JSON-RPC error object (code + message).
+pub struct RpcError {
+    pub code: i64,
+    pub message: String,
+}
+impl RpcError {
+    fn method_not_found(m: &str) -> Self {
+        Self { code: -32601, message: format!("method not found: {m}") }
+    }
+    fn invalid_params(m: impl Into<String>) -> Self {
+        Self { code: -32602, message: m.into() }
+    }
+    fn internal(m: impl Into<String>) -> Self {
+        Self { code: -32603, message: m.into() }
+    }
+}
+
+/// Route a JSON-RPC method to its result. Pure given `ctx` (no stdio) — the unit of the test suite.
+pub fn dispatch(method: &str, params: &Value, ctx: &Ctx) -> Result<Value, RpcError> {
+    match method {
+        "initialize" => Ok(initialize_result(params)),
+        "tools/list" => Ok(tools_list()),
+        "tools/call" => tools_call(params, ctx),
+        other => Err(RpcError::method_not_found(other)),
+    }
+}
+
+fn initialize_result(params: &Value) -> Value {
+    // Echo the client's requested protocol version when present (MCP convention), else our default.
+    let version = params
+        .get("protocolVersion")
+        .and_then(|v| v.as_str())
+        .unwrap_or(DEFAULT_PROTOCOL)
+        .to_string();
+    json!({
+        "protocolVersion": version,
+        "capabilities": { "tools": {} },
+        "serverInfo": { "name": "ensemble", "version": env!("CARGO_PKG_VERSION") }
+    })
+}
+
+fn tools_list() -> Value {
+    json!({ "tools": [
+        {
+            "name": "ensemble_mesh",
+            "description": "List this node's local AI CLIs and which agents each tailnet peer hosts.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        },
+        {
+            "name": "ensemble_board_read",
+            "description": "Read the shared crew blackboard for this repo. Returns messages at index >= `since`, each with its absolute index, plus the `next` cursor to poll from.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "since": { "type": "integer", "minimum": 0, "description": "return messages from this index onward (default 0)" }
+                },
+                "additionalProperties": false
+            }
+        }
+    ]})
+}
+
+fn tools_call(params: &Value, ctx: &Ctx) -> Result<Value, RpcError> {
+    let name = params
+        .get("name")
+        .and_then(|n| n.as_str())
+        .ok_or_else(|| RpcError::invalid_params("tools/call: missing tool name"))?;
+    let args = params.get("arguments").cloned().unwrap_or(Value::Null);
+    let text = match name {
+        "ensemble_mesh" => tool_mesh(),
+        "ensemble_board_read" => tool_board_read(&args, ctx)?,
+        other => return Err(RpcError::invalid_params(format!("unknown tool: {other}"))),
+    };
+    // MCP tool result: a content list. We return one text item (JSON-or-text payload).
+    Ok(json!({ "content": [ { "type": "text", "text": text } ], "isError": false }))
+}
+
+fn tool_mesh() -> String {
+    let local = crate::doctor::present_clis();
+    let hosts = crate::discovery::discover_mesh(7878);
+    crate::mesh::render_mesh(&local, &hosts)
+}
+
+fn tool_board_read(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
+    let since = args.get("since").and_then(|s| s.as_u64()).unwrap_or(0) as usize;
+    let board = FileBoard::open(&ctx.repo);
+    let all = board
+        .read_since(0)
+        .map_err(|e| RpcError::internal(format!("board read: {e}")))?;
+    let next = all.len();
+    let messages: Vec<Value> = all
+        .iter()
+        .enumerate()
+        .skip(since)
+        .map(|(i, m)| json!({ "index": i, "from": m.from, "kind": m.kind, "body": m.body }))
+        .collect();
+    Ok(json!({ "messages": messages, "next": next }).to_string())
+}
+
+/// Turn one raw stdin line into the JSON-RPC response line to write, or `None` for a notification
+/// (no `id`) or an unparseable line (we can't know an id to attribute an error to). Pure — the full
+/// request→response mapping is testable without stdio.
+pub fn handle_message(line: &str, ctx: &Ctx) -> Option<String> {
+    let req: Value = serde_json::from_str(line).ok()?;
+    let id = req.get("id").cloned();
+    // A message with no `id` is a NOTIFICATION — handle side effects (none yet) and never respond.
+    let id = match id {
+        Some(id) if !id.is_null() => id,
+        _ => return None,
+    };
+    let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+    let params = req.get("params").cloned().unwrap_or(Value::Null);
+    let resp = match dispatch(method, &params, ctx) {
+        Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
+        Err(e) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": e.code, "message": e.message } }),
+    };
+    Some(resp.to_string())
+}
+
+/// Serve the MCP protocol over stdin/stdout until EOF. Each request runs on its own thread (so a long
+/// tool call doesn't block a concurrent quick one); responses are written under a stdout `Mutex`, one
+/// complete line each, so concurrent responses never interleave (JSON-RPC pairs by id, so out-of-order
+/// is legal). Finished threads are reaped each iteration (the handle vec stays bounded to in-flight
+/// requests), and any in-flight threads are JOINED at EOF so their responses flush before we exit —
+/// otherwise a piped batch could lose the responses to its last requests. Blocks until stdin closes.
+pub fn serve_stdio(ctx: Ctx) -> std::io::Result<()> {
+    let ctx = Arc::new(ctx);
+    let out = Arc::new(Mutex::new(std::io::stdout()));
+    let stdin = std::io::stdin();
+    let mut handles: Vec<std::thread::JoinHandle<()>> = Vec::new();
+    for line in stdin.lock().lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let ctx = ctx.clone();
+        let out = out.clone();
+        handles.push(std::thread::spawn(move || {
+            if let Some(resp) = handle_message(&line, &ctx) {
+                if let Ok(mut o) = out.lock() {
+                    let _ = writeln!(o, "{resp}");
+                    let _ = o.flush();
+                }
+            }
+        }));
+        handles.retain(|h| !h.is_finished()); // reap completed threads; keep the vec in-flight-sized
+    }
+    for h in handles {
+        let _ = h.join(); // flush the last in-flight responses before exiting
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx(repo: &std::path::Path) -> Ctx {
+        Ctx { repo: repo.to_path_buf(), name: "tester".into() }
+    }
+
+    fn call(line: &str, ctx: &Ctx) -> Option<Value> {
+        super::handle_message(line, ctx).map(|s| serde_json::from_str(&s).unwrap())
+    }
+
+    #[test]
+    fn initialize_echoes_protocol_and_advertises_tools_capability() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
+        assert_eq!(r["id"], 1);
+        assert_eq!(r["result"]["protocolVersion"], "2025-03-26", "echoes the client's version");
+        assert!(r["result"]["capabilities"]["tools"].is_object());
+        assert_eq!(r["result"]["serverInfo"]["name"], "ensemble");
+    }
+
+    #[test]
+    fn tools_list_includes_mesh_and_board_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = call(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#, &ctx(tmp.path())).unwrap();
+        let names: Vec<&str> = r["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"ensemble_mesh"));
+        assert!(names.contains(&"ensemble_board_read"));
+    }
+
+    #[test]
+    fn unknown_method_is_method_not_found() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = call(r#"{"jsonrpc":"2.0","id":3,"method":"bogus/thing"}"#, &ctx(tmp.path())).unwrap();
+        assert_eq!(r["error"]["code"], -32601);
+    }
+
+    #[test]
+    fn notification_without_id_yields_no_response() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(call(
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+            &ctx(tmp.path())
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn unparseable_line_is_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(super::handle_message("this is not json", &ctx(tmp.path())).is_none());
+    }
+
+    #[test]
+    fn board_read_tool_returns_posted_messages_and_cursor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let board = FileBoard::open(tmp.path());
+        board.post("codex", "result", "did the thing").unwrap();
+        board.post("claude", "verdict", "VERDICT: LGTM").unwrap();
+
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"ensemble_board_read","arguments":{"since":1}}}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
+        // the tool result text is a JSON payload {messages, next}
+        let text = r["result"]["content"][0]["text"].as_str().unwrap();
+        let payload: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(payload["next"], 2, "cursor is the new total");
+        let msgs = payload["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 1, "since=1 skips the first message");
+        assert_eq!(msgs[0]["index"], 1);
+        assert_eq!(msgs[0]["from"], "claude");
+        assert!(text.contains("VERDICT: LGTM"));
+    }
+
+    #[test]
+    fn tools_call_unknown_tool_is_invalid_params() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"nope"}}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
+        assert_eq!(r["error"]["code"], -32602);
+    }
+}

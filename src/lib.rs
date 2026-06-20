@@ -4,6 +4,7 @@
 pub mod adapter;
 pub mod agy_adapter;
 pub mod blackboard;
+pub mod board;
 pub mod conductor;
 pub mod crew;
 pub mod discovery;
@@ -13,6 +14,7 @@ pub mod exec_adapter;
 pub mod gate;
 pub mod journal;
 pub mod ledger;
+pub mod mcp;
 pub mod mesh;
 pub mod remote_adapter;
 pub mod repo_sync;
@@ -25,6 +27,7 @@ pub mod worktree;
 pub use adapter::{Adapter, AdapterError, AgentOutput, MockAdapter};
 pub use agy_adapter::AgyAdapter;
 pub use blackboard::{Blackboard, Message};
+pub use board::FileBoard;
 pub use conductor::{Conductor, Decision, RunOutcome};
 pub use crew::{AgentConfig, CrewConfig, CrewError, GatePolicy, OnFlake, RoleConfig, TestConfig};
 pub use discovery::{
