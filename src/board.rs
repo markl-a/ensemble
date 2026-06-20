@@ -13,7 +13,7 @@
 
 use crate::blackboard::Message;
 use fs2::FileExt;
-use std::io::{BufRead, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 /// Bound a posted body so the board stays readable (hygiene). Excerpted to this many chars.
@@ -50,33 +50,37 @@ impl FileBoard {
         };
         let mut line = serde_json::to_string(&msg).map_err(std::io::Error::other)?;
         line.push('\n');
-        let f = std::fs::OpenOptions::new()
+        let mut f = std::fs::OpenOptions::new()
             .create(true)
+            .read(true)
             .append(true)
             .open(&self.path)?;
         f.lock_exclusive()?; // blocks until no other writer holds it; released on unlock/close
-        let r = (&f).write_all(line.as_bytes());
+        let r = append_terminated(&mut f, line.as_bytes());
         let _ = f.unlock();
         r
     }
 
     /// All messages at index ≥ `n`, in post order, taken under a SHARED lock (so a concurrent append
-    /// can't expose a half-written line). A malformed/torn line is skipped, never fatal. Empty if the
-    /// board doesn't exist yet.
+    /// can't expose a half-written line). Read as BYTES split on `\n` and parsed per line, so a
+    /// malformed OR non-UTF-8 line is skipped INDIVIDUALLY — it never stops the scan or hides later
+    /// messages. Empty if the board doesn't exist yet.
     pub fn read_since(&self, n: usize) -> std::io::Result<Vec<Message>> {
-        let f = match std::fs::File::open(&self.path) {
+        let mut f = match std::fs::File::open(&self.path) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(e),
         };
         f.lock_shared()?;
-        let msgs: Vec<Message> = std::io::BufReader::new(&f)
-            .lines()
-            .map_while(Result::ok)
-            .filter(|l| !l.trim().is_empty())
-            .filter_map(|l| serde_json::from_str(&l).ok())
-            .collect();
+        let mut bytes = Vec::new();
+        let read = f.read_to_end(&mut bytes);
         let _ = f.unlock();
+        read?;
+        let msgs: Vec<Message> = bytes
+            .split(|&b| b == b'\n')
+            .filter(|l| !l.is_empty())
+            .filter_map(|l| serde_json::from_slice::<Message>(l).ok())
+            .collect();
         Ok(msgs.into_iter().skip(n).collect())
     }
 
@@ -88,6 +92,24 @@ impl FileBoard {
     pub fn is_empty(&self) -> std::io::Result<bool> {
         Ok(self.len()? == 0)
     }
+}
+
+/// Append `line` to `f` (held under an exclusive lock, opened read+append). REPAIRS a torn tail
+/// first: if the file is non-empty and does NOT end in `\n` (a previous writer crashed mid-append, or
+/// a partial write), terminate that partial line with a `\n` before appending — otherwise O_APPEND
+/// would weld our new message onto the partial bytes, making ONE malformed line that a reader skips,
+/// swallowing this post. The partial line stays its own (skipped) line; our message lands clean.
+fn append_terminated(f: &mut std::fs::File, line: &[u8]) -> std::io::Result<()> {
+    let len = f.metadata()?.len();
+    if len > 0 {
+        f.seek(SeekFrom::Start(len - 1))?;
+        let mut last = [0u8; 1];
+        f.read_exact(&mut last)?;
+        if last[0] != b'\n' {
+            f.write_all(b"\n")?; // O_APPEND → lands at EOF, closing the torn line
+        }
+    }
+    f.write_all(line)
 }
 
 /// Excerpt `s` to at most `max` chars (char-boundary safe), appending `…` when truncated.
@@ -149,6 +171,43 @@ mod tests {
         let seen = FileBoard::open(tmp.path()).read_since(0).unwrap();
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].body, "anyone on auth?");
+    }
+
+    #[test]
+    fn torn_tail_is_repaired_so_the_next_post_is_not_swallowed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let b = FileBoard::open(tmp.path());
+        b.post("a", "result", "first").unwrap();
+        // simulate a crash mid-append: a partial line with NO trailing newline
+        {
+            let mut f = std::fs::OpenOptions::new().append(true).open(b.path()).unwrap();
+            f.write_all(b"{\"from\":\"x\",\"kind\":\"resul").unwrap();
+        }
+        assert_eq!(b.read_since(0).unwrap().len(), 1, "the torn partial line is skipped");
+        // the NEXT post must not be welded onto the partial bytes and lost
+        b.post("c", "verdict", "third").unwrap();
+        let all = b.read_since(0).unwrap();
+        let bodies: Vec<&str> = all.iter().map(|m| m.body.as_str()).collect();
+        assert!(bodies.contains(&"first") && bodies.contains(&"third"), "got {bodies:?}");
+        assert_eq!(all.len(), 2, "torn line skipped; both real messages kept");
+    }
+
+    #[test]
+    fn a_bad_line_is_skipped_without_hiding_later_messages() {
+        let tmp = tempfile::tempdir().unwrap();
+        let b = FileBoard::open(tmp.path());
+        b.post("a", "result", "one").unwrap();
+        // a non-UTF-8 / malformed line in the MIDDLE (properly newline-terminated)
+        {
+            let mut f = std::fs::OpenOptions::new().append(true).open(b.path()).unwrap();
+            f.write_all(&[0xff, 0xfe, b'\n']).unwrap();
+        }
+        b.post("c", "result", "three").unwrap();
+        let bodies: Vec<String> = b.read_since(0).unwrap().iter().map(|m| m.body.clone()).collect();
+        assert!(
+            bodies.iter().any(|s| s == "one") && bodies.iter().any(|s| s == "three"),
+            "a bad middle line must not stop the scan: {bodies:?}"
+        );
     }
 
     #[test]
