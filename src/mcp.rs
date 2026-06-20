@@ -11,7 +11,7 @@
 use crate::board::FileBoard;
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 
 /// The MCP protocol version we advertise when a client doesn't request one.
@@ -145,6 +145,23 @@ fn tools_list() -> Value {
                 },
                 "additionalProperties": false
             }
+        },
+        {
+            "name": "ensemble_enqueue",
+            "description": "Add a task to the repo's shared crew work-queue (a durable SQLite ledger). Idempotent: the task id is a stable hash of `descr`, so enqueuing the same text twice is a no-op. Returns {enqueued, id}.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "descr": { "type": "string", "description": "the task description" }
+                },
+                "required": ["descr"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "ensemble_claim",
+            "description": "Atomically claim the oldest unclaimed task from the repo's shared crew work-queue, as THIS member, AT-MOST-ONCE (no two members ever get the same task). Returns {claimed:true, id, descr} or {claimed:false} when the queue is empty.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         }
     ]})
 }
@@ -160,6 +177,8 @@ fn tools_call(params: &Value, ctx: &Ctx) -> Result<Value, RpcError> {
         "ensemble_board_read" => tool_board_read(&args, ctx)?,
         "ensemble_board_post" => tool_board_post(&args, ctx)?,
         "ensemble_worktree" => tool_worktree(&args, ctx)?,
+        "ensemble_enqueue" => tool_enqueue(&args, ctx)?,
+        "ensemble_claim" => tool_claim(&args, ctx)?,
         other => return Err(RpcError::invalid_params(format!("unknown tool: {other}"))),
     };
     // MCP tool result: a content list. We return one text item (JSON-or-text payload).
@@ -263,6 +282,62 @@ fn tool_worktree(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
     let wt = crate::worktree::ensure_kept_worktree(&ctx.repo, &ctx.name, task)
         .map_err(|e| RpcError::internal(format!("worktree: {e}")))?;
     Ok(json!({ "path": wt.path.to_string_lossy(), "branch": wt.branch, "slug": wt.slug }).to_string())
+}
+
+/// Seconds since the Unix epoch — the ledger's timestamps (claim/complete times). A bad clock yields
+/// 0, which only affects `recover_orphans` staleness, never claim correctness.
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Open the repo's shared crew ledger at `<repo>/.ensemble/ledger.db`, creating `.ensemble/` first
+/// (SQLite opens/creates the DB file but NOT its parent dir). All members running `ensemble mcp` for
+/// this repo share this one ledger — its SQLite IMMEDIATE transactions give at-most-once claim across
+/// every connection/process, so no extra lock is needed here.
+fn open_ledger(repo: &Path) -> Result<crate::ledger::Ledger, RpcError> {
+    let dir = repo.join(".ensemble");
+    std::fs::create_dir_all(&dir).map_err(|e| RpcError::internal(format!("ledger dir: {e}")))?;
+    crate::ledger::Ledger::open(&dir.join("ledger.db"))
+        .map_err(|e| RpcError::internal(format!("ledger open: {e}")))
+}
+
+/// Add a task to the repo's shared crew work-queue. `descr` is a required non-blank string; the task
+/// id is `dispatch::task_id(descr)` (a stable hash), so enqueuing the same text twice is idempotent
+/// (no-op). Returns `{enqueued, id}` — `enqueued` is false when that id was already present.
+fn tool_enqueue(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
+    if !args.is_object() {
+        return Err(RpcError::invalid_params("arguments must be an object with `descr`"));
+    }
+    let descr = required_str(args, "descr")?;
+    let id = crate::dispatch::task_id(descr);
+    let ledger = open_ledger(&ctx.repo)?;
+    let enqueued = ledger
+        .enqueue(&id, descr, now_secs())
+        .map_err(|e| RpcError::internal(format!("ledger enqueue: {e}")))?;
+    Ok(json!({ "enqueued": enqueued, "id": id }).to_string())
+}
+
+/// Atomically claim the oldest queued task from the repo's shared work-queue, as THIS member
+/// (`ctx.name`, server-set — never a client field, so a member can't claim as someone else). The
+/// ledger's IMMEDIATE transaction guarantees AT-MOST-ONCE: no two members get the same task. Returns
+/// `{claimed:true, id, descr}`, or `{claimed:false}` when the queue is empty (a normal result, not an
+/// error). Takes no arguments (an empty/null/object args is accepted; any other shape is -32602).
+fn tool_claim(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
+    if !(args.is_null() || args.is_object()) {
+        return Err(RpcError::invalid_params("arguments must be an object"));
+    }
+    let mut ledger = open_ledger(&ctx.repo)?;
+    let claimed = ledger
+        .claim(&ctx.name, now_secs())
+        .map_err(|e| RpcError::internal(format!("ledger claim: {e}")))?;
+    Ok(match claimed {
+        Some(t) => json!({ "claimed": true, "id": t.id, "descr": t.descr }),
+        None => json!({ "claimed": false }),
+    }
+    .to_string())
 }
 
 /// Turn one raw stdin line into the JSON-RPC response line to write, or `None` for a NOTIFICATION
@@ -719,5 +794,97 @@ mod tests {
         .unwrap();
         assert_eq!(r["error"]["code"], -32602);
         assert!(r["error"]["message"].as_str().unwrap().contains("task"));
+    }
+
+    #[test]
+    fn tools_list_includes_enqueue_and_claim() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = call(r#"{"jsonrpc":"2.0","id":40,"method":"tools/list"}"#, &ctx(tmp.path())).unwrap();
+        let names: Vec<&str> = r["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"ensemble_enqueue"));
+        assert!(names.contains(&"ensemble_claim"));
+    }
+
+    #[test]
+    fn enqueue_then_claim_roundtrips_a_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = ctx(tmp.path());
+        let e = call(
+            r#"{"jsonrpc":"2.0","id":41,"method":"tools/call","params":{"name":"ensemble_enqueue","arguments":{"descr":"port the parser"}}}"#,
+            &c,
+        )
+        .unwrap();
+        let ep: Value = serde_json::from_str(e["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(ep["enqueued"], true);
+        let id = ep["id"].as_str().unwrap().to_string();
+
+        let cl = call(
+            r#"{"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"ensemble_claim"}}"#,
+            &c,
+        )
+        .unwrap();
+        let cp: Value = serde_json::from_str(cl["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(cp["claimed"], true);
+        assert_eq!(cp["descr"], "port the parser");
+        assert_eq!(cp["id"], id, "claimed the very task we enqueued");
+    }
+
+    #[test]
+    fn enqueue_is_idempotent_on_descr() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = ctx(tmp.path());
+        let body = r#"{"jsonrpc":"2.0","id":43,"method":"tools/call","params":{"name":"ensemble_enqueue","arguments":{"descr":"same task"}}}"#;
+        let first: Value =
+            serde_json::from_str(call(body, &c).unwrap()["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        let second: Value =
+            serde_json::from_str(call(body, &c).unwrap()["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(first["enqueued"], true);
+        assert_eq!(second["enqueued"], false, "the same descr is a no-op (stable-hash id)");
+        assert_eq!(first["id"], second["id"]);
+    }
+
+    #[test]
+    fn claim_on_an_empty_queue_is_not_claimed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":44,"method":"tools/call","params":{"name":"ensemble_claim"}}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
+        let p: Value = serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(p["claimed"], false, "an empty queue is a normal result, not an error");
+    }
+
+    #[test]
+    fn claim_attributes_the_task_to_this_member() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = ctx(tmp.path()); // name = "tester"
+        call(
+            r#"{"jsonrpc":"2.0","id":45,"method":"tools/call","params":{"name":"ensemble_enqueue","arguments":{"descr":"x"}}}"#,
+            &c,
+        )
+        .unwrap();
+        call(r#"{"jsonrpc":"2.0","id":46,"method":"tools/call","params":{"name":"ensemble_claim"}}"#, &c).unwrap();
+        // the claim is recorded under THIS member's identity (ctx.name), not a client-supplied worker
+        let l = crate::ledger::Ledger::open(&tmp.path().join(".ensemble").join("ledger.db")).unwrap();
+        let t = l.list().unwrap().into_iter().find(|t| t.descr == "x").unwrap();
+        assert_eq!(t.claimed_by.as_deref(), Some("tester"));
+    }
+
+    #[test]
+    fn enqueue_requires_a_descr() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":47,"method":"tools/call","params":{"name":"ensemble_enqueue","arguments":{}}}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
+        assert_eq!(r["error"]["code"], -32602);
+        assert!(r["error"]["message"].as_str().unwrap().contains("descr"), "names the field, not 'unknown tool'");
     }
 }
