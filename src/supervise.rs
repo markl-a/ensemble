@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// One line in a member's stream feed. Internally tagged on `"ev"` (like journal::Entry's `"rec"`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -153,6 +155,85 @@ impl RunObserver for FeedObserver {
     }
 }
 
+/// One line in a run's CONTROL feed (.ensemble/control/<name>.ndjson) — the operator's channel to steer
+/// or interrupt a live governed run (S1b). Internally tagged on `"cmd"` (like StreamEvent's `"ev"`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "cmd", rename_all = "snake_case")]
+pub enum ControlCmd {
+    /// Inject `prompt` into the NEXT round's implementer prompt (redirect a run that is drifting).
+    Steer { from: String, prompt: String },
+    /// Stop the run: cleanly at the next round boundary, or `hard` = kill the running CLI immediately.
+    Abort {
+        from: String,
+        #[serde(default)]
+        hard: bool,
+    },
+}
+
+/// The control feed path for `name` under `repo`, confined to `<repo>/.ensemble/control/` by the same
+/// shared one-component sanitizer as the stream feed (untrusted argv / HTTP path).
+pub fn member_control_path(repo: &Path, name: &str) -> PathBuf {
+    repo.join(".ensemble")
+        .join("control")
+        .join(format!("{}.ndjson", crate::journal::sanitize_slug(name)))
+}
+
+/// Shared signals a control watcher feeds (from the control feed) and the conductor reads at round
+/// boundaries: an abort request (`hard` ⇒ kill the running CLI now), plus a queue of steer prompts to
+/// inject into the next round. The abort flag is the SAME `Arc<AtomicBool>` the conductor checks, so a
+/// control-feed abort and a Ctrl-C converge.
+#[derive(Default)]
+pub struct ControlState {
+    abort: Arc<AtomicBool>,
+    hard: Arc<AtomicBool>,
+    steers: Mutex<Vec<String>>,
+}
+
+impl ControlState {
+    /// The abort flag to share with the conductor (so a control abort == the conductor's own abort).
+    pub fn abort_flag(&self) -> Arc<AtomicBool> {
+        self.abort.clone()
+    }
+    pub fn aborted(&self) -> bool {
+        self.abort.load(Ordering::Relaxed)
+    }
+    pub fn hard(&self) -> bool {
+        self.hard.load(Ordering::Relaxed)
+    }
+    /// Drain and return the queued steer prompts (each consumed once, injected into the next round).
+    pub fn take_steers(&self) -> Vec<String> {
+        std::mem::take(&mut self.steers.lock().unwrap())
+    }
+    /// Test/seed helper: queue a steer without going through the feed.
+    pub fn push_steer(&self, prompt: &str) {
+        self.steers.lock().unwrap().push(prompt.to_string());
+    }
+}
+
+/// Apply every NEW control line at index >= `cursor` to `st`, advancing `cursor` past what was read.
+/// Unknown/torn lines are skipped (forward-compat). Best-effort: a read error leaves state untouched
+/// (a flaky control feed can never crash a run).
+pub fn drain_control(feed: &crate::ndjson::Feed, cursor: &mut usize, st: &ControlState) {
+    let lines = match feed.read_since(*cursor) {
+        Ok(l) => l,
+        Err(_) => return,
+    };
+    for line in &lines {
+        if let Ok(cmd) = serde_json::from_str::<ControlCmd>(line) {
+            match cmd {
+                ControlCmd::Steer { prompt, .. } => st.steers.lock().unwrap().push(prompt),
+                ControlCmd::Abort { hard, .. } => {
+                    if hard {
+                        st.hard.store(true, Ordering::Relaxed);
+                    }
+                    st.abort.store(true, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+    *cursor += lines.len();
+}
+
 /// Parsed `ensemble watch` arguments (pure; the IO shell in main.rs consumes this).
 #[derive(Debug, PartialEq)]
 pub struct WatchArgs {
@@ -267,6 +348,49 @@ mod tests {
         assert_eq!(lines.len(), 1, "one post → one feed line");
         let rendered = render_line(&lines[0]);
         assert!(rendered.contains("codex") && rendered.contains("did the thing"), "rendered: {rendered}");
+    }
+
+    #[test]
+    fn control_cmd_roundtrips_tagged_on_cmd() {
+        let s = ControlCmd::Steer { from: "main@z13".into(), prompt: "skip the UI".into() };
+        let line = serde_json::to_string(&s).unwrap();
+        assert!(line.contains(r#""cmd":"steer""#), "got {line}");
+        assert_eq!(serde_json::from_str::<ControlCmd>(&line).unwrap(), s);
+        let a = ControlCmd::Abort { from: "main@z13".into(), hard: true };
+        let aline = serde_json::to_string(&a).unwrap();
+        assert!(aline.contains(r#""cmd":"abort""#) && aline.contains(r#""hard":true"#), "got {aline}");
+        assert_eq!(serde_json::from_str::<ControlCmd>(&aline).unwrap(), a);
+        // `hard` defaults to false when omitted (a clean abort line stays minimal)
+        let clean: ControlCmd = serde_json::from_str(r#"{"cmd":"abort","from":"m"}"#).unwrap();
+        assert_eq!(clean, ControlCmd::Abort { from: "m".into(), hard: false });
+    }
+
+    #[test]
+    fn member_control_path_confines_a_hostile_name() {
+        use std::path::Path;
+        let repo = Path::new("/tmp/repo");
+        let control = repo.join(".ensemble").join("control");
+        let p = member_control_path(repo, "../../etc/passwd");
+        assert_eq!(p.parent().unwrap(), control, "must be a direct child of control/");
+        assert!(!p.components().any(|c| c.as_os_str() == ".."), "no traversal survives: {p:?}");
+    }
+
+    #[test]
+    fn drain_control_applies_steer_and_abort() {
+        let tmp = tempfile::tempdir().unwrap();
+        let feed = crate::ndjson::Feed::open(tmp.path().join("c.ndjson"));
+        feed.append(&serde_json::to_string(&ControlCmd::Steer { from: "m".into(), prompt: "focus".into() }).unwrap()).unwrap();
+        feed.append(&serde_json::to_string(&ControlCmd::Abort { from: "m".into(), hard: true }).unwrap()).unwrap();
+        let st = ControlState::default();
+        let mut cursor = 0usize;
+        drain_control(&feed, &mut cursor, &st);
+        assert_eq!(cursor, 2, "cursor advanced past both lines");
+        assert_eq!(st.take_steers(), vec!["focus".to_string()]);
+        assert!(st.aborted() && st.hard(), "hard abort sets both flags");
+        // draining again with no new lines is a no-op (cursor already at end)
+        drain_control(&feed, &mut cursor, &st);
+        assert_eq!(cursor, 2);
+        assert!(st.take_steers().is_empty(), "steers consumed once");
     }
 
     #[test]
