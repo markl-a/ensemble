@@ -760,10 +760,11 @@ fn mcp_install_cmd(args: &[String]) {
             }
         }
     }
-    // Follow a symlinked config to its REAL target so the atomic replace swaps the underlying file
-    // rather than turning the user's symlink into a regular file. `canonicalize` only works on an
-    // existing path; for a brand-new config use the intended path as-is.
-    let target = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+    // Resolve the REAL file we atomically replace, so the swap goes through any symlink (preserving it)
+    // instead of turning the user's link into a regular file. Crucially this also follows a DANGLING
+    // symlink (target not yet created — common with dotfile managers) to its destination, rather than
+    // destroying the link (config + metadata loss). A brand-new regular path is returned unchanged.
+    let target = resolve_replace_target(&path);
     let dir = target
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -772,8 +773,9 @@ fn mcp_install_cmd(args: &[String]) {
     // SECURE ATOMIC write: a RANDOMLY-named, O_EXCL temp file in the target's OWN directory (via
     // `tempfile`), so a pre-placed or raced file/symlink can never be followed or clobbered — the
     // project-scoped .mcp.json / opencode.json live in a possibly-shared repo. It is created 0600 (no
-    // world-readable window); we copy the existing config's mode onto it; then it is atomically renamed
-    // over the target (same fs). The temp is auto-removed on any error (NamedTempFile drops unpersisted).
+    // world-readable window); on Unix we then copy the existing config's mode onto it (see below); then
+    // it is atomically renamed over the target (same fs). The temp is auto-removed on any error
+    // (NamedTempFile drops unpersisted).
     let mut tf = tempfile::Builder::new()
         .prefix(".ensemble-mcp-")
         .tempfile_in(&dir)
@@ -788,8 +790,15 @@ fn mcp_install_cmd(args: &[String]) {
             std::process::exit(1);
         }
     }
-    // carry the existing file's permissions onto the replacement (best-effort), so an install doesn't
-    // silently widen/narrow the config's mode.
+    // Carry the existing config's access mode onto the replacement so an install neither widens nor
+    // narrows it. On UNIX this copies the real permission bits (the meaningful multi-user case). On
+    // WINDOWS std exposes only the read-only ATTRIBUTE, not the DACL — and copying it would also leave
+    // the replacement read-only and break the NEXT install's rename-over — so we deliberately do not
+    // fake a partial copy: the fresh temp instead inherits its directory's ACL, exactly as the CLI
+    // itself would create the file (no widening beyond the directory default). Full DACL cloning is out
+    // of scope (it needs a platform crate + unsafe for a negligible real-world delta on a user's own
+    // config). This also resolves the read-only-target rename-failure window noted in review.
+    #[cfg(unix)]
     if let Ok(meta) = std::fs::metadata(&target) {
         let _ = std::fs::set_permissions(tf.path(), meta.permissions());
     }
@@ -814,12 +823,19 @@ fn env_path(key: &str) -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
 }
 
-/// The user's home directory, portably: `%USERPROFILE%` (Windows) or `$HOME` (Unix). Empty if neither
-/// is set/non-empty — then a codex install resolves to a non-absolute path and is refused unless
-/// `--config <path>` is passed.
+/// The user's home directory, portably: `%USERPROFILE%` (Windows) or `$HOME` (Unix). Precedence is
+/// PLATFORM-CORRECT — `%USERPROFILE%` is authoritative on Windows, `$HOME` on Unix — because the wrong
+/// one (e.g. `USERPROFILE` leaking into a WSL/Unix env) would resolve codex's default config to the
+/// wrong real home and mutate the wrong `config.toml`. Empty if neither is set/non-empty — then a codex
+/// install resolves to a non-absolute path and is refused unless `--config <path>` is passed.
 fn home_dir() -> std::path::PathBuf {
-    env_path("USERPROFILE")
-        .or_else(|| env_path("HOME"))
+    let (first, second) = if cfg!(windows) {
+        ("USERPROFILE", "HOME")
+    } else {
+        ("HOME", "USERPROFILE")
+    };
+    env_path(first)
+        .or_else(|| env_path(second))
         .unwrap_or_default()
 }
 
@@ -832,6 +848,39 @@ fn absolutize(p: std::path::PathBuf) -> std::path::PathBuf {
     } else {
         std::env::current_dir().map(|c| c.join(&p)).unwrap_or(p)
     }
+}
+
+/// The real path `ensemble mcp install` should atomically replace. An EXISTING target (through any
+/// symlink chain) `canonicalize`s directly. A path that doesn't fully resolve yet is either a DANGLING
+/// symlink — followed one bounded step at a time to its destination, so the link is PRESERVED and its
+/// (missing) target file is what we create/replace — or a brand-new regular file, returned as-is. The
+/// 40-hop bound defangs a symlink cycle (best-effort return rather than spin).
+fn resolve_replace_target(path: &std::path::Path) -> std::path::PathBuf {
+    if let Ok(real) = std::fs::canonicalize(path) {
+        return real;
+    }
+    let mut cur = path.to_path_buf();
+    for _ in 0..40 {
+        match std::fs::symlink_metadata(&cur) {
+            Ok(meta) if meta.file_type().is_symlink() => match std::fs::read_link(&cur) {
+                Ok(dst) => {
+                    cur = if dst.is_absolute() {
+                        dst
+                    } else {
+                        cur.parent().map(|p| p.join(&dst)).unwrap_or(dst)
+                    };
+                    // the link may point at a real file (chain ends at an existing target) — resolve it.
+                    if let Ok(real) = std::fs::canonicalize(&cur) {
+                        return real;
+                    }
+                }
+                Err(_) => return cur,
+            },
+            // not a symlink (a brand-new regular path / dangling destination) or unreadable → use as-is.
+            _ => return cur,
+        }
+    }
+    cur
 }
 
 /// `ensemble nodes` — probe the tailnet and print which agent each discovered `serve` node hosts.
