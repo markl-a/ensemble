@@ -23,7 +23,7 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
      foreground until Ctrl-C. Pure `mesh::render_up` unit-tested; empirically verified the banner on z13.
    - [ ] **C** `serve --install-service`/`--uninstall-service` — Win schtasks / mac launchd / Linux systemd user.
    - [ ] **A** distribution — crates.io + GitHub Releases prebuilt binaries (cargo-binstall convention).
-0.5. [active — **S0 + S1a ✅ LANDED (看得到 works); S1b control plane next**] **LIVE cross-session supervision (主控台).** Let the
+0.5. [active — **S0+S1a+S1b ✅ LANDED (看得到+中斷+調整 work); item-6 設定 next**] **LIVE cross-session supervision (主控台).** Let the
    operator's MAIN session monitor + steer OTHER AI-CLI sessions in real time: detect drift, inject an ad-hoc
    prompt, or force-abort. **Spec `docs/specs/2026-06-21-live-supervision-design.md`** (two planes: a coordination
    file-plane `.ensemble/stream|control/<member>.ndjson` + an enforcement `SessionBackend`; **M-API** for
@@ -45,7 +45,18 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
    transcript downgrades; mirror it in a later sub-slice; (b) `run_many` + `--watch` share one feed (lossless
    but interleaved) — fine until run_many streaming is wired. **S1b next** (CONTROL plane: `.ensemble/control/
    <member>.ndjson` + `ensemble steer`/`abort` + serve `/stream`+`/control` routes) → **S2** ApiChannel
-   (opencode→codex) → **S3** PtyProxy (claude/agy; mac first, Windows ConPTY last). **Analysis (2026-06-21):** full live observe/inject/interrupt is only possible for
+   (opencode→codex) → **S3** PtyProxy (claude/agy; mac first, Windows ConPTY last).
+   **S1b ✅@cfc1760** (codex+claude LGTM, FIRST round — the CONTROL half / 中斷+調整): `ControlCmd`
+   (`Steer`/`Abort{hard}`) on a per-run control feed `.ensemble/control/<name>.ndjson`; the conductor
+   consumes steers (injected into the NEXT round's prompt) + aborts (clean = round-boundary stop; the
+   adapters watch a `hard` flag so `--hard` kills the running CLI MID-TURN via the existing exec/PTY poll
+   loops); `ensemble steer <name> "<prompt>"` + `ensemble abort <name> [--hard]` drive it; a daemon watcher
+   feeds the run's `ControlState` (cursor from feed END, ignores stale). Smoke: `--hard` killed a live codex
+   mid-essay. **Local control-plane follow-ups:** (a) a hard-abort that kills the IMPLEMENTER returns via the
+   "implementer failed" arm so no `operator/interrupted` post is streamed (observability gap); (b) steer text
+   also reaches reviewer prompts (shared `feedback`); (c) `abort_cmd` accepts extra positionals. NEXT: the
+   **設定 / configure** half = backlog item 6 (per-agent `model`/`args`/`timeout` in crew.toml), then cross-
+   machine control (S2/S3 ApiChannel/PtyProxy). **Analysis (2026-06-21):** full live observe/inject/interrupt is only possible for
    sessions ensemble SPAWNS (`run`/`agent`/serve sub-runs — ensemble owns the child stdio); a CLI acting as an
    MCP CLIENT (a live Claude Code) is COOPERATIVE-only, because MCP is client-initiated — the server cannot
    preempt a client's in-flight turn (best case: it polls the board between steps). So supervised members should
@@ -146,6 +157,27 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-22 — **live-supervision S1b LANDED @cfc1760 (中斷+調整 / control plane)** (codex+claude LGTM
+  **FIRST round**, no re-gate — item 0.5; plan `docs/plans/2026-06-22-s1b-supervision-control-plane.md`).
+  The operator can now keep a drifting/wedged AI in line on a live `ensemble run --watch <name>`:
+  **`ensemble steer <name> "<prompt>"`** injects a redirect into the NEXT round, **`ensemble abort <name>
+  [--hard]`** stops the run (clean = next round boundary; `--hard` = kill the running CLI MID-TURN).
+  Transport: a per-run control feed `.ensemble/control/<name>.ndjson` (reuses `ndjson::Feed`). New:
+  `ControlCmd` (`cmd`-tagged) + `ControlState`/`drain_control` (supervise.rs); the conductor drains steers
+  into `feedback` and streams `operator/steer`, `aborted()` now also reads the control state and streams
+  `operator/interrupted`, and a `run_adapter` helper arms each adapter with `ctrl.hard_flag()`; the `Adapter`
+  trait gains `set_abort` (default no-op) which `ExecAdapter`/`AgyAdapter` honor by killing the child in
+  their exit-poll loop; a daemon watcher (cursor from feed END) feeds the `ControlState`. Clean-vs-hard is
+  cleanly separated (adapters watch the HARD flag only, so a clean abort never kills mid-turn). **TDD** on
+  the lib (ControlCmd roundtrip + path confinement; drain_control; conductor steer-injection + control-abort;
+  exec_adapter mid-turn-kill < 3s); IO shell (steer/abort cmds + watcher) gate-reviewed + smoke-tested.
+  **Smoke (z13):** `steer`/`abort` wrote the control feed; `abort --hard` during a live codex turn KILLED it
+  mid-essay (`implementer failed: codex aborted by operator`) — the run stopped fast instead of writing the
+  essay. 213 lib tests; clippy `--all-targets` clean. **Honest limit (intended):** steer is next-round, a
+  clean abort is boundary-only, only `--hard` is mid-turn; true mid-turn INJECT is later S2/S3 (M-API/M-PTY).
+  So the **observe + interrupt + adjust** triad of the 主控台 is now live on both platforms (file-plane, zero
+  ConPTY). NEXT: the **設定 / configure** verb (item 6 — per-agent model/args/timeout). Runbook for the office
+  Stage-1 test: `docs/2026-06-21-fleet-federation-night-runbook.md`.
 - 2026-06-21 — **live-supervision S1a LANDED @ad7a6d8 (看得到 / observe)** (codex+claude LGTM after **1
   re-gate round** — item 0.5; plan `docs/plans/2026-06-21-s1a-conductor-live-stream.md`). Makes a governed
   `ensemble run` watchable IN REAL TIME: a `RunObserver` trait + production `FeedObserver` (append each
