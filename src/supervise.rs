@@ -84,10 +84,16 @@ pub fn render_event(ev: &StreamEvent) -> String {
 /// Render one RAW feed line: parse → pretty render; on ANY parse failure (a torn line, or a forward-
 /// compat event kind this binary doesn't know) fall back to the raw line so nothing is hidden.
 pub fn render_line(raw: &str) -> String {
-    match serde_json::from_str::<StreamEvent>(raw) {
-        Ok(ev) => render_event(&ev),
-        Err(_) => format!("? {}", raw.trim()),
+    // A `StreamEvent` (tagged on "ev") wins — it's the more specific member-session shape. Otherwise a
+    // governed-run blackboard `Message` ({from,kind,body}) renders as "[from · kind] body" so one viewer
+    // tails BOTH member sessions and live `ensemble run`s (S1a). Anything else is shown raw, never hidden.
+    if let Ok(ev) = serde_json::from_str::<StreamEvent>(raw) {
+        return render_event(&ev);
     }
+    if let Ok(m) = serde_json::from_str::<crate::blackboard::Message>(raw) {
+        return format!("  [{} · {}] {}", m.from, m.kind, inline(&m.body));
+    }
+    format!("? {}", raw.trim())
 }
 
 /// Collapse a possibly-multiline excerpt to one whitespace-normalized line, bounded for the watch view.
@@ -188,6 +194,21 @@ mod tests {
         assert!(render_line(future).contains("some_future_kind"), "unknown kind shown raw");
         // a valid-JSON but non-event line is shown raw, not dropped
         assert!(render_line("{}").starts_with('?'));
+    }
+
+    #[test]
+    fn render_line_pretty_prints_a_blackboard_message() {
+        // a governed-run blackboard post (no "ev" tag) renders as "[from · kind] body", not raw — so
+        // `ensemble watch` can tail a live `ensemble run` (S1a), not only member-session StreamEvents.
+        let raw = r#"{"from":"codex","kind":"result","body":"implemented the parser"}"#;
+        let s = render_line(raw);
+        assert!(s.contains("codex") && s.contains("result"), "got {s}");
+        assert!(s.contains("implemented the parser"), "got {s}");
+        assert!(!s.starts_with('?'), "a valid Message must not fall back to raw: {s}");
+        // a StreamEvent still wins (more specific, tagged on "ev")
+        assert!(render_line(r#"{"ev":"turn_start","n":1,"prompt":"do it","ts":"T"}"#).contains("turn #1"));
+        // genuine garbage still falls back to raw
+        assert!(render_line("not json").starts_with('?'));
     }
 
     #[test]
