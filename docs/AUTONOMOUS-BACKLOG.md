@@ -23,7 +23,7 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
      foreground until Ctrl-C. Pure `mesh::render_up` unit-tested; empirically verified the banner on z13.
    - [ ] **C** `serve --install-service`/`--uninstall-service` — Win schtasks / mac launchd / Linux systemd user.
    - [ ] **A** distribution — crates.io + GitHub Releases prebuilt binaries (cargo-binstall convention).
-0.5. [active — **S0 ✅ LANDED; S1 next**] **LIVE cross-session supervision (主控台).** Let the
+0.5. [active — **S0 + S1a ✅ LANDED (看得到 works); S1b control plane next**] **LIVE cross-session supervision (主控台).** Let the
    operator's MAIN session monitor + steer OTHER AI-CLI sessions in real time: detect drift, inject an ad-hoc
    prompt, or force-abort. **Spec `docs/specs/2026-06-21-live-supervision-design.md`** (two planes: a coordination
    file-plane `.ensemble/stream|control/<member>.ndjson` + an enforcement `SessionBackend`; **M-API** for
@@ -33,9 +33,19 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
    `"ev"`-tagged, forward-compat raw fallback) + `ensemble watch <member> [--repo][--since][--follow]` tail;
    member name confined to one component via shared `journal::sanitize_slug`; gate caught 2 real blockers —
    interior-newline ndjson record-fracture + watch stdout-error/BrokenPipe propagation — both fixed & re-gated).
-   **S1 next** (CONTROL plane: `.ensemble/control/<member>.ndjson` + `ensemble steer`/`abort` + serve
-   `/stream`+`/control` routes + headless conductor stream wiring) → **S2** ApiChannel (opencode→codex) →
-   **S3** PtyProxy (claude/agy; mac first, Windows ConPTY last). **Analysis (2026-06-21):** full live observe/inject/interrupt is only possible for
+   **S1a ✅@ad7a6d8** (codex+claude LGTM, 1 re-gate round — the **看得到 / observe** half: the conductor mirrors
+   EVERY blackboard post into `.ensemble/stream/<name>.ndjson` via a `RunObserver` trait + `FeedObserver`
+   (best-effort, never changes a run) injected by `ensemble run --watch <name>`; a single `note()` funnel
+   replaces every `bb.post` in `run()` + streams the terminal decision; `ensemble watch` now renders BOTH
+   member-session `StreamEvent`s AND governed-run `Message`s. Gate caught a real forward-compat render bug —
+   an unknown `"ev"`-tagged line fell through to `Message` render; fixed to gate Message-render on absence of
+   the `"ev"` key. Smoke: `ensemble run --watch s1demo` → `ensemble watch s1demo` shows result/verdict/decision
+   live). **Follow-ups (non-blocking, from the gates):** (a) `run_in_repo`'s commit-failure downgrade
+   (Landed→Escalated) is posted OUTSIDE `run()` so it isn't streamed — a watcher sees "LANDED" then the
+   transcript downgrades; mirror it in a later sub-slice; (b) `run_many` + `--watch` share one feed (lossless
+   but interleaved) — fine until run_many streaming is wired. **S1b next** (CONTROL plane: `.ensemble/control/
+   <member>.ndjson` + `ensemble steer`/`abort` + serve `/stream`+`/control` routes) → **S2** ApiChannel
+   (opencode→codex) → **S3** PtyProxy (claude/agy; mac first, Windows ConPTY last). **Analysis (2026-06-21):** full live observe/inject/interrupt is only possible for
    sessions ensemble SPAWNS (`run`/`agent`/serve sub-runs — ensemble owns the child stdio); a CLI acting as an
    MCP CLIENT (a live Claude Code) is COOPERATIVE-only, because MCP is client-initiated — the server cannot
    preempt a client's in-flight turn (best case: it polls the board between steps). So supervised members should
@@ -136,6 +146,26 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-21 — **live-supervision S1a LANDED @ad7a6d8 (看得到 / observe)** (codex+claude LGTM after **1
+  re-gate round** — item 0.5; plan `docs/plans/2026-06-21-s1a-conductor-live-stream.md`). Makes a governed
+  `ensemble run` watchable IN REAL TIME: a `RunObserver` trait + production `FeedObserver` (append each
+  blackboard `Message` to the S0 `ndjson::Feed`, best-effort — a write failure is swallowed so it can NEVER
+  change a run) is injected via `ensemble run --watch <name>`; a single `note()` funnel in the conductor
+  replaces every `bb.post` in `run()` and ALSO streams a terminal `decision` (LANDED/escalated/max-rounds);
+  `ensemble watch` renders BOTH member-session `StreamEvent`s and run `Message`s. TDD on the lib (render
+  Message, conductor mirrors incl. terminal decision, FeedObserver appends); the `--watch` IO shell is
+  gate-reviewed + smoke-tested. **The double-gate earned its keep:** codex CHANGES r1 caught a real
+  forward-compat bug claude had RATIONALIZED as non-blocking — an unknown future `"ev"`-tagged line fell
+  through to `Message` render (serde ignores the extra field) instead of showing raw; fixed to render as a
+  `Message` ONLY when there is no `"ev"` key (gate on key presence, not field shape) + a regression test;
+  re-gate codex+claude both LGTM. Smoke (z13): `ensemble run --watch s1demo` → `ensemble watch s1demo` shows
+  `[codex · result]` / `[agy · verdict]` / `[conductor · decision]` live. 207 lib tests; clippy clean (WSL).
+  **Reliability finding → [[fleet-cli-reliability-governed-runs]]:** the smoke run escalated because **agy as a
+  local reviewer can't reliably SEE the worktree files** under ConPTY (it referenced a phantom `diff.txt` and
+  falsely rejected) — keep agy out of being the SOLE file-existence reviewer; pair it with codex/claude.
+  **Operator runbook for the fleet federation written:** `docs/2026-06-21-fleet-federation-night-runbook.md`
+  (bring-up steps + the per-agent-name node-routing constraint + all the day's gotchas). NEXT: **S1b** control
+  plane (steer/abort), OR the operator's 5-machine federation (acer/Mac bring-up) → phantom-mesh.
 - 2026-06-21 — **Cross-machine EDIT-RETURN proven ✅ (remote implementer).** Completes the federation-path set:
   a run with **codex@AYANEO as the IMPLEMENTER** (`[agents.codex] node = ayaneo` + `--no-discover`; claude/agy
   the local z13 gate) created SYNC.txt ON ayaneo → the edit **bundled back to z13 via repo_sync** → claude@z13
