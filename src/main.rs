@@ -138,39 +138,47 @@ fn watch_cmd(args: &[String]) {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
     let feed = ensemble::Feed::open(ensemble::member_stream_path(&repo, &member));
 
-    // Read everything from `cursor` onward, render it, and advance the cursor. Returns false on an IO
-    // error (so the caller can exit non-zero). A missing feed reads as empty — `watch` simply waits.
-    // Flush each batch: under `--follow` stdout is block-buffered when piped/redirected, so without an
-    // explicit flush the tailed lines would not appear promptly (or at all until exit).
-    let drain = |cursor: &mut usize| match feed.read_since(*cursor) {
-        Ok(lines) => {
-            use std::io::Write as _;
-            let mut out = std::io::stdout().lock();
-            for l in &lines {
-                let _ = writeln!(out, "{}", ensemble::render_line(l));
-            }
-            let _ = out.flush();
-            *cursor += lines.len();
-            true
+    // Read everything from `cursor` onward, render it, and advance the cursor PAST each line only after
+    // it is actually written — so a failed write never silently drops an event by counting it as done. A
+    // missing feed reads as empty (`watch` just waits). Flush each batch: under `--follow` stdout is
+    // block-buffered when piped/redirected, so without an explicit flush the tailed lines wouldn't appear
+    // promptly. Propagates the io::Error (feed read OR stdout write) for the caller to classify.
+    let drain = |cursor: &mut usize| -> std::io::Result<()> {
+        let lines = feed.read_since(*cursor)?;
+        use std::io::Write as _;
+        let mut out = std::io::stdout().lock();
+        for l in &lines {
+            writeln!(out, "{}", ensemble::render_line(l))?;
+            *cursor += 1;
         }
-        Err(e) => {
-            eprintln!("ensemble watch: read {}: {e}", feed.path().display());
-            false
+        out.flush()
+    };
+
+    // One drain pass; classify any error. A closed downstream pipe (BrokenPipe, e.g. `ensemble watch
+    // --follow | head`) is a normal end-of-consumer — exit 0, not a failure. Any other read/write error
+    // exits non-zero. On Windows a closed pipe can surface as ERROR_NO_DATA (raw os error 232) rather
+    // than the BrokenPipe kind, so treat that as a clean close too. (Like `tail -f`, a gone consumer is
+    // detected on the NEXT write: a live feed exits promptly when the next event can't be written; a
+    // fully-quiescent feed keeps polling until the next event or Ctrl-C.)
+    let step = |cursor: &mut usize| {
+        if let Err(e) = drain(cursor) {
+            let closed = e.kind() == std::io::ErrorKind::BrokenPipe || e.raw_os_error() == Some(232);
+            if closed {
+                std::process::exit(0);
+            }
+            eprintln!("ensemble watch: {}: {e}", feed.path().display());
+            std::process::exit(1);
         }
     };
 
     let mut cursor = w.since;
-    if !drain(&mut cursor) {
-        std::process::exit(1);
-    }
+    step(&mut cursor);
     if !w.follow {
         return;
     }
     loop {
         std::thread::sleep(std::time::Duration::from_millis(250));
-        if !drain(&mut cursor) {
-            std::process::exit(1);
-        }
+        step(&mut cursor);
     }
 }
 

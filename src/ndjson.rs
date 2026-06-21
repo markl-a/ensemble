@@ -28,9 +28,18 @@ impl Feed {
     /// feed CURSOR (count of valid JSON lines) read back while the lock is STILL HELD — so a poller of
     /// `read_since(cursor)` never skips a concurrently-appended line (the lossless-cursor guarantee from
     /// board.rs). Rejects a `line` that isn't a single valid JSON value (so we never persist a record we
-    /// couldn't read back). A trailing newline on `line` is normalized; exactly one is written.
+    /// couldn't read back). A trailing newline on `line` is normalized; exactly one is written. An
+    /// INTERIOR newline is rejected: a multi-line JSON value (e.g. `[\n1\n]` or a pretty object) is valid
+    /// JSON yet would fracture into a different record when the reader splits on `\n` — so it must never
+    /// reach disk (this also forbids smuggling two records, or a partial torn line, through one append).
     pub fn append(&self, line: &str) -> std::io::Result<usize> {
         let trimmed = line.trim_end_matches(['\n', '\r']);
+        if trimmed.contains('\n') || trimmed.contains('\r') {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "ndjson append: line contains an interior newline (would split into multiple records)",
+            ));
+        }
         if serde_json::from_str::<Value>(trimmed).is_err() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -153,6 +162,22 @@ mod tests {
         let f = feed(tmp.path(), "s.ndjson");
         assert!(f.append("not json").is_err());
         assert!(f.read_since(0).unwrap().is_empty(), "a rejected append must write nothing");
+    }
+
+    #[test]
+    fn append_rejects_interior_newline_so_one_record_stays_one_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = feed(tmp.path(), "s.ndjson");
+        // These ARE valid JSON values, but they span lines. NDJSON splits on '\n', so on read-back each
+        // would fracture into a DIFFERENT record (`[\n1\n]` → `1`, a pretty object → its inner string),
+        // silently violating the one-record-per-line + cursor guarantees. They must be rejected outright.
+        assert!(f.append("[\n1\n]").is_err(), "multi-line array must be rejected");
+        assert!(f.append("{\n\"ev\":\"x\"\n}").is_err(), "pretty object must be rejected");
+        assert!(f.append("{\"ev\":\"a\"}\r\n{\"ev\":\"b\"}").is_err(), "embedded CRLF must be rejected");
+        assert!(f.read_since(0).unwrap().is_empty(), "a rejected multi-line append must write nothing");
+        // a compact single-line value with a trailing newline is still fine (trailing-only is normalized)
+        assert!(f.append("{\"ev\":\"ok\"}\n").is_ok());
+        assert_eq!(f.read_since(0).unwrap().len(), 1);
     }
 
     #[test]
