@@ -524,6 +524,29 @@ fn adapters() -> HashMap<String, Box<dyn Adapter>> {
     adapters
 }
 
+/// item 6: apply a crew.toml `[agents.<n>]` `timeout`/`args` to a LOCAL ExecAdapter (codex/claude/
+/// opencode). `args` (e.g. `["--model","gpt-5.5"]`) is appended after the vendor's base args; `timeout`
+/// overrides the per-command deadline. A remote node ignores these (it configures its own).
+fn cfg_exec(base: ExecAdapter, crew: &CrewConfig, agent: &str) -> ExecAdapter {
+    let mut a = base;
+    if let Some(secs) = crew.timeout_for(agent) {
+        a = a.with_timeout(std::time::Duration::from_secs(secs));
+    }
+    if let Some(extra) = crew.args_for(agent) {
+        a = a.with_extra_args(extra.to_vec());
+    }
+    a
+}
+
+/// item 6: apply `[agents.agy] timeout` to a LOCAL AgyAdapter. (agy's argv is built specially with
+/// `--print-timeout`, so per-agent `args` injection for agy is a documented later refinement.)
+fn cfg_agy(crew: &CrewConfig, agent: &str) -> AgyAdapter {
+    match crew.timeout_for(agent) {
+        Some(secs) => AgyAdapter::with_timeout(std::time::Duration::from_secs(secs)),
+        None => AgyAdapter::new(),
+    }
+}
+
 /// Crew-aware registry. For each agent a role references, resolve in priority order: (1) an explicit
 /// `[agents.<n>] node = "http://..."` in crew.toml → RemoteAdapter (always wins); (2) when `discover`,
 /// a tailnet peer running `ensemble serve` that hosts the agent → RemoteAdapter; (3) the local
@@ -548,16 +571,16 @@ fn adapters_for(crew: &CrewConfig, discover: bool) -> HashMap<String, Box<dyn Ad
         } else {
             match agent {
                 "codex" => {
-                    m.insert(agent.into(), Box::new(ExecAdapter::codex()));
+                    m.insert(agent.into(), Box::new(cfg_exec(ExecAdapter::codex(), crew, agent)));
                 }
                 "claude" => {
-                    m.insert(agent.into(), Box::new(ExecAdapter::claude()));
+                    m.insert(agent.into(), Box::new(cfg_exec(ExecAdapter::claude(), crew, agent)));
                 }
                 "opencode" => {
-                    m.insert(agent.into(), Box::new(ExecAdapter::opencode()));
+                    m.insert(agent.into(), Box::new(cfg_exec(ExecAdapter::opencode(), crew, agent)));
                 }
                 "agy" => {
-                    m.insert(agent.into(), Box::new(AgyAdapter::new()));
+                    m.insert(agent.into(), Box::new(cfg_agy(crew, agent)));
                 }
                 _ => { /* unknown local agent: skip — conductor escalates on missing adapter */ }
             }

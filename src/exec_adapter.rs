@@ -67,9 +67,16 @@ impl ExecAdapter {
         }
     }
 
-    /// Override the per-command timeout (e.g. from a future per-agent crew.toml knob).
+    /// Override the per-command timeout (e.g. from a `[agents.<n>] timeout = N` crew.toml knob).
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Append extra CLI args (item 6 — `[agents.<n>] args = [...]`) after the vendor's base args, e.g.
+    /// `["--model", "gpt-5.5"]`. They precede the stdin-delivered prompt, matching each CLI's contract.
+    pub fn with_extra_args(mut self, extra: Vec<String>) -> Self {
+        self.args.extend(extra);
         self
     }
 }
@@ -296,6 +303,15 @@ mod tests {
         let a = ExecAdapter::raw("echoer", "echo", &["hello-ensemble"], Duration::from_secs(10));
         let r = a.run("", Path::new(".")).expect("echo should succeed");
         assert!(r.text.contains("hello-ensemble"), "captured {:?}", r.text);
+    }
+
+    #[test]
+    fn with_extra_args_appends_to_the_invocation() {
+        // item 6: `echo hi` + extra ["world"] → `echo hi world` → the appended arg reaches the CLI.
+        let a = ExecAdapter::raw("echoer", "echo", &["hi"], Duration::from_secs(10))
+            .with_extra_args(vec!["world".to_string()]);
+        let r = a.run("", Path::new(".")).expect("echo should succeed");
+        assert!(r.text.contains("hi") && r.text.contains("world"), "captured {:?}", r.text);
     }
 
     #[test]

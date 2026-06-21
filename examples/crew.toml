@@ -32,6 +32,9 @@ agent = "agy"            # Google Antigravity CLI runs tests / hunts bugs
 # Optional per-agent overrides; sane defaults are built in.
 [agents.codex]
 backup = "opencode"      # substitute when codex flakes (if gate.on_flake = "substitute")
+# item 6 — configure this agent's LOCAL behavior (both optional; ignored when `node = ...` is set):
+# args = ["--model", "gpt-5.5"]   # extra CLI flags appended to the invocation (vendor-agnostic)
+# timeout = 900                   # per-command timeout in seconds (overrides the adapter default)
 
 [agents.agy]
 # agy is driven headlessly under a real PTY (see docs/design §3 + §4a). No extra config needed.

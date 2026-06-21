@@ -45,6 +45,14 @@ pub struct AgentConfig {
     pub backup: Option<String>,
     #[serde(default)]
     pub node: Option<String>,
+    /// Extra CLI args appended to this agent's local invocation (item 6 — `[agents.<n>] args = [...]`).
+    /// Vendor-agnostic: e.g. `args = ["--model", "gpt-5.5"]` selects a model. Ignored for a remote node.
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+    /// Per-command timeout in SECONDS for this agent's local turns (`[agents.<n>] timeout = N`),
+    /// overriding the adapter default. Ignored for a remote node.
+    #[serde(default)]
+    pub timeout: Option<u64>,
 }
 
 /// The automated test gate (firewall A). When set, the project's real test `command` must pass
@@ -123,6 +131,14 @@ impl CrewConfig {
     /// if any. When set, the orchestrator drives `agent` on that node via a `RemoteAdapter`.
     pub fn node_for(&self, agent: &str) -> Option<&str> {
         self.agents.get(agent).and_then(|a| a.node.as_deref())
+    }
+    /// Extra CLI args configured for `agent` (item 6), appended to its LOCAL invocation, if any.
+    pub fn args_for(&self, agent: &str) -> Option<&[String]> {
+        self.agents.get(agent).and_then(|a| a.args.as_deref())
+    }
+    /// The per-command timeout (seconds) configured for `agent` (item 6) for its LOCAL turns, if any.
+    pub fn timeout_for(&self, agent: &str) -> Option<u64> {
+        self.agents.get(agent).and_then(|a| a.timeout)
     }
 }
 
@@ -279,6 +295,30 @@ mod tests {
         let c = CrewConfig::from_toml(toml).unwrap();
         assert_eq!(c.node_for("claude"), Some("http://acer.tail.ts.net:7878"));
         assert_eq!(c.node_for("codex"), None);
+    }
+
+    #[test]
+    fn parses_per_agent_args_and_timeout() {
+        let toml = r#"
+            pipeline = ["implement"]
+            [gate]
+            min_approvals = 1
+            max_rounds = 1
+            on_flake = "exclude"
+            [roles.implement]
+            agent = "codex"
+            [agents.codex]
+            args = ["--model", "gpt-5.5"]
+            timeout = 900
+        "#;
+        let c = CrewConfig::from_toml(toml).unwrap();
+        assert_eq!(
+            c.args_for("codex"),
+            Some(&["--model".to_string(), "gpt-5.5".to_string()][..])
+        );
+        assert_eq!(c.timeout_for("codex"), Some(900));
+        assert_eq!(c.args_for("claude"), None);
+        assert_eq!(c.timeout_for("claude"), None);
     }
 
     #[test]
