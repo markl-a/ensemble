@@ -58,10 +58,41 @@ impl Drop for PermitGuard {
     }
 }
 
-/// Per-server config: the repo (= crew session) and this member's identity for board posts.
+/// Per-server config: the repo (= crew session), this member's identity for board posts/claims, and
+/// the delegate `ensemble_run` uses to spawn a governed crew sub-run.
 pub struct Ctx {
     pub repo: PathBuf,
     pub name: String,
+    /// How `ensemble_run` delegates a governed crew sub-run. The binary always wires this (a
+    /// `Conductor` adapter); it is `None` only in hermetic unit tests of the OTHER tools, where an
+    /// `ensemble_run` call returns an internal error rather than running anything.
+    pub runner: Option<Arc<dyn CrewRunner>>,
+}
+
+/// The capability the MCP server uses to delegate a whole governed crew run for `ensemble_run`. The
+/// real implementation (in the `ensemble` binary's `mcp` command) wraps a `Conductor` built from the
+/// repo's crew.toml + the local adapter registry; unit tests inject a fake. It is a trait so this
+/// module stays free of crew/adapter construction (which lives in the binary) and so a real,
+/// minutes-long, multi-CLI crew run is never invoked from a hermetic unit test.
+pub trait CrewRunner: Send + Sync {
+    /// Run ONE governed task to a terminal decision in an isolated throwaway worktree of `repo`
+    /// (delegates to `Conductor::run_in_repo`). Returns the flat summary `ensemble_run` serializes.
+    fn run(&self, task: &str, repo: &Path) -> RunSummary;
+}
+
+/// The flat outcome of an `ensemble_run` delegation — the slice of `conductor::RunOutcome` a member
+/// needs to decide what to do next (merge the kept branch, or act on the escalation reason).
+#[derive(Debug, Clone)]
+pub struct RunSummary {
+    /// Whether the gate LANDED the work (else it escalated or ran out of rounds).
+    pub landed: bool,
+    /// How many implementer→review rounds the run took.
+    pub rounds: u32,
+    /// On LAND, the `ensemble/<slug>` branch the committed work was kept on (land it with
+    /// `ensemble_merge`); `None` on escalation.
+    pub branch: Option<String>,
+    /// On escalation, the human-readable reason; empty when landed.
+    pub detail: String,
 }
 
 /// A JSON-RPC error object (code + message).
@@ -85,7 +116,7 @@ impl RpcError {
 pub fn dispatch(method: &str, params: &Value, ctx: &Ctx) -> Result<Value, RpcError> {
     match method {
         "initialize" => Ok(initialize_result(params)),
-        "tools/list" => Ok(tools_list()),
+        "tools/list" => Ok(tools_list(ctx)),
         "tools/call" => tools_call(params, ctx),
         other => Err(RpcError::method_not_found(other)),
     }
@@ -105,8 +136,8 @@ fn initialize_result(params: &Value) -> Value {
     })
 }
 
-fn tools_list() -> Value {
-    json!({ "tools": [
+fn tools_list(ctx: &Ctx) -> Value {
+    let mut out = json!({ "tools": [
         {
             "name": "ensemble_mesh",
             "description": "List this node's local AI CLIs and which agents each tailnet peer hosts.",
@@ -203,7 +234,27 @@ fn tools_list() -> Value {
                 "additionalProperties": false
             }
         }
-    ]})
+    ]});
+    // `ensemble_run` is advertised ONLY when a crew runner is configured (see `mcp_runner`: a missing
+    // crew.toml leaves it `None` while the server still serves the other tools). tools/list is a
+    // capability contract — never promise a tool that a call would reject with -32603 "not configured".
+    if ctx.runner.is_some() {
+        if let Some(tools) = out["tools"].as_array_mut() {
+            tools.push(json!({
+                "name": "ensemble_run",
+                "description": "Delegate a task to a HEADLESS governed crew sub-run in this repo: the full implementer → test-gate → reviewers → gate pipeline, in its own throwaway git worktree. BLOCKS until the sub-run reaches a terminal decision (it runs on its own thread, so your concurrent board polls still flow). On LAND the committed work is kept on a branch you can then land with ensemble_merge. Returns {landed:true, rounds, branch} or {landed:false, rounds, reason}.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "task": { "type": "string", "description": "the task to delegate to the crew" }
+                    },
+                    "required": ["task"],
+                    "additionalProperties": false
+                }
+            }));
+        }
+    }
+    out
 }
 
 fn tools_call(params: &Value, ctx: &Ctx) -> Result<Value, RpcError> {
@@ -222,6 +273,7 @@ fn tools_call(params: &Value, ctx: &Ctx) -> Result<Value, RpcError> {
         "ensemble_merge" => tool_merge(&args, ctx)?,
         "ensemble_complete" => tool_complete(&args, ctx)?,
         "ensemble_fail" => tool_fail(&args, ctx)?,
+        "ensemble_run" => tool_run(&args, ctx)?,
         other => return Err(RpcError::invalid_params(format!("unknown tool: {other}"))),
     };
     // MCP tool result: a content list. We return one text item (JSON-or-text payload).
@@ -524,6 +576,33 @@ fn tool_fail(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
     .to_string())
 }
 
+/// Delegate `task` to a HEADLESS governed crew sub-run in this repo via the injected `CrewRunner`
+/// (which wraps `Conductor::run_in_repo`: implementer → test gate → reviewers → gate, in its own
+/// throwaway worktree). `task` is a required non-blank string — validated BEFORE the runner is
+/// touched, so a malformed call never starts a run. The call BLOCKS this request thread until the
+/// sub-run reaches a terminal decision; because the MCP server runs each request on its own thread, a
+/// member's concurrent quick tool calls (e.g. board polls) still flow meanwhile. The run executes in
+/// THIS server's repo (`ctx.repo`), never a client-supplied path. Returns `{landed:true, rounds,
+/// branch}` (land the kept branch with `ensemble_merge`) or `{landed:false, rounds, reason}`. A
+/// server with no runner configured (only ever a unit-test `Ctx`; the binary always wires one) is a
+/// -32603 internal condition — never a silent fake-land.
+fn tool_run(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
+    if !args.is_object() {
+        return Err(RpcError::invalid_params("arguments must be an object with `task`"));
+    }
+    let task = required_str(args, "task")?;
+    let runner = ctx.runner.as_ref().ok_or_else(|| {
+        RpcError::internal("ensemble_run is not configured on this server (no crew runner)")
+    })?;
+    let s = runner.run(task, &ctx.repo);
+    Ok(if s.landed {
+        json!({ "landed": true, "rounds": s.rounds, "branch": s.branch })
+    } else {
+        json!({ "landed": false, "rounds": s.rounds, "reason": s.detail })
+    }
+    .to_string())
+}
+
 /// Turn one raw stdin line into the JSON-RPC response line to write, or `None` for a NOTIFICATION
 /// (a request with no `id` member — never gets a response). Pure — the full request→response mapping
 /// is testable without stdio.
@@ -635,7 +714,7 @@ mod tests {
     }
 
     fn ctx(repo: &std::path::Path) -> Ctx {
-        Ctx { repo: repo.to_path_buf(), name: "tester".into() }
+        Ctx { repo: repo.to_path_buf(), name: "tester".into(), runner: None }
     }
 
     fn call(line: &str, ctx: &Ctx) -> Option<Value> {
@@ -1382,5 +1461,144 @@ mod tests {
         let t = l.list().unwrap().into_iter().find(|t| t.id == id).unwrap();
         assert_eq!(t.state_str(), "failed");
         assert_eq!(t.outcome.as_deref(), Some("ESCALATED: tests never passed"));
+    }
+
+    /// A fake `CrewRunner` that records the (task, repo) it was handed and returns a canned summary —
+    /// so `ensemble_run`'s happy path is hermetic (no real CLI crew is ever spawned in a unit test).
+    struct FakeRunner {
+        seen: std::sync::Mutex<Option<(String, std::path::PathBuf)>>,
+        summary: RunSummary,
+    }
+    impl CrewRunner for FakeRunner {
+        fn run(&self, task: &str, repo: &std::path::Path) -> RunSummary {
+            *self.seen.lock().unwrap() = Some((task.to_string(), repo.to_path_buf()));
+            self.summary.clone()
+        }
+    }
+
+    fn ctx_with_runner(repo: &std::path::Path, runner: Arc<dyn CrewRunner>) -> Ctx {
+        Ctx { repo: repo.to_path_buf(), name: "tester".into(), runner: Some(runner) }
+    }
+
+    fn tool_names(r: &Value) -> Vec<String> {
+        r["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn tools_list_advertises_run_only_when_a_runner_is_configured() {
+        let tmp = tempfile::tempdir().unwrap();
+        // no runner → ensemble_run is NOT advertised: tools/list is a capability contract and must not
+        // promise a tool a call would reject with -32603 (codex gate, slice 4b-ii).
+        let bare = call(r#"{"jsonrpc":"2.0","id":70,"method":"tools/list"}"#, &ctx(tmp.path())).unwrap();
+        assert!(
+            !tool_names(&bare).iter().any(|n| n == "ensemble_run"),
+            "an unconfigured run must not be advertised"
+        );
+        // …but the OTHER tools are always present
+        assert!(tool_names(&bare).iter().any(|n| n == "ensemble_merge"));
+        // with a runner wired → it IS advertised
+        let fake = Arc::new(FakeRunner {
+            seen: std::sync::Mutex::new(None),
+            summary: RunSummary { landed: true, rounds: 1, branch: None, detail: String::new() },
+        });
+        let wired = call(
+            r#"{"jsonrpc":"2.0","id":70,"method":"tools/list"}"#,
+            &ctx_with_runner(tmp.path(), fake),
+        )
+        .unwrap();
+        assert!(
+            tool_names(&wired).iter().any(|n| n == "ensemble_run"),
+            "a configured runner advertises ensemble_run"
+        );
+    }
+
+    #[test]
+    fn run_delegates_to_the_crew_runner_and_shapes_a_landed_result() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fake = Arc::new(FakeRunner {
+            seen: std::sync::Mutex::new(None),
+            summary: RunSummary {
+                landed: true,
+                rounds: 2,
+                branch: Some("ensemble/x".into()),
+                detail: String::new(),
+            },
+        });
+        let c = ctx_with_runner(tmp.path(), fake.clone());
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":71,"method":"tools/call","params":{"name":"ensemble_run","arguments":{"task":"refactor the parser"}}}"#,
+            &c,
+        )
+        .unwrap();
+        let p: Value = serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(p["landed"], true);
+        assert_eq!(p["rounds"], 2);
+        assert_eq!(p["branch"], "ensemble/x");
+        // the runner was handed the exact task + THIS server's repo (delegation runs in ctx.repo, never
+        // a client-supplied path)
+        let seen = fake.seen.lock().unwrap().clone().unwrap();
+        assert_eq!(seen.0, "refactor the parser");
+        assert_eq!(seen.1, tmp.path());
+    }
+
+    #[test]
+    fn run_shapes_an_escalated_result_with_the_reason() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fake = Arc::new(FakeRunner {
+            seen: std::sync::Mutex::new(None),
+            summary: RunSummary {
+                landed: false,
+                rounds: 3,
+                branch: None,
+                detail: "tests never passed".into(),
+            },
+        });
+        let c = ctx_with_runner(tmp.path(), fake);
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":72,"method":"tools/call","params":{"name":"ensemble_run","arguments":{"task":"do X"}}}"#,
+            &c,
+        )
+        .unwrap();
+        let p: Value = serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(p["landed"], false);
+        assert_eq!(p["rounds"], 3);
+        assert_eq!(p["reason"], "tests never passed");
+    }
+
+    #[test]
+    fn run_requires_a_task() {
+        let tmp = tempfile::tempdir().unwrap();
+        // even WITH a runner present, a missing task is a client error (-32602) — checked before the run
+        let fake = Arc::new(FakeRunner {
+            seen: std::sync::Mutex::new(None),
+            summary: RunSummary { landed: true, rounds: 1, branch: None, detail: String::new() },
+        });
+        let c = ctx_with_runner(tmp.path(), fake.clone());
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":73,"method":"tools/call","params":{"name":"ensemble_run","arguments":{}}}"#,
+            &c,
+        )
+        .unwrap();
+        assert_eq!(r["error"]["code"], -32602);
+        assert!(r["error"]["message"].as_str().unwrap().contains("task"));
+        assert!(fake.seen.lock().unwrap().is_none(), "the runner was never invoked");
+    }
+
+    #[test]
+    fn run_without_a_configured_runner_is_internal_error() {
+        // the unit-test Ctx has runner:None; the real binary always wires one. A valid call in that
+        // state is a server-config condition (-32603), never a silent fake-land.
+        let tmp = tempfile::tempdir().unwrap();
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":74,"method":"tools/call","params":{"name":"ensemble_run","arguments":{"task":"x"}}}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
+        assert_eq!(r["error"]["code"], -32603);
     }
 }

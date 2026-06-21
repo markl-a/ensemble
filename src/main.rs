@@ -25,7 +25,7 @@ const USAGE: &str = "usage:\n  \
     ensemble merge <branch> [--into <target>] [--repo <path>] [--resolver <agent>]   (land a kept branch; conflict → escalate, or --resolver runs ONE AI round)\n  \
     ensemble serve [--bind <addr>]   (default: this node's tailnet IP:7878; loopback if no tailnet)\n  \
     ensemble up [--bind <addr>]   (quick start: show the mesh, then serve in the foreground)\n  \
-    ensemble mcp [--repo <path>] [--name <agent>]   (stdio MCP server: make a LIVE CLI a crew member — mesh + shared board)\n\n\
+    ensemble mcp [--repo <path>] [--name <agent>] [--crew <crew.toml>]   (stdio MCP server: make a LIVE CLI a crew member — mesh + board + queue + worktree + merge + run)\n\n\
     run/run-many/dispatch auto-discover tailnet `serve` hosts for any agent without an explicit\n  \
     [agents.<n>] node = ... in crew.toml; pass --no-discover to stay local.";
 
@@ -606,18 +606,58 @@ fn merge_cmd(args: &[String]) {
     }
 }
 
-/// `ensemble mcp [--repo <path>] [--name <agent>]` — run a stdio MCP server that exposes the
-/// crew-participation API (slice 1: `ensemble_mesh` + `ensemble_board_read`), so a LIVE CLI launching
-/// it as an MCP server becomes a first-class crew member. Session = the repo; the shared board lives
-/// at `<repo>/.ensemble/board.jsonl`. Blocks on stdin until EOF.
+/// Adapts a built `Conductor` into the MCP server's `CrewRunner`, so a live member's `ensemble_run`
+/// delegates a governed crew sub-run. The conductor (crew.toml + its adapter registry) is built ONCE
+/// at server start; each `ensemble_run` call runs `run_in_repo` in its own throwaway worktree.
+struct ConductorRunner {
+    conductor: Conductor,
+}
+impl ensemble::mcp::CrewRunner for ConductorRunner {
+    fn run(&self, task: &str, repo: &Path) -> ensemble::mcp::RunSummary {
+        let out = self.conductor.run_in_repo(task, repo);
+        let rounds = out.rounds;
+        let (landed, branch, detail) = match out.decision {
+            Decision::Landed => (true, out.branch, String::new()),
+            Decision::Escalated(why) => (false, None, why),
+        };
+        ensemble::mcp::RunSummary { landed, rounds, branch, detail }
+    }
+}
+
+/// Build the `ensemble_run` crew-runner for `ensemble mcp`, or `None` if no crew.toml is resolvable —
+/// then `ensemble_run` reports itself unavailable, but the server STILL starts so the board / claim /
+/// worktree / merge / complete / fail tools work (they need no crew). Uses `--crew <path>` when given,
+/// else `<repo>/crew.toml`. `adapters_for(.., false)` disables tailnet DISCOVERY (no probe at startup
+/// → fast launch); a crew.toml with an explicit `node = "..."` still resolves to that pinned peer's
+/// `RemoteAdapter`. Only AUTO-discovery of sub-run agents from the tailnet is the later refinement.
+fn mcp_runner(args: &[String], repo: &str) -> Option<std::sync::Arc<dyn ensemble::mcp::CrewRunner>> {
+    let path = parse_flag(args, "--crew")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| Path::new(repo).join("crew.toml"));
+    let crew = CrewConfig::from_path(&path).ok()?;
+    let registry = adapters_for(&crew, false);
+    Some(std::sync::Arc::new(ConductorRunner {
+        conductor: Conductor::new(crew, registry),
+    }))
+}
+
+/// `ensemble mcp [--repo <path>] [--name <agent>] [--crew <crew.toml>]` — run a stdio MCP server that
+/// exposes the crew-participation API (mesh + board + work-queue + worktree + merge + complete/fail +
+/// run), so a LIVE CLI launching it as an MCP server becomes a first-class crew member. Session = the
+/// repo; the shared board lives at `<repo>/.ensemble/board.jsonl`, the work-queue at
+/// `<repo>/.ensemble/ledger.db`. `ensemble_run` delegates a governed crew sub-run via the runner built
+/// by `mcp_runner` (absent crew.toml ⇒ every other tool still works). Blocks on stdin until EOF.
 fn mcp_cmd(args: &[String]) {
     require_value_if_present(args, "--repo");
     require_value_if_present(args, "--name");
+    require_value_if_present(args, "--crew");
     let repo = parse_flag(args, "--repo").unwrap_or_else(|| ".".to_string());
     let name = parse_flag(args, "--name").unwrap_or_else(|| format!("mcp-{}", std::process::id()));
+    let runner = mcp_runner(args, &repo);
     let ctx = ensemble::mcp::Ctx {
         repo: std::path::PathBuf::from(repo),
         name,
+        runner,
     };
     if let Err(e) = ensemble::mcp::serve_stdio(ctx) {
         eprintln!("ensemble mcp: {e}");
