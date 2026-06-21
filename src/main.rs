@@ -25,7 +25,8 @@ const USAGE: &str = "usage:\n  \
     ensemble merge <branch> [--into <target>] [--repo <path>] [--resolver <agent>]   (land a kept branch; conflict → escalate, or --resolver runs ONE AI round)\n  \
     ensemble serve [--bind <addr>]   (default: this node's tailnet IP:7878; loopback if no tailnet)\n  \
     ensemble up [--bind <addr>]   (quick start: show the mesh, then serve in the foreground)\n  \
-    ensemble mcp [--repo <path>] [--name <agent>] [--crew <crew.toml>]   (stdio MCP server: make a LIVE CLI a crew member — mesh + board + queue + worktree + merge + run)\n\n\
+    ensemble mcp [--repo <path>] [--name <agent>] [--crew <crew.toml>]   (stdio MCP server: make a LIVE CLI a crew member — mesh + board + queue + worktree + merge + run)\n  \
+    ensemble mcp install --client <claude|codex|opencode> [--repo <p>] [--name <id>] [--exe <p>] [--crew <p>] [--config <p>] [--print]   (one-click: register `ensemble mcp` into that CLI's config)\n\n\
     run/run-many/dispatch auto-discover tailnet `serve` hosts for any agent without an explicit\n  \
     [agents.<n>] node = ... in crew.toml; pass --no-discover to stay local.";
 
@@ -648,6 +649,9 @@ fn mcp_runner(args: &[String], repo: &str) -> Option<std::sync::Arc<dyn ensemble
 /// `<repo>/.ensemble/ledger.db`. `ensemble_run` delegates a governed crew sub-run via the runner built
 /// by `mcp_runner` (absent crew.toml ⇒ every other tool still works). Blocks on stdin until EOF.
 fn mcp_cmd(args: &[String]) {
+    if args.get(2).map(|s| s.as_str()) == Some("install") {
+        return mcp_install_cmd(args);
+    }
     require_value_if_present(args, "--repo");
     require_value_if_present(args, "--name");
     require_value_if_present(args, "--crew");
@@ -662,6 +666,171 @@ fn mcp_cmd(args: &[String]) {
     if let Err(e) = ensemble::mcp::serve_stdio(ctx) {
         eprintln!("ensemble mcp: {e}");
         std::process::exit(1);
+    }
+}
+
+/// `ensemble mcp install --client <claude|codex|opencode> [--repo <p>] [--name <id>] [--exe <p>]
+/// [--crew <p>] [--config <p>] [--print]` — write the chosen CLI's MCP-server config so it launches
+/// `ensemble mcp` and becomes a crew member (no hand-editing per-client formats). Everything
+/// environment-specific is DERIVED (exe = this binary, repo = cwd, home from env, `$CODEX_HOME`
+/// honored); only the per-client FORMAT lives in `mcp_install`, and `--config`/`--print` override the
+/// target/let you preview. The merge is idempotent and preserves the user's other servers + comments.
+fn mcp_install_cmd(args: &[String]) {
+    for flag in ["--client", "--repo", "--name", "--exe", "--crew", "--config"] {
+        require_value_if_present(args, flag);
+    }
+    let client_str = parse_flag(args, "--client").unwrap_or_else(|| {
+        eprintln!("ensemble mcp install: --client <claude|codex|opencode> is required");
+        std::process::exit(2);
+    });
+    let client = ensemble::mcp_install::ClientKind::parse(&client_str).unwrap_or_else(|e| {
+        eprintln!("ensemble mcp install: {e}");
+        std::process::exit(2);
+    });
+    // DERIVE every environment/user-specific value (never hardcoded); each is overridable by a flag.
+    let repo = absolutize(
+        parse_flag(args, "--repo")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))),
+    );
+    // exe must be ABSOLUTE — the vendor CLI launches it from its OWN cwd. A current_exe() failure is
+    // fatal (a relative fallback would point at nothing); an explicit relative --exe is absolutized.
+    let exe = absolutize(match parse_flag(args, "--exe") {
+        Some(p) => std::path::PathBuf::from(p),
+        None => std::env::current_exe().unwrap_or_else(|e| {
+            eprintln!("ensemble mcp install: cannot determine this binary's path ({e}) — pass --exe <path>");
+            std::process::exit(2);
+        }),
+    });
+    let name = parse_flag(args, "--name").unwrap_or_else(|| client.as_str().to_string());
+    // crew must be ABSOLUTE for the same reason (else `--crew crew.toml` resolves against the vendor
+    // CLI's cwd at runtime and silently loses the crew runner).
+    let crew = absolutize(
+        parse_flag(args, "--crew")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| repo.join("crew.toml")),
+    );
+    let params = ensemble::mcp_install::InstallParams { exe, repo: repo.clone(), name, crew };
+    let env = ensemble::mcp_install::Env {
+        home: home_dir(),
+        codex_home: env_path("CODEX_HOME"),
+    };
+    let path = match parse_flag(args, "--config") {
+        Some(p) => std::path::PathBuf::from(p),
+        None => {
+            let p = ensemble::mcp_install::config_path(client, &repo, &env);
+            // a non-absolute default means we couldn't resolve a real location (e.g. codex with no home
+            // and no $CODEX_HOME) — refuse rather than silently write to a relative path.
+            if !p.is_absolute() {
+                eprintln!(
+                    "ensemble mcp install: could not determine a config location for `{}` (no home dir / \
+                     $CODEX_HOME?) — pass --config <path>",
+                    client.as_str()
+                );
+                std::process::exit(2);
+            }
+            p
+        }
+    };
+    // read the existing config: ABSENT ⇒ fresh (empty). Any OTHER read error (permission, a directory,
+    // invalid UTF-8) must ABORT — never silently treat it as empty and then OVERWRITE a file we could
+    // not read.
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => {
+            eprintln!("ensemble mcp install: read {}: {e}", path.display());
+            std::process::exit(1);
+        }
+    };
+    let merged = ensemble::mcp_install::render_merged(client, &existing, &params).unwrap_or_else(|e| {
+        eprintln!("ensemble mcp install: {} ({})", e, path.display());
+        std::process::exit(1);
+    });
+    if has_flag(args, "--print") {
+        println!("# {} config → {}", client.as_str(), path.display());
+        print!("{merged}");
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                eprintln!("ensemble mcp install: create {}: {e}", parent.display());
+                std::process::exit(1);
+            }
+        }
+    }
+    // Follow a symlinked config to its REAL target so the atomic replace swaps the underlying file
+    // rather than turning the user's symlink into a regular file. `canonicalize` only works on an
+    // existing path; for a brand-new config use the intended path as-is.
+    let target = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+    let dir = target
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    // SECURE ATOMIC write: a RANDOMLY-named, O_EXCL temp file in the target's OWN directory (via
+    // `tempfile`), so a pre-placed or raced file/symlink can never be followed or clobbered — the
+    // project-scoped .mcp.json / opencode.json live in a possibly-shared repo. It is created 0600 (no
+    // world-readable window); we copy the existing config's mode onto it; then it is atomically renamed
+    // over the target (same fs). The temp is auto-removed on any error (NamedTempFile drops unpersisted).
+    let mut tf = tempfile::Builder::new()
+        .prefix(".ensemble-mcp-")
+        .tempfile_in(&dir)
+        .unwrap_or_else(|e| {
+            eprintln!("ensemble mcp install: temp file in {}: {e}", dir.display());
+            std::process::exit(1);
+        });
+    {
+        use std::io::Write as _;
+        if let Err(e) = tf.write_all(merged.as_bytes()) {
+            eprintln!("ensemble mcp install: write temp: {e}");
+            std::process::exit(1);
+        }
+    }
+    // carry the existing file's permissions onto the replacement (best-effort), so an install doesn't
+    // silently widen/narrow the config's mode.
+    if let Ok(meta) = std::fs::metadata(&target) {
+        let _ = std::fs::set_permissions(tf.path(), meta.permissions());
+    }
+    if let Err(e) = tf.persist(&target) {
+        eprintln!("ensemble mcp install: replace {}: {e}", target.display());
+        std::process::exit(1);
+    }
+    println!(
+        "ensemble: registered as MCP server for `{}` (member `{}`) → {}",
+        client.as_str(),
+        params.name,
+        path.display()
+    );
+    println!("  restart {} to pick it up; the crew's board/queue live under {}/.ensemble/", client.as_str(), params.repo.display());
+}
+
+/// A NON-EMPTY environment variable as a path, or `None`. An empty value is treated as UNSET, so it
+/// never resolves to a bogus relative path (e.g. an empty `$CODEX_HOME` → `config.toml`).
+fn env_path(key: &str) -> Option<std::path::PathBuf> {
+    std::env::var_os(key)
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+/// The user's home directory, portably: `%USERPROFILE%` (Windows) or `$HOME` (Unix). Empty if neither
+/// is set/non-empty — then a codex install resolves to a non-absolute path and is refused unless
+/// `--config <path>` is passed.
+fn home_dir() -> std::path::PathBuf {
+    env_path("USERPROFILE")
+        .or_else(|| env_path("HOME"))
+        .unwrap_or_default()
+}
+
+/// Make `p` absolute WITHOUT touching the filesystem (no canonicalize → no symlink resolution, no
+/// Windows `\\?\` prefix, works for a not-yet-created repo): an absolute path is kept; a relative one
+/// is joined onto the current dir.
+fn absolutize(p: std::path::PathBuf) -> std::path::PathBuf {
+    if p.is_absolute() {
+        p
+    } else {
+        std::env::current_dir().map(|c| c.join(&p)).unwrap_or(p)
     }
 }
 

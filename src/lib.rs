@@ -15,6 +15,7 @@ pub mod gate;
 pub mod journal;
 pub mod ledger;
 pub mod mcp;
+pub mod mcp_install;
 pub mod mesh;
 pub mod remote_adapter;
 pub mod repo_sync;
