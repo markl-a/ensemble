@@ -31,6 +31,9 @@ pub struct Conductor {
     /// Firewall B: a Ctrl-C handler flips this; the conductor bails cleanly at the next round
     /// boundary. Defaults to a never-set flag (so a plain `Conductor::new` is unaffected).
     abort: Arc<AtomicBool>,
+    /// S1a live supervision: when set, every blackboard post is mirrored here so `ensemble watch`
+    /// can tail the run in real time. `None` ⇒ no streaming (unchanged behaviour).
+    stream: Option<Box<dyn crate::supervise::RunObserver>>,
 }
 
 /// Firewall B: true when `elapsed_secs` has exceeded a wall-clock budget (`budget == 0` ⇒ no budget).
@@ -44,6 +47,7 @@ impl Conductor {
             crew,
             adapters,
             abort: Arc::new(AtomicBool::new(false)),
+            stream: None,
         }
     }
 
@@ -52,6 +56,26 @@ impl Conductor {
     pub fn with_abort(mut self, flag: Arc<AtomicBool>) -> Self {
         self.abort = flag;
         self
+    }
+
+    /// S1a: wire a live stream observer — every blackboard post is mirrored to it so the run is
+    /// watchable in real time via `ensemble watch`. Best-effort; it never changes a run's outcome.
+    pub fn with_stream(mut self, obs: Box<dyn crate::supervise::RunObserver>) -> Self {
+        self.stream = Some(obs);
+        self
+    }
+
+    /// Post to the blackboard AND mirror to the live stream observer (if any) — the single funnel so
+    /// the run transcript and the live feed can never drift.
+    fn note(&self, bb: &mut Blackboard, from: &str, kind: &str, body: &str) {
+        bb.post(from, kind, body);
+        if let Some(s) = &self.stream {
+            s.post(&crate::blackboard::Message {
+                from: from.to_string(),
+                kind: kind.to_string(),
+                body: body.to_string(),
+            });
+        }
     }
 
     /// Whether the operator has aborted (firewall B). A driver loop (e.g. `dispatch`) checks this to
@@ -106,7 +130,7 @@ impl Conductor {
             {
                 Some(Ok(out)) => {
                     impl_text = out.text.clone();
-                    bb.post(&out.agent, "result", &out.text);
+                    self.note(&mut bb, &out.agent, "result", &out.text);
                 }
                 Some(Err(e)) => {
                     return RunOutcome {
@@ -139,7 +163,8 @@ impl Conductor {
                 let t = crate::test_gate::run_tests(cwd, &test.command);
                 test_passed = t.passed;
                 test_out = t.output.clone();
-                bb.post(
+                self.note(
+                    &mut bb,
                     "test",
                     if t.passed {
                         "test_pass"
@@ -216,13 +241,14 @@ impl Conductor {
                     match self.crew.gate.on_flake {
                         OnFlake::Exclude => {}
                         OnFlake::Retry => {
-                            bb.post(role, "finding", "reviewer flaked — retrying once");
+                            self.note(&mut bb, role, "finding", "reviewer flaked — retrying once");
                             result = self.adapter_for_role(role).map(|a| a.run(&prompt, cwd));
                         }
                         OnFlake::Substitute => {
                             if let Some(backup) = self.crew.backup_for(&agent_name) {
                                 if let Some(b) = self.adapters.get(backup) {
-                                    bb.post(
+                                    self.note(
+                                        &mut bb,
                                         role,
                                         "finding",
                                         &format!(
@@ -240,7 +266,7 @@ impl Conductor {
                 match result {
                     Some(Ok(out)) => {
                         let v = parse_verdict(&out.text);
-                        bb.post(&out.agent, "verdict", &out.text);
+                        self.note(&mut bb, &out.agent, "verdict", &out.text);
                         verdicts.push(RoleVerdict {
                             role: role.to_string(),
                             agent: effective_agent,
@@ -248,10 +274,11 @@ impl Conductor {
                         });
                     }
                     Some(Err(e)) => {
-                        bb.post(role, "finding", &format!("reviewer excluded — flaked: {e}"));
+                        self.note(&mut bb, role, "finding", &format!("reviewer excluded — flaked: {e}"));
                     }
                     None => {
-                        bb.post(
+                        self.note(
+                            &mut bb,
                             role,
                             "finding",
                             &format!("reviewer excluded — no adapter for role '{role}'"),
@@ -274,6 +301,7 @@ impl Conductor {
                             branch: None,
                         };
                     }
+                    self.note(&mut bb, "conductor", "decision", "LANDED");
                     return RunOutcome {
                         decision: Decision::Landed,
                         rounds: round + 1,
@@ -282,6 +310,7 @@ impl Conductor {
                     };
                 }
                 GateDecision::Escalate(why) => {
+                    self.note(&mut bb, "conductor", "decision", &format!("escalated: {why}"));
                     return RunOutcome {
                         decision: Decision::Escalated(why),
                         rounds: round + 1,
@@ -294,6 +323,7 @@ impl Conductor {
                 }
             }
         }
+        self.note(&mut bb, "conductor", "decision", "escalated: max rounds reached");
         RunOutcome {
             decision: Decision::Escalated("max rounds reached".to_string()),
             rounds: max,
@@ -453,5 +483,55 @@ mod tests {
         assert!(!over_budget(2, 3)); // under budget
         assert!(over_budget(3, 3)); // at budget
         assert!(over_budget(5, 3)); // over budget
+    }
+
+    #[test]
+    fn run_mirrors_blackboard_posts_to_the_observer() {
+        use super::*;
+        use crate::adapter::{Adapter, MockAdapter};
+        use crate::crew::{CrewConfig, GatePolicy, OnFlake, RoleConfig};
+        use crate::supervise::RunObserver;
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        // an observer that records (from, kind) of each mirrored post, behind an Arc so the test
+        // can inspect it after the conductor has consumed the Box<dyn RunObserver>.
+        struct Rec(Arc<Mutex<Vec<(String, String)>>>);
+        impl RunObserver for Rec {
+            fn post(&self, m: &crate::blackboard::Message) {
+                self.0.lock().unwrap().push((m.from.clone(), m.kind.clone()));
+            }
+        }
+
+        // a crew that lands in one round: impl -> one approving reviewer, min_approvals = 1
+        let crew = CrewConfig {
+            gate: GatePolicy {
+                min_approvals: 1,
+                max_rounds: 1,
+                on_flake: OnFlake::Exclude,
+                stall_limit: 0,
+                max_task_secs: 0,
+            },
+            pipeline: vec!["implement".to_string(), "review".to_string()],
+            roles: HashMap::from([
+                ("implement".to_string(), RoleConfig { agent: "impl".to_string(), blind: false }),
+                ("review".to_string(), RoleConfig { agent: "rev".to_string(), blind: false }),
+            ]),
+            agents: HashMap::new(),
+            test: None,
+        };
+        let mut adapters: HashMap<String, Box<dyn Adapter>> = HashMap::new();
+        adapters.insert("impl".to_string(), Box::new(MockAdapter::new("impl", vec![Ok("implemented it".to_string())])));
+        adapters.insert("rev".to_string(), Box::new(MockAdapter::new("rev", vec![Ok("VERDICT: LGTM".to_string())])));
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let c = Conductor::new(crew, adapters).with_stream(Box::new(Rec(log.clone())));
+        let out = c.run("do the thing", std::path::Path::new("."));
+        assert!(matches!(out.decision, Decision::Landed), "should land: {:?}", out.decision);
+
+        let seen = log.lock().unwrap().clone();
+        assert!(seen.iter().any(|(f, k)| f == "impl" && k == "result"), "implementer result streamed: {seen:?}");
+        assert!(seen.iter().any(|(f, k)| f == "rev" && k == "verdict"), "reviewer verdict streamed: {seen:?}");
+        assert!(seen.iter().any(|(f, k)| f == "conductor" && k == "decision"), "terminal decision streamed: {seen:?}");
     }
 }

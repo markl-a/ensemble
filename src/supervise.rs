@@ -115,6 +115,13 @@ pub fn member_stream_path(repo: &Path, member: &str) -> PathBuf {
         .join(format!("{}.ndjson", crate::journal::sanitize_slug(member)))
 }
 
+/// A live sink the conductor mirrors each blackboard post into, so a governed `ensemble run` is
+/// watchable in real time (S1a). Best-effort by contract: an implementation must never let a write
+/// failure surface — it cannot be allowed to change a run's outcome (mirrors journal's discipline).
+pub trait RunObserver: Send + Sync {
+    fn post(&self, m: &crate::blackboard::Message);
+}
+
 /// Parsed `ensemble watch` arguments (pure; the IO shell in main.rs consumes this).
 #[derive(Debug, PartialEq)]
 pub struct WatchArgs {
