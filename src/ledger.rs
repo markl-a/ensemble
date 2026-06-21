@@ -156,6 +156,34 @@ impl Ledger {
         Ok(())
     }
 
+    /// Terminal SUCCESS record GUARDED by ownership: mark `id` done ONLY if it is currently `claimed`
+    /// by `worker`. The guard lives in the SQL `WHERE` so the check-and-write is one ATOMIC statement
+    /// (no check-then-act race). Returns true iff the transition happened; false (and nothing written)
+    /// means the task is not this worker's to complete — an unknown id, still queued, claimed by
+    /// someone else, or already terminal. This is the anti-impersonation guard behind `ensemble_complete`:
+    /// a member can only close out a task it actually holds a live claim on. (The unguarded `complete`
+    /// above stays for the headless `dispatch` driver, which owns the whole queue it drains.)
+    pub fn complete_owned(&self, id: &str, worker: &str, outcome: &str, now: i64) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE tasks SET state='done', outcome=?, completed_at=? \
+             WHERE id=? AND state='claimed' AND claimed_by=?",
+            params![outcome, now, id, worker],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// Terminal FAILURE record GUARDED by ownership — the `ensemble_fail` counterpart of
+    /// [`complete_owned`]: mark `id` failed ONLY if `worker` currently holds its claim. Same single
+    /// atomic guarded `UPDATE`; returns true iff the transition happened.
+    pub fn fail_owned(&self, id: &str, worker: &str, reason: &str, now: i64) -> Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE tasks SET state='failed', outcome=?, completed_at=? \
+             WHERE id=? AND state='claimed' AND claimed_by=?",
+            params![reason, now, id, worker],
+        )?;
+        Ok(n == 1)
+    }
+
     /// Return claims older than `stale_before` to the queue (a dead worker's orphaned claims).
     /// Returns how many were recovered.
     pub fn recover_orphans(&self, stale_before: i64) -> Result<usize> {
@@ -302,5 +330,49 @@ mod tests {
         l.complete("a", "ok", 20).unwrap(); // 'a' was the oldest → claimed → done
         let c = l.counts().unwrap();
         assert_eq!((c.queued, c.claimed, c.done, c.failed), (2, 0, 1, 0));
+    }
+
+    #[test]
+    fn complete_owned_requires_ownership() {
+        let (_d, mut l) = open_tmp();
+        l.enqueue("a", "A", 1).unwrap();
+        l.claim("alice", 10).unwrap(); // alice owns 'a'
+                                       // a different member must NOT be able to complete alice's task
+        assert!(!l.complete_owned("a", "bob", "bob did it", 20).unwrap());
+        let a = l.list().unwrap().into_iter().find(|t| t.id == "a").unwrap();
+        assert_eq!(a.state, TaskState::Claimed, "bob's attempt changed nothing");
+        assert_eq!(a.outcome, None);
+        // the owner can
+        assert!(l.complete_owned("a", "alice", "LANDED", 21).unwrap());
+        let a = l.list().unwrap().into_iter().find(|t| t.id == "a").unwrap();
+        assert_eq!(a.state, TaskState::Done);
+        assert_eq!(a.outcome.as_deref(), Some("LANDED"));
+        // double-complete is a no-op (already terminal, no longer claimed)
+        assert!(!l.complete_owned("a", "alice", "again", 22).unwrap());
+        let a = l.list().unwrap().into_iter().find(|t| t.id == "a").unwrap();
+        assert_eq!(a.outcome.as_deref(), Some("LANDED"), "outcome not overwritten");
+    }
+
+    #[test]
+    fn complete_owned_rejects_unclaimed_and_unknown() {
+        let (_d, l) = open_tmp();
+        l.enqueue("a", "A", 1).unwrap();
+        // queued (never claimed) → can't be completed by anyone
+        assert!(!l.complete_owned("a", "alice", "x", 20).unwrap());
+        // an unknown id → false, never a row created
+        assert!(!l.complete_owned("ghost", "alice", "x", 20).unwrap());
+        assert_eq!(l.counts().unwrap().queued, 1);
+    }
+
+    #[test]
+    fn fail_owned_requires_ownership() {
+        let (_d, mut l) = open_tmp();
+        l.enqueue("a", "A", 1).unwrap();
+        l.claim("alice", 10).unwrap();
+        assert!(!l.fail_owned("a", "bob", "nope", 20).unwrap());
+        assert!(l.fail_owned("a", "alice", "ESCALATED: boom", 21).unwrap());
+        let a = l.list().unwrap().into_iter().find(|t| t.id == "a").unwrap();
+        assert_eq!(a.state, TaskState::Failed);
+        assert_eq!(a.outcome.as_deref(), Some("ESCALATED: boom"));
     }
 }

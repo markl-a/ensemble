@@ -176,6 +176,32 @@ fn tools_list() -> Value {
                 "required": ["branch"],
                 "additionalProperties": false
             }
+        },
+        {
+            "name": "ensemble_complete",
+            "description": "Record a TERMINAL success for a task THIS member claimed: mark it done in the shared crew work-queue with `outcome` (e.g. the landed branch). Ownership-guarded — only the member that claimed the task can complete it, and only while it is still claimed (a no-op otherwise, so it can't overwrite another member's task or re-finish a done one). Returns {completed:true, id} or {completed:false, id, detail}.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "the task id (from ensemble_claim/ensemble_enqueue)" },
+                    "outcome": { "type": "string", "description": "the terminal result, e.g. \"LANDED ensemble/<member>/<task>\"" }
+                },
+                "required": ["id", "outcome"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "ensemble_fail",
+            "description": "Record a TERMINAL failure for a task THIS member claimed: mark it failed in the shared crew work-queue with `reason`. Ownership-guarded exactly like ensemble_complete (only the claiming member, only while still claimed). Returns {failed:true, id} or {failed:false, id, detail}.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "the task id (from ensemble_claim/ensemble_enqueue)" },
+                    "reason": { "type": "string", "description": "why it failed, e.g. \"ESCALATED: tests never passed\"" }
+                },
+                "required": ["id", "reason"],
+                "additionalProperties": false
+            }
         }
     ]})
 }
@@ -194,6 +220,8 @@ fn tools_call(params: &Value, ctx: &Ctx) -> Result<Value, RpcError> {
         "ensemble_enqueue" => tool_enqueue(&args, ctx)?,
         "ensemble_claim" => tool_claim(&args, ctx)?,
         "ensemble_merge" => tool_merge(&args, ctx)?,
+        "ensemble_complete" => tool_complete(&args, ctx)?,
+        "ensemble_fail" => tool_fail(&args, ctx)?,
         other => return Err(RpcError::invalid_params(format!("unknown tool: {other}"))),
     };
     // MCP tool result: a content list. We return one text item (JSON-or-text payload).
@@ -442,6 +470,56 @@ fn tool_merge(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
         crate::repo_sync::MergeOutcome::Conflict(paths) => {
             json!({ "landed": false, "branch": branch, "into": into, "conflict": paths })
         }
+    }
+    .to_string())
+}
+
+/// The advisory `detail` returned when an ownership-guarded terminal write (complete/fail) does NOT
+/// take effect. The guard (`ledger::complete_owned`/`fail_owned`) is a single atomic `UPDATE ...
+/// WHERE id=? AND state='claimed' AND claimed_by=?`, so a false return covers exactly these cases —
+/// reported as a normal OUTCOME (like a merge conflict), not a protocol error.
+const NOT_OWNED_DETAIL: &str = "task is not claimed by this member (unknown id, still queued, claimed by another, or already terminal); nothing written";
+
+/// Mark a task THIS member claimed as DONE (terminal success) in the shared work-queue. `id` and
+/// `outcome` are required non-blank strings. Ownership-guarded via `ledger::complete_owned(id,
+/// ctx.name, ...)`: the write happens ONLY if the task is currently claimed by this member (the same
+/// anti-impersonation guarantee as claim/board_post — the worker is `ctx.name`, never a client field),
+/// so a member can't close out another's task or re-finish a terminal one. The guard is atomic in SQL.
+/// Returns `{completed:true, id}` on success or `{completed:false, id, detail}` when the guard blocks
+/// it (a reported outcome, not an error — the member can re-check the board/queue).
+fn tool_complete(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
+    if !args.is_object() {
+        return Err(RpcError::invalid_params("arguments must be an object with `id` and `outcome`"));
+    }
+    let id = required_str(args, "id")?;
+    let outcome = required_str(args, "outcome")?;
+    let done = open_ledger(&ctx.repo)?
+        .complete_owned(id, &ctx.name, outcome, now_secs())
+        .map_err(|e| RpcError::internal(format!("ledger complete: {e}")))?;
+    Ok(if done {
+        json!({ "completed": true, "id": id })
+    } else {
+        json!({ "completed": false, "id": id, "detail": NOT_OWNED_DETAIL })
+    }
+    .to_string())
+}
+
+/// Mark a task THIS member claimed as FAILED (terminal failure) with `reason` — the `ensemble_fail`
+/// counterpart of [`tool_complete`], same required fields and same ownership guard
+/// (`ledger::fail_owned`). Returns `{failed:true, id}` or `{failed:false, id, detail}`.
+fn tool_fail(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
+    if !args.is_object() {
+        return Err(RpcError::invalid_params("arguments must be an object with `id` and `reason`"));
+    }
+    let id = required_str(args, "id")?;
+    let reason = required_str(args, "reason")?;
+    let failed = open_ledger(&ctx.repo)?
+        .fail_owned(id, &ctx.name, reason, now_secs())
+        .map_err(|e| RpcError::internal(format!("ledger fail: {e}")))?;
+    Ok(if failed {
+        json!({ "failed": true, "id": id })
+    } else {
+        json!({ "failed": false, "id": id, "detail": NOT_OWNED_DETAIL })
     }
     .to_string())
 }
@@ -1191,5 +1269,118 @@ mod tests {
             repo.join("a.txt").exists() && repo.join("b.txt").exists(),
             "both branches landed under the serializing lock (no clobber)"
         );
+    }
+
+    #[test]
+    fn tools_list_includes_complete_and_fail() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = call(r#"{"jsonrpc":"2.0","id":58,"method":"tools/list"}"#, &ctx(tmp.path())).unwrap();
+        let names: Vec<&str> = r["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"ensemble_complete"));
+        assert!(names.contains(&"ensemble_fail"));
+    }
+
+    #[test]
+    fn complete_marks_a_claimed_task_done() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = ctx(tmp.path()); // name = "tester"
+                                 // enqueue + claim the task AS tester, through the tools
+        let e = call(
+            r#"{"jsonrpc":"2.0","id":61,"method":"tools/call","params":{"name":"ensemble_enqueue","arguments":{"descr":"ship it"}}}"#,
+            &c,
+        )
+        .unwrap();
+        let id = {
+            let ep: Value =
+                serde_json::from_str(e["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+            ep["id"].as_str().unwrap().to_string()
+        };
+        call(r#"{"jsonrpc":"2.0","id":62,"method":"tools/call","params":{"name":"ensemble_claim"}}"#, &c).unwrap();
+        let body = format!(
+            r#"{{"jsonrpc":"2.0","id":63,"method":"tools/call","params":{{"name":"ensemble_complete","arguments":{{"id":"{id}","outcome":"LANDED ensemble/tester/x"}}}}}}"#
+        );
+        let r = call(&body, &c).unwrap();
+        let p: Value = serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(p["completed"], true);
+        assert_eq!(p["id"], id);
+        // a terminal DONE record with our outcome actually landed in the shared ledger
+        let l = crate::ledger::Ledger::open(&tmp.path().join(".ensemble").join("ledger.db")).unwrap();
+        let t = l.list().unwrap().into_iter().find(|t| t.id == id).unwrap();
+        assert_eq!(t.state_str(), "done");
+        assert_eq!(t.outcome.as_deref(), Some("LANDED ensemble/tester/x"));
+    }
+
+    #[test]
+    fn complete_rejects_a_task_claimed_by_another_member() {
+        // ownership guard: a member can only complete a task IT claimed (the anti-impersonation theme —
+        // like board posts/claims being attributed to ctx.name, never a client field).
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join(".ensemble");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("ledger.db");
+        {
+            let mut l = crate::ledger::Ledger::open(&db).unwrap();
+            l.enqueue("t1", "shared task", 1).unwrap();
+            l.claim("other-member", 10).unwrap(); // someone ELSE owns it
+        }
+        // tester (ctx.name) never claimed t1 → cannot complete it
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":64,"method":"tools/call","params":{"name":"ensemble_complete","arguments":{"id":"t1","outcome":"sneaky"}}}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
+        let p: Value = serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(p["completed"], false, "can't complete another member's task");
+        assert!(p["detail"].is_string(), "explains why it didn't take: {p}");
+        // the task is untouched: still claimed by the real owner, no outcome written
+        let l = crate::ledger::Ledger::open(&db).unwrap();
+        let t = l.list().unwrap().into_iter().find(|t| t.id == "t1").unwrap();
+        assert_eq!(t.state_str(), "claimed");
+        assert_eq!(t.claimed_by.as_deref(), Some("other-member"));
+        assert_eq!(t.outcome, None);
+    }
+
+    #[test]
+    fn complete_requires_id_and_outcome() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":65,"method":"tools/call","params":{"name":"ensemble_complete","arguments":{"id":"x"}}}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
+        assert_eq!(r["error"]["code"], -32602);
+        assert!(r["error"]["message"].as_str().unwrap().contains("outcome"), "names the missing field");
+    }
+
+    #[test]
+    fn fail_marks_a_claimed_task_failed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = ctx(tmp.path());
+        let e = call(
+            r#"{"jsonrpc":"2.0","id":66,"method":"tools/call","params":{"name":"ensemble_enqueue","arguments":{"descr":"flaky thing"}}}"#,
+            &c,
+        )
+        .unwrap();
+        let id = {
+            let ep: Value =
+                serde_json::from_str(e["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+            ep["id"].as_str().unwrap().to_string()
+        };
+        call(r#"{"jsonrpc":"2.0","id":67,"method":"tools/call","params":{"name":"ensemble_claim"}}"#, &c).unwrap();
+        let body = format!(
+            r#"{{"jsonrpc":"2.0","id":68,"method":"tools/call","params":{{"name":"ensemble_fail","arguments":{{"id":"{id}","reason":"ESCALATED: tests never passed"}}}}}}"#
+        );
+        let r = call(&body, &c).unwrap();
+        let p: Value = serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(p["failed"], true);
+        let l = crate::ledger::Ledger::open(&tmp.path().join(".ensemble").join("ledger.db")).unwrap();
+        let t = l.list().unwrap().into_iter().find(|t| t.id == id).unwrap();
+        assert_eq!(t.state_str(), "failed");
+        assert_eq!(t.outcome.as_deref(), Some("ESCALATED: tests never passed"));
     }
 }
