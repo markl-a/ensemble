@@ -752,14 +752,6 @@ fn mcp_install_cmd(args: &[String]) {
         print!("{merged}");
         return;
     }
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                eprintln!("ensemble mcp install: create {}: {e}", parent.display());
-                std::process::exit(1);
-            }
-        }
-    }
     // Resolve the REAL file we atomically replace, so the swap goes through any symlink (preserving it)
     // instead of turning the user's link into a regular file. Crucially this also follows a DANGLING
     // symlink (target not yet created — common with dotfile managers) to its destination, rather than
@@ -770,40 +762,20 @@ fn mcp_install_cmd(args: &[String]) {
         .filter(|p| !p.as_os_str().is_empty())
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
-    // SECURE ATOMIC write: a RANDOMLY-named, O_EXCL temp file in the target's OWN directory (via
-    // `tempfile`), so a pre-placed or raced file/symlink can never be followed or clobbered — the
-    // project-scoped .mcp.json / opencode.json live in a possibly-shared repo. It is created 0600 (no
-    // world-readable window); on Unix we then copy the existing config's mode onto it (see below); then
-    // it is atomically renamed over the target (same fs). The temp is auto-removed on any error
-    // (NamedTempFile drops unpersisted).
-    let mut tf = tempfile::Builder::new()
-        .prefix(".ensemble-mcp-")
-        .tempfile_in(&dir)
-        .unwrap_or_else(|e| {
-            eprintln!("ensemble mcp install: temp file in {}: {e}", dir.display());
-            std::process::exit(1);
-        });
-    {
-        use std::io::Write as _;
-        if let Err(e) = tf.write_all(merged.as_bytes()) {
-            eprintln!("ensemble mcp install: write temp: {e}");
-            std::process::exit(1);
-        }
+    // Ensure the dir we ACTUALLY write into exists. We create the RESOLVED target's dir (not `path`'s),
+    // so a dangling symlink whose destination dir doesn't exist yet is handled too; for a normal path
+    // the two are identical.
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("ensemble mcp install: create {}: {e}", dir.display());
+        std::process::exit(1);
     }
-    // Carry the existing config's access mode onto the replacement so an install neither widens nor
-    // narrows it. On UNIX this copies the real permission bits (the meaningful multi-user case). On
-    // WINDOWS std exposes only the read-only ATTRIBUTE, not the DACL — and copying it would also leave
-    // the replacement read-only and break the NEXT install's rename-over — so we deliberately do not
-    // fake a partial copy: the fresh temp instead inherits its directory's ACL, exactly as the CLI
-    // itself would create the file (no widening beyond the directory default). Full DACL cloning is out
-    // of scope (it needs a platform crate + unsafe for a negligible real-world delta on a user's own
-    // config). This also resolves the read-only-target rename-failure window noted in review.
-    #[cfg(unix)]
-    if let Ok(meta) = std::fs::metadata(&target) {
-        let _ = std::fs::set_permissions(tf.path(), meta.permissions());
-    }
-    if let Err(e) = tf.persist(&target) {
-        eprintln!("ensemble mcp install: replace {}: {e}", target.display());
+    // Atomic write with cleanup that SURVIVES our error exits: `write_config` owns the temp and only
+    // ever RETURNS (never process::exit) while it is live, so on any failure the temp's Drop runs and
+    // removes it. (process::exit skips destructors — it would otherwise litter a `.ensemble-mcp-*` copy
+    // of the merged config in the user's config dir.) We map the error to a String and exit AFTER the
+    // temp is gone.
+    if let Err(e) = write_config(&dir, &target, merged.as_bytes()) {
+        eprintln!("ensemble mcp install: {e}");
         std::process::exit(1);
     }
     println!(
@@ -813,6 +785,48 @@ fn mcp_install_cmd(args: &[String]) {
         path.display()
     );
     println!("  restart {} to pick it up; the crew's board/queue live under {}/.ensemble/", client.as_str(), params.repo.display());
+}
+
+/// Atomically write `contents` to `target` via a RANDOMLY-named, O_EXCL temp in `dir` (the target's own
+/// directory, so the rename stays on one filesystem and a pre-placed/raced file or symlink can never be
+/// followed or clobbered — the project-scoped `.mcp.json` / `opencode.json` live in a possibly-shared
+/// repo). The temp is created 0600; on Unix the existing config's mode is copied onto it BEFORE the
+/// rename so an install neither widens nor narrows it.
+///
+/// CRUCIAL invariant: this NEVER calls `process::exit` while the temp is live. Every failure RETURNS
+/// `Err`, so the `NamedTempFile` (or, on a persist failure, the `PersistError` that owns it) is DROPPED
+/// on the way out and the temp is removed. `process::exit` runs no destructors, so an exit here would
+/// leave a `.ensemble-mcp-*` file — a full copy of the merged config — behind in the user's config dir.
+///
+/// Windows permission scope (HONEST): a freshly-created temp inherits its DIRECTORY's ACL — exactly what
+/// creating the file from scratch (here, or by the CLI itself) would produce. It does NOT preserve a
+/// user's manually tightened, file-specific DACL/owner across the replace (std exposes only the
+/// read-only attribute, not the DACL; cloning it needs a platform security API + unsafe for a negligible
+/// real-world delta — and these configs hold no secrets, only an exe path + args). So the guarantee is
+/// precisely "never widened BEYOND THE DIRECTORY DEFAULT", not "byte-identical to the prior file's ACL".
+fn write_config(
+    dir: &std::path::Path,
+    target: &std::path::Path,
+    contents: &[u8],
+) -> Result<(), String> {
+    use std::io::Write as _;
+    let mut tf = tempfile::Builder::new()
+        .prefix(".ensemble-mcp-")
+        .tempfile_in(dir)
+        .map_err(|e| format!("temp file in {}: {e}", dir.display()))?;
+    tf.write_all(contents)
+        .map_err(|e| format!("write temp: {e}"))?;
+    // Carry the existing config's access mode onto the replacement (UNIX only — the meaningful
+    // multi-user case). A metadata() Err (brand-new target) ⇒ keep the temp's 0600.
+    #[cfg(unix)]
+    if let Ok(meta) = std::fs::metadata(target) {
+        let _ = std::fs::set_permissions(tf.path(), meta.permissions());
+    }
+    // persist atomically renames over the target. On failure the returned PersistError OWNS the temp;
+    // we keep only its io::Error message and let the PersistError drop here, which removes the temp.
+    tf.persist(target)
+        .map_err(|e| format!("replace {}: {}", target.display(), e.error))?;
+    Ok(())
 }
 
 /// A NON-EMPTY environment variable as a path, or `None`. An empty value is treated as UNSET, so it
