@@ -21,6 +21,7 @@ pub mod ndjson;
 pub mod remote_adapter;
 pub mod repo_sync;
 pub mod serve;
+pub mod supervise;
 pub mod test_gate;
 pub mod verdict;
 pub mod wire;
@@ -49,6 +50,7 @@ pub use repo_sync::{
     merge_with_resolver, orphan_scratch, MergeOutcome,
 };
 pub use serve::{resolve_bind, serve, BindAddr};
+pub use supervise::{render_event, render_line, StreamEvent};
 pub use test_gate::{run_tests, TestOutcome};
 pub use verdict::{parse_verdict, Verdict};
 pub use wire::{RunRequest, RunResponse};
