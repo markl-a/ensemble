@@ -27,7 +27,9 @@ const USAGE: &str = "usage:\n  \
     ensemble up [--bind <addr>]   (quick start: show the mesh, then serve in the foreground)\n  \
     ensemble mcp [--repo <path>] [--name <agent>] [--crew <crew.toml>]   (stdio MCP server: make a LIVE CLI a crew member — mesh + board + queue + worktree + merge + run)\n  \
     ensemble mcp install --client <claude|codex|opencode> [--repo <p>] [--name <id>] [--exe <p>] [--crew <p>] [--config <p>] [--print]   (one-click: register `ensemble mcp` into that CLI's config)\n  \
-    ensemble watch <member> [--repo <path>] [--since <n>] [--follow]   (tail a live member's stream feed)\n\n\
+    ensemble watch <member> [--repo <path>] [--since <n>] [--follow]   (tail a live member's stream feed)\n  \
+    ensemble steer <name> \"<prompt>\" [--repo <path>]   (inject a redirect into a live --watch run's next round)\n  \
+    ensemble abort <name> [--hard] [--repo <path>]   (stop a live --watch run; --hard kills the running CLI now)\n\n\
     run/run-many/dispatch auto-discover tailnet `serve` hosts for any agent without an explicit\n  \
     [agents.<n>] node = ... in crew.toml; pass --no-discover to stay local.";
 
@@ -55,6 +57,8 @@ fn main() {
         Some("serve") => serve_cmd(&args),
         Some("up") => up_cmd(&args),
         Some("watch") => watch_cmd(&args),
+        Some("steer") => steer_cmd(&args),
+        Some("abort") => abort_cmd(&args),
         _ => {
             eprintln!("{USAGE}");
             std::process::exit(2);
@@ -182,6 +186,56 @@ fn watch_cmd(args: &[String]) {
     }
 }
 
+/// `ensemble steer <name> "<prompt>" [--repo <p>] [--from <id>]` — inject an operator redirect into the
+/// NEXT round of the live run started with `--watch <name>` (keeps a drifting CLI on track). Appends a
+/// Steer to that run's control feed; the run's watcher picks it up at the next round boundary.
+fn steer_cmd(args: &[String]) {
+    require_value_if_present(args, "--repo");
+    require_value_if_present(args, "--from");
+    let (name, prompt) = match positional_tasks(args).as_slice() {
+        [name, prompt] => (name.clone(), prompt.clone()),
+        _ => {
+            eprintln!("usage: ensemble steer <name> \"<prompt>\" [--repo <p>] [--from <id>]");
+            std::process::exit(2);
+        }
+    };
+    let from = parse_flag(args, "--from").unwrap_or_else(|| "operator".to_string());
+    append_control(args, &name, &ensemble::ControlCmd::Steer { from, prompt });
+    println!("steered `{name}`");
+}
+
+/// `ensemble abort <name> [--hard] [--repo <p>] [--from <id>]` — stop the live run started with
+/// `--watch <name>`: cleanly at the next round boundary, or `--hard` to kill the running CLI now.
+fn abort_cmd(args: &[String]) {
+    require_value_if_present(args, "--repo");
+    require_value_if_present(args, "--from");
+    let name = match positional_tasks(args).first() {
+        Some(n) => n.clone(),
+        None => {
+            eprintln!("usage: ensemble abort <name> [--hard] [--repo <p>] [--from <id>]");
+            std::process::exit(2);
+        }
+    };
+    let from = parse_flag(args, "--from").unwrap_or_else(|| "operator".to_string());
+    let hard = has_flag(args, "--hard");
+    append_control(args, &name, &ensemble::ControlCmd::Abort { from, hard });
+    println!("{} `{name}`", if hard { "hard-aborted" } else { "aborted" });
+}
+
+/// Append a control command to `<repo>/.ensemble/control/<name>.ndjson` (`--repo` defaults to cwd).
+fn append_control(args: &[String], name: &str, cmd: &ensemble::ControlCmd) {
+    let repo = parse_flag(args, "--repo").unwrap_or_else(|| ".".to_string());
+    let feed = ensemble::Feed::open(ensemble::member_control_path(Path::new(&repo), name));
+    let line = serde_json::to_string(cmd).unwrap_or_else(|e| {
+        eprintln!("ensemble: encode control command: {e}");
+        std::process::exit(1);
+    });
+    if let Err(e) = feed.append(&line) {
+        eprintln!("ensemble: write control feed {}: {e}", feed.path().display());
+        std::process::exit(1);
+    }
+}
+
 /// `ensemble run "<task>" [--crew <p>] [--repo <p>]` — a single task, isolated in its own worktree.
 fn run_single(args: &[String]) {
     require_value_if_present(args, "--into"); // used by --merge; reject a value-less `--into`
@@ -197,12 +251,30 @@ fn run_single(args: &[String]) {
     let repo = parse_flag(args, "--repo").unwrap_or_else(|| ".".to_string());
     let registry = adapters_for(&crew, !has_flag(args, "--no-discover"));
     let mut c = Conductor::new(crew, registry).with_abort(abort_flag());
-    // S1a live supervision: --watch <name> mirrors every blackboard post into
-    // .ensemble/stream/<name>.ndjson so the operator can `ensemble watch <name> --follow` the run live.
+    // S1a/S1b live supervision: --watch <name> opens the stream feed (.ensemble/stream/<name>.ndjson) so
+    // the operator can `ensemble watch <name> --follow` the run live, AND the control feed
+    // (.ensemble/control/<name>.ndjson) so `ensemble steer/abort <name>` can redirect or stop it.
     if let Some(name) = parse_flag(args, "--watch") {
-        let feed = ensemble::Feed::open(ensemble::member_stream_path(Path::new(&repo), &name));
-        eprintln!("ensemble run: live stream → ensemble watch {name} --follow");
-        c = c.with_stream(Box::new(ensemble::FeedObserver::new(feed)));
+        eprintln!(
+            "ensemble run: live `{name}` — watch: ensemble watch {name} --follow | \
+             steer: ensemble steer {name} \"...\" | abort: ensemble abort {name} [--hard]"
+        );
+        let stream = ensemble::Feed::open(ensemble::member_stream_path(Path::new(&repo), &name));
+        // S1b control watcher: feed the ControlState from the control feed. Start the cursor at the END
+        // so stale commands from a previous run are ignored. Daemon thread — ends when the process exits.
+        let ctrl = std::sync::Arc::new(ensemble::ControlState::default());
+        let ctrl_w = ctrl.clone();
+        let control_feed = ensemble::Feed::open(ensemble::member_control_path(Path::new(&repo), &name));
+        std::thread::spawn(move || {
+            let mut cursor = control_feed.len().unwrap_or(0);
+            loop {
+                ensemble::drain_control(&control_feed, &mut cursor, &ctrl_w);
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        });
+        c = c
+            .with_stream(Box::new(ensemble::FeedObserver::new(stream)))
+            .with_control(ctrl);
     }
     let out = c.run_in_repo(&task, Path::new(&repo));
     print_transcript(&out);
@@ -383,7 +455,7 @@ fn ledger_cmd(args: &[String]) {
 
 /// Value-less switches: they take NO following value, so the arg parser must advance past them by
 /// one (not two) — otherwise `--no-discover "task"` would swallow the task as a phantom flag value.
-const BARE_SWITCHES: &[&str] = &["--no-discover", "--json", "--merge"];
+const BARE_SWITCHES: &[&str] = &["--no-discover", "--json", "--merge", "--hard"];
 
 /// The prompt handed to a `--resolver <agent>` CLI on a merge conflict: it runs in the conflicted
 /// (mid-merge) worktree and must edit the listed files to a coherent merged result with NO markers,

@@ -51,8 +51,8 @@ pub use repo_sync::{
 };
 pub use serve::{resolve_bind, serve, BindAddr};
 pub use supervise::{
-    member_stream_path, parse_watch_args, render_event, render_line, FeedObserver, RunObserver,
-    StreamEvent, WatchArgs,
+    drain_control, member_control_path, member_stream_path, parse_watch_args, render_event,
+    render_line, ControlCmd, ControlState, FeedObserver, RunObserver, StreamEvent, WatchArgs,
 };
 pub use test_gate::{run_tests, TestOutcome};
 pub use verdict::{parse_verdict, Verdict};
