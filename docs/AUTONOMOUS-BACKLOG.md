@@ -136,6 +136,20 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-21 — **Phase-1 step 4 CROSS-MACHINE governed proof ✅ (z13 + ayaneo over tailnet).** First real
+  federated `ensemble run`: **codex@z13** implemented FLEET.txt → gate = **claude@z13 + agy@AYANEO** (one
+  reviewer executing on a DIFFERENT machine via `[agents.agy] node = "http://ayaneo…:7878"`, `--no-discover`
+  so codex/claude stay local while the explicit node routes agy remote) → **2/2 LGTM → LANDED after 1 round →
+  auto-merged into main** (2m47s, `--merge` clean now that `.ensemble/`+`crew.toml` are gitignored so the
+  worktree stays clean). Bring-up: operator put Surfshark off / tailnet already up; z13 Taildropped today's
+  release binary to ayaneo; ayaneo ran `ensemble serve` (binds 100.107.205.98:7878, all 4 CLIs [ok]). z13-side
+  proven incrementally: `ensemble nodes` (1.6s, ayaneo offers all 4 agents) → `ensemble agent claude PONG
+  --node ayaneo` (9s, ok) → `ensemble agent agy "…VERDICT: LGTM" --node ayaneo` (27s, validated the remote
+  reviewer BEFORE the long run — the lesson from the opencode 23-min waste) → the cross-machine gated run. So
+  the conductor's automated implement→cross-vendor-gate→land pipeline works ACROSS MACHINES, not just locally.
+  Remaining for full step 4: add a Mac peer (cross-PLATFORM leg — M5 needs an on-Mac `cargo build --release`,
+  or use the online dev-host) and a 4th vendor in the mesh. NEXT toward the operator goal: expand to the full
+  5-machine federation → point the fleet at phantom-mesh. Plan: `docs/plans/2026-06-21-stage2-federation-and-oss-release.md`.
 - 2026-06-21 — **Phase-1 step 4 LOCAL governed proof ✅ (z13, release binary).** First real automated
   `ensemble run` through the conductor: a trivial task (create GREETING.txt) → **codex** implemented it →
   **claude + agy** both returned `VERDICT: LGTM` → gate reached 2/2 quorum → **LANDED after 1 round (1m43s)**;
