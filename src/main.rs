@@ -711,6 +711,23 @@ fn mcp_install_cmd(args: &[String]) {
             .unwrap_or_else(|| repo.join("crew.toml")),
     );
     let params = ensemble::mcp_install::InstallParams { exe, repo: repo.clone(), name, crew };
+    // The exe/repo/crew baked into the generated config MUST be absolute — the vendor CLI launches
+    // `ensemble` from its OWN cwd, so a relative path would resolve against the wrong directory and write
+    // a broken MCP entry (invalid output). `absolutize` joins the cwd to make a path absolute, but if
+    // `current_dir()` ITSELF fails (a deleted/inaccessible cwd) it can't, and a relative path slips
+    // through — including the default `--repo` (`.`) and its derived `--crew` (`./crew.toml`). The codex
+    // config-location guard below does NOT catch this (its path is absolute via `$HOME`), so validate
+    // here and refuse rather than emit a config the CLI will later mis-resolve.
+    for (label, p) in [("--exe", &params.exe), ("--repo", &params.repo), ("--crew", &params.crew)] {
+        if !p.is_absolute() {
+            eprintln!(
+                "ensemble mcp install: `{label}` did not resolve to an absolute path ({}) — the current \
+                 directory is unavailable; pass an absolute {label} <path>",
+                p.display()
+            );
+            std::process::exit(2);
+        }
+    }
     let env = ensemble::mcp_install::Env {
         home: home_dir(),
         codex_home: env_path("CODEX_HOME"),
