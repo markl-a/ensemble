@@ -84,14 +84,24 @@ pub fn render_event(ev: &StreamEvent) -> String {
 /// Render one RAW feed line: parse → pretty render; on ANY parse failure (a torn line, or a forward-
 /// compat event kind this binary doesn't know) fall back to the raw line so nothing is hidden.
 pub fn render_line(raw: &str) -> String {
-    // A `StreamEvent` (tagged on "ev") wins — it's the more specific member-session shape. Otherwise a
-    // governed-run blackboard `Message` ({from,kind,body}) renders as "[from · kind] body" so one viewer
-    // tails BOTH member sessions and live `ensemble run`s (S1a). Anything else is shown raw, never hidden.
+    // A `StreamEvent` (tagged on "ev") wins — it's the more specific member-session shape. A KNOWN kind
+    // renders pretty.
     if let Ok(ev) = serde_json::from_str::<StreamEvent>(raw) {
         return render_event(&ev);
     }
-    if let Ok(m) = serde_json::from_str::<crate::blackboard::Message>(raw) {
-        return format!("  [{} · {}] {}", m.from, m.kind, inline(&m.body));
+    // An "ev"-tagged line that did NOT parse is an unknown/future event kind (or a torn one): show it RAW.
+    // It must NEVER fall through to `Message` parsing — a future event that coincidentally carries
+    // from/kind/body would otherwise be mis-rendered as a governed-run post (serde ignores the extra
+    // "ev" field). Forward-compat: unknown event kinds are shown, never hidden or mislabeled.
+    let is_ev_tagged = serde_json::from_str::<serde_json::Value>(raw)
+        .ok()
+        .is_some_and(|v| v.get("ev").is_some());
+    if !is_ev_tagged {
+        // No "ev" tag → it may be a governed-run blackboard `Message` ({from,kind,body}), rendered so one
+        // viewer tails BOTH member sessions and live `ensemble run`s (S1a).
+        if let Ok(m) = serde_json::from_str::<crate::blackboard::Message>(raw) {
+            return format!("  [{} · {}] {}", m.from, m.kind, inline(&m.body));
+        }
     }
     format!("? {}", raw.trim())
 }
@@ -237,6 +247,10 @@ mod tests {
         assert!(render_line(r#"{"ev":"turn_start","n":1,"prompt":"do it","ts":"T"}"#).contains("turn #1"));
         // genuine garbage still falls back to raw
         assert!(render_line("not json").starts_with('?'));
+        // forward-compat: an UNKNOWN future event kind is shown RAW even if it coincidentally carries
+        // from/kind/body — an "ev"-tagged line must NEVER be mis-parsed as a blackboard Message.
+        let ev_future = r#"{"ev":"future_kind","from":"x","kind":"y","body":"z"}"#;
+        assert!(render_line(ev_future).starts_with('?'), "ev-tagged unknown must be raw: {}", render_line(ev_future));
     }
 
     #[test]
