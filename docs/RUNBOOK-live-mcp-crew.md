@@ -48,17 +48,26 @@ ensemble mcp --repo <repo> --name <UNIQUE-member-name> [--crew <crew.toml>]
 impersonation). `--crew` is needed only if you want `ensemble_run` (Part 3); without it the other 9
 tools work and `ensemble_run` is simply not advertised.
 
-**Claude Code** (example):
+**One-click (recommended) — `ensemble mcp install`** writes each CLI's MCP-server config for you, so you
+never hand-edit per-client formats. From inside the repo:
 ```bash
 cd /tmp/crewdemo
-claude mcp add ensemble -- /path/to/ensemble mcp --repo . --name claude-1 --crew crew.toml
-claude          # then, in the session, ask it to use the ensemble_* tools
+ensemble mcp install --client codex    --name codex-1    --crew crew.toml
+ensemble mcp install --client claude   --name claude-1   --crew crew.toml
+ensemble mcp install --client opencode --name opencode-1 --crew crew.toml
 ```
+Each writes that CLI's REAL config — claude → project `.mcp.json`, opencode → project `opencode.json`
+(per-call timeout 600000 so a long `ensemble_run` isn't killed), codex → user `~/.codex/config.toml`
+(`$CODEX_HOME` honored). It DERIVES the ensemble binary path (`current_exe`) and the absolute repo/crew,
+merges IDEMPOTENTLY (re-running just updates the entry, never duplicates), preserves your other MCP
+servers + comments, and writes ATOMICALLY (no corruption/half-write on crash). Add `--print` to preview
+the exact config without writing, or `--config <path>` to target a non-default file. `--name` defaults to
+the client name; give a DISTINCT one per member. `--crew` is needed only for `ensemble_run` (Part 3).
+Restart the CLI to pick it up, then drive it (below).
 
-**codex / opencode / other MCP clients:** add an MCP stdio server entry in that CLI's own MCP config
-(e.g. codex `~/.codex/config.toml` `[mcp_servers.ensemble]` with `command`/`args`), using the same
-launch contract above with a DISTINCT `--name`. Consult your CLI's "MCP servers" docs for the exact
-config file; the only invariant is the `ensemble mcp --repo <repo> --name <member> [--crew ...]` command.
+**Manual (if you prefer):** `claude mcp add ensemble -- /path/to/ensemble mcp --repo . --name claude-1
+--crew crew.toml`, or add an `[mcp_servers.ensemble]` entry by hand. The only invariant is the launch
+contract `ensemble mcp --repo <repo> --name <member> [--crew ...]`.
 
 **Drive it.** In the live CLI session, prompt it to exercise the crew API, e.g.:
 
