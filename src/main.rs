@@ -26,7 +26,8 @@ const USAGE: &str = "usage:\n  \
     ensemble serve [--bind <addr>]   (default: this node's tailnet IP:7878; loopback if no tailnet)\n  \
     ensemble up [--bind <addr>]   (quick start: show the mesh, then serve in the foreground)\n  \
     ensemble mcp [--repo <path>] [--name <agent>] [--crew <crew.toml>]   (stdio MCP server: make a LIVE CLI a crew member — mesh + board + queue + worktree + merge + run)\n  \
-    ensemble mcp install --client <claude|codex|opencode> [--repo <p>] [--name <id>] [--exe <p>] [--crew <p>] [--config <p>] [--print]   (one-click: register `ensemble mcp` into that CLI's config)\n\n\
+    ensemble mcp install --client <claude|codex|opencode> [--repo <p>] [--name <id>] [--exe <p>] [--crew <p>] [--config <p>] [--print]   (one-click: register `ensemble mcp` into that CLI's config)\n  \
+    ensemble watch <member> [--repo <path>] [--since <n>] [--follow]   (tail a live member's stream feed)\n\n\
     run/run-many/dispatch auto-discover tailnet `serve` hosts for any agent without an explicit\n  \
     [agents.<n>] node = ... in crew.toml; pass --no-discover to stay local.";
 
@@ -53,6 +54,7 @@ fn main() {
         Some("mcp") => mcp_cmd(&args),
         Some("serve") => serve_cmd(&args),
         Some("up") => up_cmd(&args),
+        Some("watch") => watch_cmd(&args),
         _ => {
             eprintln!("{USAGE}");
             std::process::exit(2);
@@ -115,6 +117,60 @@ fn up_cmd(args: &[String]) {
     if let Err(e) = ensemble::serve(&addr, adapters()) {
         eprintln!("serve: {e}");
         std::process::exit(1);
+    }
+}
+
+/// `ensemble watch <member> [--repo <p>] [--since <n>] [--follow]` — tail a member's stream feed
+/// (.ensemble/stream/<member>.ndjson), rendering each event. Read-only. `--follow` polls for new events
+/// until Ctrl-C. (S0 of live supervision: local tail; remote `--node` tail arrives in S1.)
+fn watch_cmd(args: &[String]) {
+    let w = ensemble::parse_watch_args(args);
+    let member = match w.member {
+        Some(m) => m,
+        None => {
+            eprintln!("usage: ensemble watch <member> [--repo <p>] [--since <n>] [--follow]");
+            std::process::exit(2);
+        }
+    };
+    let repo = w
+        .repo
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
+    let feed = ensemble::Feed::open(ensemble::member_stream_path(&repo, &member));
+
+    // Read everything from `cursor` onward, render it, and advance the cursor. Returns false on an IO
+    // error (so the caller can exit non-zero). A missing feed reads as empty — `watch` simply waits.
+    // Flush each batch: under `--follow` stdout is block-buffered when piped/redirected, so without an
+    // explicit flush the tailed lines would not appear promptly (or at all until exit).
+    let drain = |cursor: &mut usize| match feed.read_since(*cursor) {
+        Ok(lines) => {
+            use std::io::Write as _;
+            let mut out = std::io::stdout().lock();
+            for l in &lines {
+                let _ = writeln!(out, "{}", ensemble::render_line(l));
+            }
+            let _ = out.flush();
+            *cursor += lines.len();
+            true
+        }
+        Err(e) => {
+            eprintln!("ensemble watch: read {}: {e}", feed.path().display());
+            false
+        }
+    };
+
+    let mut cursor = w.since;
+    if !drain(&mut cursor) {
+        std::process::exit(1);
+    }
+    if !w.follow {
+        return;
+    }
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(250));
+        if !drain(&mut cursor) {
+            std::process::exit(1);
+        }
     }
 }
 
