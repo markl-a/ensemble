@@ -50,7 +50,7 @@ pub use repo_sync::{
     merge_with_resolver, orphan_scratch, MergeOutcome,
 };
 pub use serve::{resolve_bind, serve, BindAddr};
-pub use supervise::{render_event, render_line, StreamEvent};
+pub use supervise::{member_stream_path, render_event, render_line, StreamEvent};
 pub use test_gate::{run_tests, TestOutcome};
 pub use verdict::{parse_verdict, Verdict};
 pub use wire::{RunRequest, RunResponse};

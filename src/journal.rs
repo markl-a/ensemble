@@ -53,7 +53,7 @@ pub fn render(msgs: &[Message], outcome: &str, detail: &str, rounds: u32) -> Str
 /// are public, so a caller-supplied slug must never escape the runs dir via path separators or `..`.
 /// (The internal caller `Worktree::slug()` is already sanitized; this guards the public surface.)
 /// Note: this does NOT truncate — truncating could chop the seq suffix and reintroduce collisions.
-fn sanitize_slug(slug: &str) -> String {
+pub(crate) fn sanitize_slug(slug: &str) -> String {
     let cleaned: String = slug
         .chars()
         .map(|c| match c {

@@ -4,6 +4,7 @@
 //! the IO shell lives in main.rs.
 
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 /// One line in a member's stream feed. Internally tagged on `"ev"` (like journal::Entry's `"rec"`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -99,6 +100,15 @@ fn inline(s: &str) -> String {
     }
 }
 
+/// The stream feed path for `member` under `repo`, confined to `<repo>/.ensemble/stream/`. `member`
+/// comes from untrusted input (argv / HTTP path), so it is reduced to ONE safe filename component by
+/// journal's shared path-component sanitizer.
+pub fn member_stream_path(repo: &Path, member: &str) -> PathBuf {
+    repo.join(".ensemble")
+        .join("stream")
+        .join(format!("{}.ndjson", crate::journal::sanitize_slug(member)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,5 +147,25 @@ mod tests {
         assert!(render_line(future).contains("some_future_kind"), "unknown kind shown raw");
         // a valid-JSON but non-event line is shown raw, not dropped
         assert!(render_line("{}").starts_with('?'));
+    }
+
+    #[test]
+    fn member_stream_path_confines_a_hostile_member() {
+        use std::path::Path;
+        let repo = Path::new("/tmp/repo");
+        let stream = repo.join(".ensemble").join("stream");
+        let p = member_stream_path(repo, "../../etc/passwd");
+        assert!(p.starts_with(&stream), "member must not escape the stream dir: {p:?}");
+        assert_eq!(p.parent().unwrap(), stream, "must be a direct child of stream/");
+        assert!(!p.components().any(|c| c.as_os_str() == ".."), "no traversal survives: {p:?}");
+    }
+
+    #[test]
+    fn member_stream_path_sanitizes_the_member_into_one_component() {
+        use std::path::Path;
+        // reuses journal's sanitizer: '@' in the canonical <cli>@<host> name becomes '-' on disk; the
+        // supervisor and `watch` compute the SAME path, so the logical member id still resolves.
+        let p = member_stream_path(Path::new("/r"), "claude@z13");
+        assert!(p.ends_with("claude-z13.ndjson"), "got {p:?}");
     }
 }
