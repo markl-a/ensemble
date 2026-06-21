@@ -34,6 +34,10 @@ pub struct Conductor {
     /// S1a live supervision: when set, every blackboard post is mirrored here so `ensemble watch`
     /// can tail the run in real time. `None` ⇒ no streaming (unchanged behaviour).
     stream: Option<Box<dyn crate::supervise::RunObserver>>,
+    /// S1b control plane: when set, the operator's steer prompts are injected into the next round and a
+    /// control abort stops the run (alongside the Ctrl-C `abort` flag). A watcher (in the binary) feeds
+    /// it from `.ensemble/control/<name>.ndjson`. `None` ⇒ no control (unchanged behaviour).
+    control: Option<Arc<crate::supervise::ControlState>>,
 }
 
 /// Firewall B: true when `elapsed_secs` has exceeded a wall-clock budget (`budget == 0` ⇒ no budget).
@@ -48,6 +52,7 @@ impl Conductor {
             adapters,
             abort: Arc::new(AtomicBool::new(false)),
             stream: None,
+            control: None,
         }
     }
 
@@ -62,6 +67,13 @@ impl Conductor {
     /// watchable in real time via `ensemble watch`. Best-effort; it never changes a run's outcome.
     pub fn with_stream(mut self, obs: Box<dyn crate::supervise::RunObserver>) -> Self {
         self.stream = Some(obs);
+        self
+    }
+
+    /// S1b: wire the control plane — the operator's steer prompts (injected next round) and aborts reach
+    /// the run via this shared state (fed by a watcher in the binary from `.ensemble/control/<name>.ndjson`).
+    pub fn with_control(mut self, ctrl: Arc<crate::supervise::ControlState>) -> Self {
+        self.control = Some(ctrl);
         self
     }
 
@@ -82,6 +94,10 @@ impl Conductor {
     /// stop claiming new work rather than fail-marking the whole queue.
     pub fn aborted(&self) -> bool {
         self.abort.load(Ordering::Relaxed)
+            || self
+                .control
+                .as_ref()
+                .is_some_and(|c| c.aborted())
     }
 
     fn adapter_for_role(&self, role: &str) -> Option<&dyn Adapter> {
@@ -99,8 +115,18 @@ impl Conductor {
         let mut same = 0u32; // consecutive identical-signature rounds
 
         for round in 0..max {
-            // ── Firewall B: abort (Ctrl-C) + wall-clock budget, checked at each round boundary ──
-            if self.abort.load(Ordering::Relaxed) {
+            // ── S1b: drain the operator's steer prompts into this round's implementer prompt (a steer
+            // issued during the previous round redirects the next one). ──
+            if let Some(ctrl) = &self.control {
+                for steer in ctrl.take_steers() {
+                    self.note(&mut bb, "operator", "steer", &steer);
+                    feedback.push(format!("OPERATOR STEER (follow this now): {steer}"));
+                }
+            }
+            // ── Firewall B: abort (Ctrl-C OR control plane) + wall-clock budget, at each round boundary ──
+            if self.aborted() {
+                let hard = self.control.as_ref().is_some_and(|c| c.hard());
+                self.note(&mut bb, "operator", "interrupted", if hard { "hard abort" } else { "abort" });
                 return RunOutcome {
                     decision: Decision::Escalated("aborted by operator".to_string()),
                     rounds: round,
@@ -293,7 +319,9 @@ impl Conductor {
                     // Honor an operator abort that arrived mid-round: don't land work the operator
                     // asked to stop (firewall B). A budget overrun on a SUCCESSFUL round still lands
                     // — we don't discard completed work for the wall-clock net.
-                    if self.abort.load(Ordering::Relaxed) {
+                    if self.aborted() {
+                        let hard = self.control.as_ref().is_some_and(|c| c.hard());
+                        self.note(&mut bb, "operator", "interrupted", if hard { "hard abort" } else { "abort" });
                         return RunOutcome {
                             decision: Decision::Escalated("aborted by operator".to_string()),
                             rounds: round + 1,
@@ -533,5 +561,98 @@ mod tests {
         assert!(seen.iter().any(|(f, k)| f == "impl" && k == "result"), "implementer result streamed: {seen:?}");
         assert!(seen.iter().any(|(f, k)| f == "rev" && k == "verdict"), "reviewer verdict streamed: {seen:?}");
         assert!(seen.iter().any(|(f, k)| f == "conductor" && k == "decision"), "terminal decision streamed: {seen:?}");
+    }
+
+    // ---- S1b control-plane tests ----
+
+    fn impl_review_crew(min_approvals: u32) -> crate::crew::CrewConfig {
+        use crate::crew::{CrewConfig, GatePolicy, OnFlake, RoleConfig};
+        use std::collections::HashMap;
+        CrewConfig {
+            gate: GatePolicy { min_approvals, max_rounds: 1, on_flake: OnFlake::Exclude, stall_limit: 0, max_task_secs: 0 },
+            pipeline: vec!["implement".to_string(), "review".to_string()],
+            roles: HashMap::from([
+                ("implement".to_string(), RoleConfig { agent: "impl".to_string(), blind: false }),
+                ("review".to_string(), RoleConfig { agent: "rev".to_string(), blind: false }),
+            ]),
+            agents: HashMap::new(),
+            test: None,
+        }
+    }
+
+    #[test]
+    fn steer_reaches_the_next_round_implementer_prompt() {
+        use super::*;
+        use crate::adapter::{Adapter, AdapterError, AgentOutput, MockAdapter};
+        use crate::supervise::ControlState;
+        use std::collections::HashMap;
+        use std::path::Path;
+        use std::sync::{Arc, Mutex};
+
+        // a recorder implementer that captures the prompt it was handed
+        struct Recorder {
+            prompts: Arc<Mutex<Vec<String>>>,
+        }
+        impl Adapter for Recorder {
+            fn name(&self) -> &str {
+                "impl"
+            }
+            fn run(&self, prompt: &str, _cwd: &Path) -> Result<AgentOutput, AdapterError> {
+                self.prompts.lock().unwrap().push(prompt.to_string());
+                Ok(AgentOutput { agent: "impl".to_string(), text: "did it".to_string() })
+            }
+        }
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let mut adapters: HashMap<String, Box<dyn Adapter>> = HashMap::new();
+        adapters.insert("impl".to_string(), Box::new(Recorder { prompts: prompts.clone() }));
+        adapters.insert("rev".to_string(), Box::new(MockAdapter::new("rev", vec![Ok("VERDICT: LGTM".to_string())])));
+
+        let ctrl = Arc::new(ControlState::default());
+        ctrl.push_steer("FOCUS-ON-ERROR-HANDLING"); // seed a steer before the run
+        let c = Conductor::new(impl_review_crew(1), adapters).with_control(ctrl);
+        let out = c.run("do the thing", Path::new("."));
+        assert!(matches!(out.decision, Decision::Landed), "should land: {:?}", out.decision);
+        let seen = prompts.lock().unwrap();
+        assert!(
+            seen.iter().any(|p| p.contains("FOCUS-ON-ERROR-HANDLING")),
+            "the steer must be injected into the implementer's prompt: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn control_abort_stops_the_run_and_streams_interrupted() {
+        use super::*;
+        use crate::adapter::{Adapter, MockAdapter};
+        use crate::blackboard::Message;
+        use crate::supervise::{ControlState, RunObserver};
+        use std::collections::HashMap;
+        use std::path::Path;
+        use std::sync::atomic::Ordering;
+        use std::sync::{Arc, Mutex};
+
+        struct Rec(Arc<Mutex<Vec<(String, String)>>>);
+        impl RunObserver for Rec {
+            fn post(&self, m: &Message) {
+                self.0.lock().unwrap().push((m.from.clone(), m.kind.clone()));
+            }
+        }
+        let mut adapters: HashMap<String, Box<dyn Adapter>> = HashMap::new();
+        adapters.insert("impl".to_string(), Box::new(MockAdapter::new("impl", vec![Ok("x".to_string())])));
+        adapters.insert("rev".to_string(), Box::new(MockAdapter::new("rev", vec![Ok("VERDICT: LGTM".to_string())])));
+
+        let ctrl = Arc::new(ControlState::default());
+        ctrl.abort_flag().store(true, Ordering::Relaxed); // operator already aborted (clean)
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let c = Conductor::new(impl_review_crew(1), adapters)
+            .with_control(ctrl)
+            .with_stream(Box::new(Rec(log.clone())));
+        let out = c.run("do the thing", Path::new("."));
+        assert!(
+            matches!(out.decision, Decision::Escalated(ref w) if w.contains("aborted")),
+            "an abort must stop the run, got {:?}",
+            out.decision
+        );
+        let seen = log.lock().unwrap();
+        assert!(seen.iter().any(|(f, k)| f == "operator" && k == "interrupted"), "interrupted streamed: {seen:?}");
     }
 }
