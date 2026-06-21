@@ -14,7 +14,7 @@ fn abort_flag() -> Arc<AtomicBool> {
 }
 
 const USAGE: &str = "usage:\n  \
-    ensemble run \"<task>\" [--crew <crew.toml>] [--repo <path>] [--merge [--into <target>]]\n  \
+    ensemble run \"<task>\" [--crew <crew.toml>] [--repo <path>] [--merge [--into <target>]] [--watch <name>]\n  \
     ensemble run-many \"<task1>\" \"<task2>\" ... [--crew <crew.toml>] [--repo <path>]\n  \
     ensemble dispatch \"<task1>\" ... --ledger <db> [--crew <crew.toml>] [--repo <path>]   (durable, resumable)\n  \
     ensemble ledger <status|recover> --ledger <db> [--stale-secs N]\n  \
@@ -185,6 +185,7 @@ fn watch_cmd(args: &[String]) {
 /// `ensemble run "<task>" [--crew <p>] [--repo <p>]` — a single task, isolated in its own worktree.
 fn run_single(args: &[String]) {
     require_value_if_present(args, "--into"); // used by --merge; reject a value-less `--into`
+    require_value_if_present(args, "--watch"); // S1a live stream name; reject a value-less `--watch`
     let task = match positional_tasks(args) {
         tasks if tasks.len() == 1 => tasks[0].clone(),
         _ => {
@@ -195,7 +196,14 @@ fn run_single(args: &[String]) {
     let crew = load_crew(args);
     let repo = parse_flag(args, "--repo").unwrap_or_else(|| ".".to_string());
     let registry = adapters_for(&crew, !has_flag(args, "--no-discover"));
-    let c = Conductor::new(crew, registry).with_abort(abort_flag());
+    let mut c = Conductor::new(crew, registry).with_abort(abort_flag());
+    // S1a live supervision: --watch <name> mirrors every blackboard post into
+    // .ensemble/stream/<name>.ndjson so the operator can `ensemble watch <name> --follow` the run live.
+    if let Some(name) = parse_flag(args, "--watch") {
+        let feed = ensemble::Feed::open(ensemble::member_stream_path(Path::new(&repo), &name));
+        eprintln!("ensemble run: live stream → ensemble watch {name} --follow");
+        c = c.with_stream(Box::new(ensemble::FeedObserver::new(feed)));
+    }
     let out = c.run_in_repo(&task, Path::new(&repo));
     print_transcript(&out);
     match out.decision {

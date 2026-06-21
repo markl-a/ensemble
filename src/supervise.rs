@@ -122,6 +122,27 @@ pub trait RunObserver: Send + Sync {
     fn post(&self, m: &crate::blackboard::Message);
 }
 
+/// The production `RunObserver`: mirrors each blackboard post into an append-only `ndjson::Feed` (one
+/// `Message` JSON per line) for `ensemble watch <name> --follow` to tail. Best-effort — a serialize or
+/// write failure is swallowed so live supervision can NEVER change a governed run's outcome.
+pub struct FeedObserver {
+    feed: crate::ndjson::Feed,
+}
+
+impl FeedObserver {
+    pub fn new(feed: crate::ndjson::Feed) -> Self {
+        Self { feed }
+    }
+}
+
+impl RunObserver for FeedObserver {
+    fn post(&self, m: &crate::blackboard::Message) {
+        if let Ok(line) = serde_json::to_string(m) {
+            let _ = self.feed.append(&line);
+        }
+    }
+}
+
 /// Parsed `ensemble watch` arguments (pure; the IO shell in main.rs consumes this).
 #[derive(Debug, PartialEq)]
 pub struct WatchArgs {
@@ -216,6 +237,22 @@ mod tests {
         assert!(render_line(r#"{"ev":"turn_start","n":1,"prompt":"do it","ts":"T"}"#).contains("turn #1"));
         // genuine garbage still falls back to raw
         assert!(render_line("not json").starts_with('?'));
+    }
+
+    #[test]
+    fn feed_observer_appends_a_parseable_message_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("run.ndjson");
+        let obs = FeedObserver::new(crate::ndjson::Feed::open(path.clone()));
+        obs.post(&crate::blackboard::Message {
+            from: "codex".into(),
+            kind: "result".into(),
+            body: "did the thing".into(),
+        });
+        let lines = crate::ndjson::Feed::open(path).read_since(0).unwrap();
+        assert_eq!(lines.len(), 1, "one post → one feed line");
+        let rendered = render_line(&lines[0]);
+        assert!(rendered.contains("codex") && rendered.contains("did the thing"), "rendered: {rendered}");
     }
 
     #[test]
