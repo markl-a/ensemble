@@ -109,6 +109,47 @@ pub fn member_stream_path(repo: &Path, member: &str) -> PathBuf {
         .join(format!("{}.ndjson", crate::journal::sanitize_slug(member)))
 }
 
+/// Parsed `ensemble watch` arguments (pure; the IO shell in main.rs consumes this).
+#[derive(Debug, PartialEq)]
+pub struct WatchArgs {
+    pub member: Option<String>,
+    pub repo: Option<String>,
+    pub since: usize,
+    pub follow: bool,
+}
+
+/// Parse the argv of `ensemble watch <member> [--repo <p>] [--since <n>] [--follow]`. `args` is the full
+/// process argv (args[0]=exe, args[1]="watch"). The first non-flag token is the member; unknown
+/// `--flags` are skipped (no value assumed); a non-numeric `--since` falls back to 0.
+pub fn parse_watch_args(args: &[String]) -> WatchArgs {
+    let mut out = WatchArgs { member: None, repo: None, since: 0, follow: false };
+    let mut i = 2; // skip exe + "watch"
+    while i < args.len() {
+        match args[i].as_str() {
+            "--repo" => {
+                out.repo = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--since" => {
+                out.since = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                i += 2;
+            }
+            "--follow" => {
+                out.follow = true;
+                i += 1;
+            }
+            a if a.starts_with("--") => i += 1,
+            _ => {
+                if out.member.is_none() {
+                    out.member = Some(args[i].clone());
+                }
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,5 +208,41 @@ mod tests {
         // supervisor and `watch` compute the SAME path, so the logical member id still resolves.
         let p = member_stream_path(Path::new("/r"), "claude@z13");
         assert!(p.ends_with("claude-z13.ndjson"), "got {p:?}");
+    }
+
+    fn argv(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parse_watch_args_basic() {
+        let w = parse_watch_args(&argv(&["ensemble", "watch", "claude@z13"]));
+        assert_eq!(w.member.as_deref(), Some("claude@z13"));
+        assert_eq!(w.since, 0);
+        assert!(!w.follow);
+        assert_eq!(w.repo, None);
+    }
+
+    #[test]
+    fn parse_watch_args_all_flags() {
+        let w = parse_watch_args(&argv(&[
+            "ensemble", "watch", "--since", "5", "claude@z13", "--follow", "--repo", "/r",
+        ]));
+        assert_eq!(w.member.as_deref(), Some("claude@z13"));
+        assert_eq!(w.since, 5);
+        assert!(w.follow);
+        assert_eq!(w.repo.as_deref(), Some("/r"));
+    }
+
+    #[test]
+    fn parse_watch_args_since_nonnumber_falls_back_to_zero() {
+        let w = parse_watch_args(&argv(&["ensemble", "watch", "m", "--since", "abc"]));
+        assert_eq!(w.since, 0);
+    }
+
+    #[test]
+    fn parse_watch_args_missing_member_is_none() {
+        let w = parse_watch_args(&argv(&["ensemble", "watch", "--follow"]));
+        assert_eq!(w.member, None);
     }
 }
