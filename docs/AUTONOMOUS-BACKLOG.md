@@ -136,6 +136,15 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-21 — **Cross-machine EDIT-RETURN proven ✅ (remote implementer).** Completes the federation-path set:
+  a run with **codex@AYANEO as the IMPLEMENTER** (`[agents.codex] node = ayaneo` + `--no-discover`; claude/agy
+  the local z13 gate) created SYNC.txt ON ayaneo → the edit **bundled back to z13 via repo_sync** → claude@z13
+  + agy@z13 both LGTM → LANDED → merged onto z13's `main` (2m30s, SYNC.txt = "edit returned from ayaneo"). So
+  ALL FOUR federation paths now hold: remote agent execution, remote reviewer in the gate, cross-machine
+  auto-merge, and remote edit-return. **Discovered follow-up (minor):** a remote-bundled commit lands with a
+  generic subject (`ensemble: codex-0`) instead of the task text the LOCAL implementer path uses — repo_sync's
+  remote-bundle commit naming should carry the task description for parity. NEXT: cross-PLATFORM leg (a Mac
+  peer) → full 5-machine federation → phantom-mesh.
 - 2026-06-21 — **Phase-1 step 4 CROSS-MACHINE governed proof ✅ (z13 + ayaneo over tailnet).** First real
   federated `ensemble run`: **codex@z13** implemented FLEET.txt → gate = **claude@z13 + agy@AYANEO** (one
   reviewer executing on a DIFFERENT machine via `[agents.agy] node = "http://ayaneo…:7878"`, `--no-discover`
