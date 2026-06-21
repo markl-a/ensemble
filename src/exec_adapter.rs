@@ -1,6 +1,8 @@
 use crate::adapter::{Adapter, AdapterError, AgentOutput};
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Per-command wall-clock ceiling for ONE CLI turn. A turn that exceeds this is treated as wedged
@@ -18,6 +20,9 @@ pub struct ExecAdapter {
     args: Vec<String>,
     /// Per-command timeout (see `DEFAULT_EXEC_TIMEOUT_SECS`).
     timeout: Duration,
+    /// S1b: an optional hard-abort flag (set by the conductor's `set_abort`). When flipped DURING a
+    /// `run()`, the poll loop kills the child and Flakes — so `ensemble abort --hard` is immediate.
+    abort: Mutex<Option<Arc<AtomicBool>>>,
 }
 
 impl ExecAdapter {
@@ -36,6 +41,7 @@ impl ExecAdapter {
                 "--skip-git-repo-check".into(),
             ],
             timeout: Duration::from_secs(DEFAULT_EXEC_TIMEOUT_SECS),
+            abort: Mutex::new(None),
         }
     }
 
@@ -46,6 +52,7 @@ impl ExecAdapter {
             program: "claude".into(),
             args: vec!["-p".into()],
             timeout: Duration::from_secs(DEFAULT_EXEC_TIMEOUT_SECS),
+            abort: Mutex::new(None),
         }
     }
 
@@ -56,6 +63,7 @@ impl ExecAdapter {
             program: "opencode".into(),
             args: vec!["run".into()],
             timeout: Duration::from_secs(DEFAULT_EXEC_TIMEOUT_SECS),
+            abort: Mutex::new(None),
         }
     }
 
@@ -106,9 +114,14 @@ impl Adapter for ExecAdapter {
     fn name(&self) -> &str {
         &self.name
     }
+    fn set_abort(&self, flag: Arc<AtomicBool>) {
+        *self.abort.lock().unwrap() = Some(flag);
+    }
     fn run(&self, prompt: &str, cwd: &Path) -> Result<AgentOutput, AdapterError> {
         use std::io::{Read, Write};
         use std::time::Instant;
+        // Snapshot the hard-abort flag for this turn (S1b): set mid-run ⇒ kill the child and Flake.
+        let abort = self.abort.lock().unwrap().clone();
         // Pass the prompt via STDIN, not as a CLI arg. On Windows the prompt would otherwise go
         // through `cmd /C <program> ... "<prompt>"`, where cmd's command-line parsing MANGLES
         // multi-line / quoted prompts (newlines are command separators; quoting differs from the
@@ -170,6 +183,16 @@ impl Adapter for ExecAdapter {
             match child.try_wait() {
                 Ok(Some(_status)) => break,
                 Ok(None) => {
+                    // S1b `--hard`: an operator hard-abort flips this flag — kill the running CLI now
+                    // (don't wait for the timeout or the round boundary) and report it Flaked.
+                    if abort.as_ref().is_some_and(|f| f.load(Ordering::Relaxed)) {
+                        Self::kill_tree(&mut child);
+                        let _ = child.wait();
+                        let _ = writer.join();
+                        let _ = out_reader.join();
+                        let _ = err_reader.join();
+                        return Err(AdapterError::Flaked(format!("{} aborted by operator", self.program)));
+                    }
                     if Instant::now() >= deadline {
                         Self::kill_tree(&mut child);
                         let _ = child.wait(); // reap so the readers' pipes close
@@ -227,6 +250,7 @@ impl ExecAdapter {
             program: program.into(),
             args: args.iter().map(|s| s.to_string()).collect(),
             timeout,
+            abort: Mutex::new(None),
         }
     }
 }
@@ -272,5 +296,26 @@ mod tests {
         let a = ExecAdapter::raw("echoer", "echo", &["hello-ensemble"], Duration::from_secs(10));
         let r = a.run("", Path::new(".")).expect("echo should succeed");
         assert!(r.text.contains("hello-ensemble"), "captured {:?}", r.text);
+    }
+
+    #[test]
+    fn external_abort_kills_a_running_turn_mid_flight() {
+        // S1b `--hard`: a long turn that the operator hard-aborts must die NEAR the abort, not run to
+        // its (generous) timeout. Set a 30s timeout, abort after ~300ms, expect Flaked in well under 3s.
+        #[cfg(windows)]
+        let a = ExecAdapter::raw("sleeper", "ping", &["-n", "30", "127.0.0.1"], Duration::from_secs(30));
+        #[cfg(not(windows))]
+        let a = ExecAdapter::raw("sleeper", "sleep", &["30"], Duration::from_secs(30));
+        let flag = Arc::new(AtomicBool::new(false));
+        a.set_abort(flag.clone());
+        let f2 = flag.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            f2.store(true, Ordering::Relaxed);
+        });
+        let start = Instant::now();
+        let r = a.run("ignored", Path::new("."));
+        assert!(matches!(r, Err(AdapterError::Flaked(_))), "an aborted turn must Flake, got {r:?}");
+        assert!(start.elapsed() < Duration::from_secs(3), "must die near the abort: {:?}", start.elapsed());
     }
 }

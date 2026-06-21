@@ -194,6 +194,11 @@ impl ControlState {
     pub fn abort_flag(&self) -> Arc<AtomicBool> {
         self.abort.clone()
     }
+    /// The HARD-abort flag to hand to a running adapter: when set (an `abort --hard`), the adapter kills
+    /// its child mid-turn instead of waiting for the round boundary. A clean abort never sets it.
+    pub fn hard_flag(&self) -> Arc<AtomicBool> {
+        self.hard.clone()
+    }
     pub fn aborted(&self) -> bool {
         self.abort.load(Ordering::Relaxed)
     }

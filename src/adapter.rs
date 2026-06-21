@@ -44,6 +44,11 @@ pub trait Adapter: Send + Sync {
     fn name(&self) -> &str;
     /// Run one turn: hand `prompt` to the agent with working dir `cwd`, return its reply.
     fn run(&self, prompt: &str, cwd: &Path) -> Result<AgentOutput, AdapterError>;
+    /// S1b: hand the adapter a HARD-abort flag. When this flag is set DURING a `run()`, the adapter
+    /// kills its child mid-turn and returns `Flaked("aborted")` instead of waiting out the turn — so
+    /// `ensemble abort --hard` stops a wedged/drifting CLI immediately. Default no-op (Mock/Remote
+    /// ignore it; only the real exec/PTY adapters honor it).
+    fn set_abort(&self, _flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {}
 }
 
 /// A scripted adapter for hermetic tests: returns successive queued responses; an exhausted

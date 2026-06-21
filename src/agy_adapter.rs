@@ -2,6 +2,7 @@ use crate::adapter::{Adapter, AdapterError, AgentOutput};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::io::Read;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -11,16 +12,22 @@ use std::time::{Duration, Instant};
 /// Flaked (never hung). Mirrors the proven agy_pty.py approach.
 pub struct AgyAdapter {
     timeout: Duration,
+    /// S1b: optional hard-abort flag (set via `set_abort`); flipped mid-run ⇒ kill agy now and Flake.
+    abort: Mutex<Option<Arc<AtomicBool>>>,
 }
 
 impl AgyAdapter {
     pub fn new() -> Self {
         Self {
             timeout: Duration::from_secs(180),
+            abort: Mutex::new(None),
         }
     }
     pub fn with_timeout(timeout: Duration) -> Self {
-        Self { timeout }
+        Self {
+            timeout,
+            abort: Mutex::new(None),
+        }
     }
 }
 
@@ -35,7 +42,13 @@ impl Adapter for AgyAdapter {
         "agy"
     }
 
+    fn set_abort(&self, flag: Arc<AtomicBool>) {
+        *self.abort.lock().unwrap() = Some(flag);
+    }
+
     fn run(&self, prompt: &str, cwd: &Path) -> Result<AgentOutput, AdapterError> {
+        // Snapshot the hard-abort flag for this turn (S1b): set mid-run ⇒ kill agy and Flake.
+        let abort = self.abort.lock().unwrap().clone();
         let pty = native_pty_system();
         let pair = pty
             .openpty(PtySize {
@@ -100,14 +113,21 @@ impl Adapter for AgyAdapter {
         loop {
             match child.try_wait() {
                 Ok(Some(_)) => break, // agy exited cleanly (try_wait reaps it)
-                Ok(None) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(50));
-                }
                 Ok(None) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    fail = Some(format!("agy timed out after {:?}", self.timeout));
-                    break;
+                    // S1b `--hard`: an operator hard-abort kills agy mid-turn (don't wait the timeout).
+                    if abort.as_ref().is_some_and(|f| f.load(Ordering::Relaxed)) {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        fail = Some("agy aborted by operator".to_string());
+                        break;
+                    }
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        fail = Some(format!("agy timed out after {:?}", self.timeout));
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
                 }
                 Err(e) => {
                     let _ = child.kill();

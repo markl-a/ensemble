@@ -105,6 +105,20 @@ impl Conductor {
         self.adapters.get(agent).map(|b| b.as_ref())
     }
 
+    /// Run one adapter turn, first arming it with the control plane's hard-abort flag (S1b) so an
+    /// `abort --hard` issued mid-turn kills THIS CLI immediately. A no-op arm when no control is wired.
+    fn run_adapter(
+        &self,
+        a: &dyn Adapter,
+        prompt: &str,
+        cwd: &Path,
+    ) -> Result<crate::adapter::AgentOutput, crate::adapter::AdapterError> {
+        if let Some(ctrl) = &self.control {
+            a.set_abort(ctrl.hard_flag());
+        }
+        a.run(prompt, cwd)
+    }
+
     /// Run the role pipeline on `task` until the gate lands it, escalates, or rounds run out.
     pub fn run(&self, task: &str, cwd: &Path) -> RunOutcome {
         let mut bb = Blackboard::new();
@@ -152,7 +166,7 @@ impl Conductor {
             let impl_text;
             match self
                 .adapter_for_role(impl_role)
-                .map(|a| a.run(&impl_prompt, cwd))
+                .map(|a| self.run_adapter(a, &impl_prompt, cwd))
             {
                 Some(Ok(out)) => {
                     impl_text = out.text.clone();
@@ -260,7 +274,7 @@ impl Conductor {
                     .get(role)
                     .map(|r| r.agent.clone())
                     .unwrap_or_default();
-                let mut result = self.adapter_for_role(role).map(|a| a.run(&prompt, cwd));
+                let mut result = self.adapter_for_role(role).map(|a| self.run_adapter(a, &prompt, cwd));
                 let mut effective_agent = agent_name.clone();
 
                 if matches!(result, Some(Err(_))) {
@@ -268,7 +282,7 @@ impl Conductor {
                         OnFlake::Exclude => {}
                         OnFlake::Retry => {
                             self.note(&mut bb, role, "finding", "reviewer flaked — retrying once");
-                            result = self.adapter_for_role(role).map(|a| a.run(&prompt, cwd));
+                            result = self.adapter_for_role(role).map(|a| self.run_adapter(a, &prompt, cwd));
                         }
                         OnFlake::Substitute => {
                             if let Some(backup) = self.crew.backup_for(&agent_name) {
@@ -282,7 +296,7 @@ impl Conductor {
                                         ),
                                     );
                                     effective_agent = backup.to_string();
-                                    result = Some(b.run(&prompt, cwd));
+                                    result = Some(self.run_adapter(b.as_ref(), &prompt, cwd));
                                 }
                             }
                         }
