@@ -17,6 +17,7 @@ pub mod ledger;
 pub mod mcp;
 pub mod mcp_install;
 pub mod mesh;
+pub mod ndjson;
 pub mod remote_adapter;
 pub mod repo_sync;
 pub mod serve;
@@ -41,6 +42,7 @@ pub use gate::{decide, GateDecision, RoleVerdict};
 pub use journal::{journal_path, parse as parse_journal, write_run, Entry as JournalEntry};
 pub use ledger::{Counts, Ledger, LedgerError, Task, TaskState};
 pub use mesh::{render_mesh, render_up};
+pub use ndjson::Feed;
 pub use remote_adapter::RemoteAdapter;
 pub use repo_sync::{
     apply_result, bundle_rev, gc_node_scratch, head_sha, is_git_worktree, merge_branch,
