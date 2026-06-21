@@ -702,7 +702,11 @@ fn mcp_install_cmd(args: &[String]) {
             std::process::exit(2);
         }),
     });
-    let name = parse_flag(args, "--name").unwrap_or_else(|| client.as_str().to_string());
+    // Default the member name to `<client>@<host>` so members across the fleet don't collide with zero
+    // coordination (and it's STABLE across restarts, which the ledger's claim-ownership relies on). An
+    // explicit `--name` still wins. Pure derivation lives in `mcp_install`; we just supply the raw host.
+    let name = parse_flag(args, "--name")
+        .unwrap_or_else(|| ensemble::mcp_install::default_member_name(client, raw_hostname().as_deref()));
     // crew must be ABSOLUTE for the same reason (else `--crew crew.toml` resolves against the vendor
     // CLI's cwd at runtime and silently loses the crew runner).
     let crew = absolutize(
@@ -852,6 +856,24 @@ fn env_path(key: &str) -> Option<std::path::PathBuf> {
     std::env::var_os(key)
         .filter(|s| !s.is_empty())
         .map(std::path::PathBuf::from)
+}
+
+/// This machine's raw host name for the default member name (`<client>@<host>`): the platform env var
+/// first (`COMPUTERNAME` on Windows, `HOSTNAME` on Unix — the latter isn't always exported to a
+/// non-interactive shell), then the `hostname` command, else `None` (caller falls back to a bare client
+/// name). The pure short/sanitize step lives in `mcp_install::default_member_name`.
+fn raw_hostname() -> Option<String> {
+    fn nonempty(key: &str) -> Option<String> {
+        std::env::var(key).ok().filter(|s| !s.trim().is_empty())
+    }
+    nonempty("COMPUTERNAME").or_else(|| nonempty("HOSTNAME")).or_else(|| {
+        std::process::Command::new("hostname")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .filter(|s| !s.trim().is_empty())
+    })
 }
 
 /// The user's home directory, portably: `%USERPROFILE%` (Windows) or `$HOME` (Unix). Precedence is

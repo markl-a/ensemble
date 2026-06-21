@@ -97,6 +97,33 @@ pub fn config_path(client: ClientKind, repo: &Path, env: &Env) -> PathBuf {
     }
 }
 
+/// The default crew-member name for `client` on a machine whose RAW host name is `raw_host` (the IO shell
+/// supplies it from `$COMPUTERNAME` / `$HOSTNAME` / the `hostname` command): `<client>@<short-host>`,
+/// where short-host is the FIRST dot-separated label, lowercased, with anything outside `[a-z0-9_-]`
+/// dropped (a member name flows into board posts, the ledger's `claimed_by`, and the baked `--name` arg,
+/// so keep it tame). Falls back to the BARE client name when no usable host is available, so a member
+/// always has a name. Deterministic for a given (client, host) — the name is STABLE across restarts, which
+/// ledger claim-ownership + orphan-recover rely on (so it must NOT key on a per-launch counter). Across
+/// the fleet (one CLI per host) `<client>@<host>` is collision-free with zero coordination.
+pub fn default_member_name(client: ClientKind, raw_host: Option<&str>) -> String {
+    let short = raw_host
+        .map(|h| {
+            h.trim()
+                .split('.')
+                .next()
+                .unwrap_or("")
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                .collect::<String>()
+                .to_ascii_lowercase()
+        })
+        .filter(|s| !s.is_empty());
+    match short {
+        Some(h) => format!("{}@{}", client.as_str(), h),
+        None => client.as_str().to_string(),
+    }
+}
+
 /// opencode's per-request MCP timeout defaults to 5s — far too short for a long `ensemble_run`/
 /// `ensemble_merge` tool call. We set a generous one so governed sub-runs aren't killed mid-flight.
 const OPENCODE_TIMEOUT_MS: u64 = 600_000;
@@ -224,6 +251,26 @@ mod tests {
             name: "codex".to_string(),
             crew: PathBuf::from(r"D:\crewdemo\crew.toml"),
         }
+    }
+
+    #[test]
+    fn default_member_name_appends_short_lowercased_host() {
+        assert_eq!(default_member_name(ClientKind::Claude, Some("Z13")), "claude@z13");
+        assert_eq!(default_member_name(ClientKind::Codex, Some("z13.local")), "codex@z13", "domain stripped");
+        assert_eq!(default_member_name(ClientKind::Opencode, Some("  ayaneo \n")), "opencode@ayaneo", "trimmed");
+    }
+
+    #[test]
+    fn default_member_name_falls_back_to_bare_client_without_a_usable_host() {
+        assert_eq!(default_member_name(ClientKind::Claude, None), "claude", "no host → bare client");
+        assert_eq!(default_member_name(ClientKind::Claude, Some("")), "claude", "empty → bare");
+        assert_eq!(default_member_name(ClientKind::Claude, Some("...")), "claude", "all-stripped → bare");
+    }
+
+    #[test]
+    fn default_member_name_sanitizes_unexpected_chars() {
+        // a name flows into board posts / ledger claimed_by / the baked --name arg, so keep it tame.
+        assert_eq!(default_member_name(ClientKind::Codex, Some("My Box!")), "codex@mybox");
     }
 
     #[test]
