@@ -6,6 +6,7 @@ pub mod agy_adapter;
 pub mod blackboard;
 pub mod board;
 pub mod conductor;
+pub mod council;
 pub mod crew;
 pub mod discovery;
 pub mod dispatch;
@@ -32,6 +33,7 @@ pub use agy_adapter::AgyAdapter;
 pub use blackboard::{Blackboard, Message};
 pub use board::FileBoard;
 pub use conductor::{Conductor, Decision, RunOutcome};
+pub use council::{council_targets, render_council, short_host, CouncilTarget};
 pub use crew::{AgentConfig, CrewConfig, CrewError, GatePolicy, OnFlake, RoleConfig, TestConfig};
 pub use discovery::{
     build_agent_hosts, discover_agent_hosts, discover_mesh, discover_nodes, parse_health_agents,

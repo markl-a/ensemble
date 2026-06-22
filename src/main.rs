@@ -29,7 +29,8 @@ const USAGE: &str = "usage:\n  \
     ensemble mcp install --client <claude|codex|opencode> [--repo <p>] [--name <id>] [--exe <p>] [--crew <p>] [--config <p>] [--print]   (one-click: register `ensemble mcp` into that CLI's config)\n  \
     ensemble watch <member> [--repo <path>] [--since <n>] [--follow]   (tail a live member's stream feed)\n  \
     ensemble steer <name> \"<prompt>\" [--repo <path>]   (inject a redirect into a live --watch run's next round)\n  \
-    ensemble abort <name> [--hard] [--repo <path>]   (stop a live --watch run; --hard kills the running CLI now)\n\n\
+    ensemble abort <name> [--hard] [--repo <path>]   (stop a live --watch run; --hard kills the running CLI now)\n  \
+    ensemble all \"<prompt>\" [--repo <path>] [--no-discover] [--json]   (COUNCIL: fan one prompt to EVERY reachable CLI, side-by-side replies)\n\n\
     run/run-many/dispatch auto-discover tailnet `serve` hosts for any agent without an explicit\n  \
     [agents.<n>] node = ... in crew.toml; pass --no-discover to stay local.";
 
@@ -59,6 +60,7 @@ fn main() {
         Some("watch") => watch_cmd(&args),
         Some("steer") => steer_cmd(&args),
         Some("abort") => abort_cmd(&args),
+        Some("all") => all_cmd(&args),
         _ => {
             eprintln!("{USAGE}");
             std::process::exit(2);
@@ -233,6 +235,82 @@ fn append_control(args: &[String], name: &str, cmd: &ensemble::ControlCmd) {
     if let Err(e) = feed.append(&line) {
         eprintln!("ensemble: write control feed {}: {e}", feed.path().display());
         std::process::exit(1);
+    }
+}
+
+/// `ensemble all "<prompt>" [--repo <p>] [--no-discover] [--json]` — COUNCIL broadcast: fan the SAME
+/// prompt to EVERY AI CLI ensemble can reach (local CLIs on PATH + every agent on every tailnet peer
+/// running `ensemble serve`), each as ONE read-only turn, then print every reply side by side. No
+/// worktree, no gate, no land — pure compare-the-fleet-on-one-question (item 0.7). `--no-discover` = local.
+fn all_cmd(args: &[String]) {
+    require_value_if_present(args, "--repo");
+    let prompt = match positional_tasks(args).into_iter().next() {
+        Some(p) => p,
+        None => {
+            eprintln!("usage: ensemble all \"<prompt>\" [--repo <p>] [--no-discover] [--json]");
+            std::process::exit(2);
+        }
+    };
+    let repo = parse_flag(args, "--repo").unwrap_or_else(|| ".".to_string());
+    let local = ensemble::present_clis();
+    let mesh = if has_flag(args, "--no-discover") {
+        Vec::new()
+    } else {
+        ensemble::discover_mesh(7878)
+    };
+    let targets = ensemble::council_targets(&local, &mesh);
+    if targets.is_empty() {
+        eprintln!("ensemble all: no AI CLIs found (local PATH or tailnet)");
+        std::process::exit(1);
+    }
+    // Fan out: one read-only turn per target, in parallel. Scoped threads borrow the prompt/cwd/targets.
+    let prompt_ref = prompt.as_str();
+    let cwd = Path::new(&repo);
+    let results: Vec<(String, Result<String, String>)> = std::thread::scope(|s| {
+        let handles: Vec<_> = targets
+            .iter()
+            .map(|t| s.spawn(move || council_run_one(t, prompt_ref, cwd)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or_else(|_| ("?".to_string(), Err("worker panicked".to_string()))))
+            .collect()
+    });
+    if has_flag(args, "--json") {
+        let arr: Vec<serde_json::Value> = results
+            .iter()
+            .map(|(label, r)| match r {
+                Ok(t) => serde_json::json!({"label": label, "ok": true, "text": t}),
+                Err(e) => serde_json::json!({"label": label, "ok": false, "error": e}),
+            })
+            .collect();
+        println!("{}", serde_json::to_string(&arr).unwrap_or_default());
+    } else {
+        print!("{}", ensemble::render_council(&results));
+    }
+}
+
+/// Run ONE council target's prompt as a read-only turn → `(label, Ok(reply) | Err(msg))`. A remote
+/// target drives the agent on its peer over HTTP; a local one execs the CLI here. A flake is reported,
+/// never fatal — the council shows who answered and who couldn't.
+fn council_run_one(
+    t: &ensemble::CouncilTarget,
+    prompt: &str,
+    cwd: &Path,
+) -> (String, Result<String, String>) {
+    let adapter: Box<dyn Adapter> = match &t.node {
+        Some(url) => Box::new(RemoteAdapter::new(&t.agent, url)),
+        None => match t.agent.as_str() {
+            "codex" => Box::new(ExecAdapter::codex()),
+            "claude" => Box::new(ExecAdapter::claude()),
+            "opencode" => Box::new(ExecAdapter::opencode()),
+            "agy" => Box::new(AgyAdapter::new()),
+            other => return (t.label.clone(), Err(format!("no local adapter for '{other}'"))),
+        },
+    };
+    match adapter.run(prompt, cwd) {
+        Ok(out) => (t.label.clone(), Ok(out.text)),
+        Err(e) => (t.label.clone(), Err(e.to_string())),
     }
 }
 
