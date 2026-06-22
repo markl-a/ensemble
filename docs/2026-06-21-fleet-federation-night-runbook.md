@@ -206,15 +206,72 @@ way to say "all 5 machines are collaborating."
 
 ---
 
-## 7. Watch it live (S1a — `ensemble watch`)
+## 7. Stage-1 single-machine SUPERVISION test (the 主控台 quartet — Win z13 AND a Mac)
 
-If S1a has landed (it was double-gating overnight), any run started with `--watch <name>` streams its
-events into `<repo>/.ensemble/stream/<name>.ndjson`, renderable live:
+All four supervision verbs are LANDED (file-plane, zero ConPTY — identical on Windows and macOS):
+**observe** (`--watch`/`watch`) · **interrupt** (`abort [--hard]`) · **adjust** (`steer`) · **configure**
+(`[agents.<n>]` in crew.toml). Run a governed crew on ONE machine and drive it live with THREE terminals.
+
+### 7.1 Setup (any machine with ≥2 reliable CLIs — codex + claude)
+```bash
+mkdir sup-test && cd sup-test && git init -q
+printf '.ensemble/\ncrew.toml\n' > .gitignore        # keep the worktree clean for --merge
+printf '# sup\n' > README.md && git add .gitignore README.md && git commit -qm init && git branch -M main
 ```
-ensemble watch <name> --follow      # [codex · result] … / [claude · verdict] VERDICT: LGTM / [conductor · decision] LANDED
+`crew.toml` — codex implements, claude reviews (the reliable pair), with per-agent CONFIGURE:
+```toml
+pipeline = ["implement", "review"]
+[gate]
+min_approvals = 1
+max_rounds    = 3            # several rounds so you have time to steer/abort
+on_flake      = "exclude"
+[roles.implement]
+agent = "codex"
+[roles.review]
+agent = "claude"
+blind = true
+[agents.codex]               # 設定 / configure (item 6):
+timeout = 300                #   per-command timeout in seconds
+# args  = ["--model", "..."] #   extra flags, e.g. model select (vendor-agnostic)
 ```
-This is the "看得到" capability. (Live INJECT/ABORT — steer/abort — is the NEXT S1 sub-slice, not built
-yet; today you can still Ctrl-C a run to stop it at the next round boundary.)
+
+### 7.2 Three terminals
+**A — start the run, named `sup`, live-streamed + auto-merge:**
+```bash
+ensemble run "<a multi-step task, e.g. add a CLI flag with tests and docs>" \
+  --crew crew.toml --repo . --watch sup --merge
+```
+**B — OBSERVE it live:**
+```bash
+ensemble watch sup --follow
+# → [codex · result] … / [claude · verdict] VERDICT: LGTM / [operator · steer] … / [conductor · decision] LANDED
+```
+**C — ADJUST / INTERRUPT mid-run:**
+```bash
+ensemble steer sup "also handle the empty-input case" --repo .   # adjust: redirect the NEXT round
+ensemble abort sup --repo .                                      # interrupt: clean stop at the round boundary
+ensemble abort sup --hard --repo .                              # interrupt HARD: kill the running CLI now
+```
+
+### 7.3 What to verify
+- **observe**: B shows each turn/verdict/decision as it happens (not just at the end).
+- **adjust**: after a `steer`, B shows `[operator · steer] …` and the NEXT round's implementer prompt
+  carries it (the work changes direction).
+- **interrupt (clean)**: the current turn finishes, then the run stops — `[operator · interrupted]`,
+  ESCALATED "aborted by operator".
+- **interrupt (--hard)**: the running CLI dies mid-turn — ESCALATED "… flaked: codex aborted by operator"
+  (fast, doesn't wait out the turn). Proven on z13.
+- **configure**: change `[agents.codex] timeout`/`args`, re-run — e.g. `timeout = 2` flakes codex in ~2s.
+
+### 7.4 Honest limits (test the right thing)
+- `steer` takes effect on the NEXT round, not mid-turn (a turn is a blocking one-shot).
+- a CLEAN `abort` stops at the round boundary; only `--hard` is mid-turn immediate.
+- `配置` is read at run START (re-run to apply changes); a remote `[agents.X] node=...` ignores
+  `args`/`timeout` (that peer configures its own).
+- Identical on **Mac** (agy's PTY is actually cleaner there — no Windows ConPTY linger). For the CONTROL
+  feed, pass the SAME `--repo` to `run` and to `steer/abort`.
+- Cross-MACHINE steer/abort (driving a run on another box) is the NEXT sub-slice (serve `/control` route),
+  not built yet — for now supervise each machine's run on that machine, or over its serve `/stream` later.
 
 ---
 
