@@ -198,7 +198,10 @@ impl Adapter for ExecAdapter {
                         let _ = writer.join();
                         let _ = out_reader.join();
                         let _ = err_reader.join();
-                        return Err(AdapterError::Flaked(format!("{} aborted by operator", self.program)));
+                        return Err(AdapterError::Flaked(format!(
+                            "{} aborted by operator",
+                            self.program
+                        )));
                     }
                     if Instant::now() >= deadline {
                         Self::kill_tree(&mut child);
@@ -300,7 +303,12 @@ mod tests {
     #[test]
     fn run_captures_quick_output_within_timeout() {
         // Regression guard for the reader-thread rewrite: a fast command's stdout is still captured.
-        let a = ExecAdapter::raw("echoer", "echo", &["hello-ensemble"], Duration::from_secs(10));
+        let a = ExecAdapter::raw(
+            "echoer",
+            "echo",
+            &["hello-ensemble"],
+            Duration::from_secs(10),
+        );
         let r = a.run("", Path::new(".")).expect("echo should succeed");
         assert!(r.text.contains("hello-ensemble"), "captured {:?}", r.text);
     }
@@ -311,7 +319,11 @@ mod tests {
         let a = ExecAdapter::raw("echoer", "echo", &["hi"], Duration::from_secs(10))
             .with_extra_args(vec!["world".to_string()]);
         let r = a.run("", Path::new(".")).expect("echo should succeed");
-        assert!(r.text.contains("hi") && r.text.contains("world"), "captured {:?}", r.text);
+        assert!(
+            r.text.contains("hi") && r.text.contains("world"),
+            "captured {:?}",
+            r.text
+        );
     }
 
     #[test]
@@ -319,7 +331,12 @@ mod tests {
         // S1b `--hard`: a long turn that the operator hard-aborts must die NEAR the abort, not run to
         // its (generous) timeout. Set a 30s timeout, abort after ~300ms, expect Flaked in well under 3s.
         #[cfg(windows)]
-        let a = ExecAdapter::raw("sleeper", "ping", &["-n", "30", "127.0.0.1"], Duration::from_secs(30));
+        let a = ExecAdapter::raw(
+            "sleeper",
+            "ping",
+            &["-n", "30", "127.0.0.1"],
+            Duration::from_secs(30),
+        );
         #[cfg(not(windows))]
         let a = ExecAdapter::raw("sleeper", "sleep", &["30"], Duration::from_secs(30));
         let flag = Arc::new(AtomicBool::new(false));
@@ -331,7 +348,14 @@ mod tests {
         });
         let start = Instant::now();
         let r = a.run("ignored", Path::new("."));
-        assert!(matches!(r, Err(AdapterError::Flaked(_))), "an aborted turn must Flake, got {r:?}");
-        assert!(start.elapsed() < Duration::from_secs(3), "must die near the abort: {:?}", start.elapsed());
+        assert!(
+            matches!(r, Err(AdapterError::Flaked(_))),
+            "an aborted turn must Flake, got {r:?}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "must die near the abort: {:?}",
+            start.elapsed()
+        );
     }
 }

@@ -173,7 +173,12 @@ mod tests {
     fn write_run_creates_runs_dir_and_roundtrips() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path();
-        let jsonl = render(&[msg("codex", "result", "did it")], "landed", "ensemble/s-0", 1);
+        let jsonl = render(
+            &[msg("codex", "result", "did it")],
+            "landed",
+            "ensemble/s-0",
+            1,
+        );
         let path = write_run(repo, "my-slug-7", &jsonl).unwrap();
         assert_eq!(path, journal_path(repo, "my-slug-7"));
         assert!(path.exists(), "journal file must exist after write_run");
@@ -190,7 +195,11 @@ mod tests {
         let a = write_run(repo, "dup", "AAA\n").unwrap();
         let b = write_run(repo, "dup", "BBB\n").unwrap();
         assert_ne!(a, b, "a second same-slug run must land in its own file");
-        assert_eq!(fs::read_to_string(&a).unwrap(), "AAA\n", "first journal preserved");
+        assert_eq!(
+            fs::read_to_string(&a).unwrap(),
+            "AAA\n",
+            "first journal preserved"
+        );
         assert_eq!(fs::read_to_string(&b).unwrap(), "BBB\n");
         let n = fs::read_dir(repo.join(".ensemble/runs")).unwrap().count();
         assert_eq!(n, 2, "both runs kept");
@@ -201,7 +210,10 @@ mod tests {
         let repo = Path::new("/tmp/repo");
         let runs = repo.join(".ensemble").join("runs");
         let p = journal_path(repo, "../../etc/passwd");
-        assert!(p.starts_with(&runs), "slug must not escape the runs dir: {p:?}");
+        assert!(
+            p.starts_with(&runs),
+            "slug must not escape the runs dir: {p:?}"
+        );
         assert_eq!(p.parent().unwrap(), runs, "must be a direct child of runs");
         assert!(
             !p.components().any(|c| c.as_os_str() == ".."),

@@ -65,19 +65,35 @@ pub enum StreamEvent {
 /// Render one stream event as a single human line for `ensemble watch`.
 pub fn render_event(ev: &StreamEvent) -> String {
     match ev {
-        StreamEvent::SessionStart { member, cli, backend, host, pid, .. } => {
+        StreamEvent::SessionStart {
+            member,
+            cli,
+            backend,
+            host,
+            pid,
+            ..
+        } => {
             let h = host.as_deref().unwrap_or("?");
             format!("● session_start  {member} ({cli}/{backend}) host={h} pid={pid}")
         }
-        StreamEvent::TurnStart { n, prompt, .. } => format!("▶ turn #{n} start  {}", inline(prompt)),
+        StreamEvent::TurnStart { n, prompt, .. } => {
+            format!("▶ turn #{n} start  {}", inline(prompt))
+        }
         StreamEvent::Output { n, text, .. } => format!("  #{n} | {}", inline(text)),
-        StreamEvent::Tool { n, name, detail, .. } => format!("  #{n} ⚙ {name}  {}", inline(detail)),
+        StreamEvent::Tool {
+            n, name, detail, ..
+        } => format!("  #{n} ⚙ {name}  {}", inline(detail)),
         StreamEvent::TurnEnd { n, reply, .. } => format!("◀ turn #{n} end    {}", inline(reply)),
-        StreamEvent::Injected { n, from, prompt, .. } => {
+        StreamEvent::Injected {
+            n, from, prompt, ..
+        } => {
             format!("⤵ inject #{n} from {from}: {}", inline(prompt))
         }
         StreamEvent::Interrupted { n, from, hard, .. } => {
-            format!("✖ interrupt #{n} from {from} ({})", if *hard { "hard" } else { "ctrl-c" })
+            format!(
+                "✖ interrupt #{n} from {from} ({})",
+                if *hard { "hard" } else { "ctrl-c" }
+            )
         }
         StreamEvent::SessionEnd { reason, .. } => format!("● session_end  ({reason})"),
     }
@@ -252,7 +268,12 @@ pub struct WatchArgs {
 /// process argv (args[0]=exe, args[1]="watch"). The first non-flag token is the member; unknown
 /// `--flags` are skipped (no value assumed); a non-numeric `--since` falls back to 0.
 pub fn parse_watch_args(args: &[String]) -> WatchArgs {
-    let mut out = WatchArgs { member: None, repo: None, since: 0, follow: false };
+    let mut out = WatchArgs {
+        member: None,
+        repo: None,
+        since: 0,
+        follow: false,
+    };
     let mut i = 2; // skip exe + "watch"
     while i < args.len() {
         match args[i].as_str() {
@@ -286,7 +307,11 @@ mod tests {
 
     #[test]
     fn stream_event_roundtrips_with_the_ev_tag() {
-        let ev = StreamEvent::TurnStart { n: 7, prompt: "do the auth path".into(), ts: "T".into() };
+        let ev = StreamEvent::TurnStart {
+            n: 7,
+            prompt: "do the auth path".into(),
+            ts: "T".into(),
+        };
         let line = serde_json::to_string(&ev).unwrap();
         assert!(line.contains(r#""ev":"turn_start""#), "got {line}");
         assert!(line.contains(r#""n":7"#));
@@ -297,7 +322,10 @@ mod tests {
     #[test]
     fn injected_event_roundtrips() {
         let ev = StreamEvent::Injected {
-            n: 8, from: "main@yoyogood".into(), prompt: "focus".into(), ts: "T".into(),
+            n: 8,
+            from: "main@yoyogood".into(),
+            prompt: "focus".into(),
+            ts: "T".into(),
         };
         let back: StreamEvent = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
         assert_eq!(back, ev);
@@ -308,14 +336,20 @@ mod tests {
         let raw = r#"{"ev":"injected","n":8,"from":"main@z13","prompt":"skip the UI","ts":"T"}"#;
         let s = render_line(raw);
         assert!(s.contains("inject #8"), "got {s}");
-        assert!(s.contains("main@z13") && s.contains("skip the UI"), "got {s}");
+        assert!(
+            s.contains("main@z13") && s.contains("skip the UI"),
+            "got {s}"
+        );
     }
 
     #[test]
     fn render_line_falls_back_on_unknown_or_torn_lines() {
         // a forward-compat event kind this binary doesn't know must NOT be hidden
         let future = r#"{"ev":"some_future_kind","x":1}"#;
-        assert!(render_line(future).contains("some_future_kind"), "unknown kind shown raw");
+        assert!(
+            render_line(future).contains("some_future_kind"),
+            "unknown kind shown raw"
+        );
         // a valid-JSON but non-event line is shown raw, not dropped
         assert!(render_line("{}").starts_with('?'));
     }
@@ -328,15 +362,25 @@ mod tests {
         let s = render_line(raw);
         assert!(s.contains("codex") && s.contains("result"), "got {s}");
         assert!(s.contains("implemented the parser"), "got {s}");
-        assert!(!s.starts_with('?'), "a valid Message must not fall back to raw: {s}");
+        assert!(
+            !s.starts_with('?'),
+            "a valid Message must not fall back to raw: {s}"
+        );
         // a StreamEvent still wins (more specific, tagged on "ev")
-        assert!(render_line(r#"{"ev":"turn_start","n":1,"prompt":"do it","ts":"T"}"#).contains("turn #1"));
+        assert!(
+            render_line(r#"{"ev":"turn_start","n":1,"prompt":"do it","ts":"T"}"#)
+                .contains("turn #1")
+        );
         // genuine garbage still falls back to raw
         assert!(render_line("not json").starts_with('?'));
         // forward-compat: an UNKNOWN future event kind is shown RAW even if it coincidentally carries
         // from/kind/body — an "ev"-tagged line must NEVER be mis-parsed as a blackboard Message.
         let ev_future = r#"{"ev":"future_kind","from":"x","kind":"y","body":"z"}"#;
-        assert!(render_line(ev_future).starts_with('?'), "ev-tagged unknown must be raw: {}", render_line(ev_future));
+        assert!(
+            render_line(ev_future).starts_with('?'),
+            "ev-tagged unknown must be raw: {}",
+            render_line(ev_future)
+        );
     }
 
     #[test]
@@ -352,22 +396,40 @@ mod tests {
         let lines = crate::ndjson::Feed::open(path).read_since(0).unwrap();
         assert_eq!(lines.len(), 1, "one post → one feed line");
         let rendered = render_line(&lines[0]);
-        assert!(rendered.contains("codex") && rendered.contains("did the thing"), "rendered: {rendered}");
+        assert!(
+            rendered.contains("codex") && rendered.contains("did the thing"),
+            "rendered: {rendered}"
+        );
     }
 
     #[test]
     fn control_cmd_roundtrips_tagged_on_cmd() {
-        let s = ControlCmd::Steer { from: "main@z13".into(), prompt: "skip the UI".into() };
+        let s = ControlCmd::Steer {
+            from: "main@z13".into(),
+            prompt: "skip the UI".into(),
+        };
         let line = serde_json::to_string(&s).unwrap();
         assert!(line.contains(r#""cmd":"steer""#), "got {line}");
         assert_eq!(serde_json::from_str::<ControlCmd>(&line).unwrap(), s);
-        let a = ControlCmd::Abort { from: "main@z13".into(), hard: true };
+        let a = ControlCmd::Abort {
+            from: "main@z13".into(),
+            hard: true,
+        };
         let aline = serde_json::to_string(&a).unwrap();
-        assert!(aline.contains(r#""cmd":"abort""#) && aline.contains(r#""hard":true"#), "got {aline}");
+        assert!(
+            aline.contains(r#""cmd":"abort""#) && aline.contains(r#""hard":true"#),
+            "got {aline}"
+        );
         assert_eq!(serde_json::from_str::<ControlCmd>(&aline).unwrap(), a);
         // `hard` defaults to false when omitted (a clean abort line stays minimal)
         let clean: ControlCmd = serde_json::from_str(r#"{"cmd":"abort","from":"m"}"#).unwrap();
-        assert_eq!(clean, ControlCmd::Abort { from: "m".into(), hard: false });
+        assert_eq!(
+            clean,
+            ControlCmd::Abort {
+                from: "m".into(),
+                hard: false
+            }
+        );
     }
 
     #[test]
@@ -376,16 +438,37 @@ mod tests {
         let repo = Path::new("/tmp/repo");
         let control = repo.join(".ensemble").join("control");
         let p = member_control_path(repo, "../../etc/passwd");
-        assert_eq!(p.parent().unwrap(), control, "must be a direct child of control/");
-        assert!(!p.components().any(|c| c.as_os_str() == ".."), "no traversal survives: {p:?}");
+        assert_eq!(
+            p.parent().unwrap(),
+            control,
+            "must be a direct child of control/"
+        );
+        assert!(
+            !p.components().any(|c| c.as_os_str() == ".."),
+            "no traversal survives: {p:?}"
+        );
     }
 
     #[test]
     fn drain_control_applies_steer_and_abort() {
         let tmp = tempfile::tempdir().unwrap();
         let feed = crate::ndjson::Feed::open(tmp.path().join("c.ndjson"));
-        feed.append(&serde_json::to_string(&ControlCmd::Steer { from: "m".into(), prompt: "focus".into() }).unwrap()).unwrap();
-        feed.append(&serde_json::to_string(&ControlCmd::Abort { from: "m".into(), hard: true }).unwrap()).unwrap();
+        feed.append(
+            &serde_json::to_string(&ControlCmd::Steer {
+                from: "m".into(),
+                prompt: "focus".into(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        feed.append(
+            &serde_json::to_string(&ControlCmd::Abort {
+                from: "m".into(),
+                hard: true,
+            })
+            .unwrap(),
+        )
+        .unwrap();
         let st = ControlState::default();
         let mut cursor = 0usize;
         drain_control(&feed, &mut cursor, &st);
@@ -404,9 +487,19 @@ mod tests {
         let repo = Path::new("/tmp/repo");
         let stream = repo.join(".ensemble").join("stream");
         let p = member_stream_path(repo, "../../etc/passwd");
-        assert!(p.starts_with(&stream), "member must not escape the stream dir: {p:?}");
-        assert_eq!(p.parent().unwrap(), stream, "must be a direct child of stream/");
-        assert!(!p.components().any(|c| c.as_os_str() == ".."), "no traversal survives: {p:?}");
+        assert!(
+            p.starts_with(&stream),
+            "member must not escape the stream dir: {p:?}"
+        );
+        assert_eq!(
+            p.parent().unwrap(),
+            stream,
+            "must be a direct child of stream/"
+        );
+        assert!(
+            !p.components().any(|c| c.as_os_str() == ".."),
+            "no traversal survives: {p:?}"
+        );
     }
 
     #[test]
@@ -434,7 +527,14 @@ mod tests {
     #[test]
     fn parse_watch_args_all_flags() {
         let w = parse_watch_args(&argv(&[
-            "ensemble", "watch", "--since", "5", "claude@z13", "--follow", "--repo", "/r",
+            "ensemble",
+            "watch",
+            "--since",
+            "5",
+            "claude@z13",
+            "--follow",
+            "--repo",
+            "/r",
         ]));
         assert_eq!(w.member.as_deref(), Some("claude@z13"));
         assert_eq!(w.since, 5);

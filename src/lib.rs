@@ -6,6 +6,7 @@ pub mod agy_adapter;
 pub mod blackboard;
 pub mod board;
 pub mod conductor;
+pub mod controlled;
 pub mod council;
 pub mod crew;
 pub mod discovery;
@@ -23,6 +24,8 @@ pub mod remote_adapter;
 pub mod repo_sync;
 pub mod serve;
 pub mod supervise;
+pub mod supervisor;
+pub mod team;
 pub mod test_gate;
 pub mod verdict;
 pub mod wire;
@@ -33,6 +36,9 @@ pub use agy_adapter::AgyAdapter;
 pub use blackboard::{Blackboard, Message};
 pub use board::FileBoard;
 pub use conductor::{Conductor, Decision, RunOutcome};
+pub use controlled::{
+    control_script, pty_program_for_vendor, run_controlled_pty, ControlledPtyConfig,
+};
 pub use council::{council_targets, render_council, short_host, CouncilTarget};
 pub use crew::{AgentConfig, CrewConfig, CrewError, GatePolicy, OnFlake, RoleConfig, TestConfig};
 pub use discovery::{
@@ -55,6 +61,16 @@ pub use serve::{resolve_bind, serve, BindAddr};
 pub use supervise::{
     drain_control, member_control_path, member_stream_path, parse_watch_args, render_event,
     render_line, ControlCmd, ControlState, FeedObserver, RunObserver, StreamEvent, WatchArgs,
+};
+pub use supervisor::{
+    build_supervisor_prompt, collect_supervisor_evidence, control_action_for_report,
+    parse_supervisor_report, EvidenceLine, SupervisorApply, SupervisorEvidence,
+    SupervisorRecommendation, SupervisorReport,
+};
+pub use team::{
+    default_member_name, default_team_name, member_file_stem, post_team_message, read_team_inbox,
+    render_team_inbox, render_team_status, resolve_team_session, team_root, team_status, TeamInbox,
+    TeamLedgerCounts, TeamSession, TeamStatus,
 };
 pub use test_gate::{run_tests, TestOutcome};
 pub use verdict::{parse_verdict, Verdict};

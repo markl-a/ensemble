@@ -88,7 +88,10 @@ fn is_mid_merge(repo: &Path) -> bool {
 /// Refuse to start a merge unless the worktree is clean AND not already mid-merge — so a later
 /// `merge --abort` / restore provably returns to a PRISTINE state, never to dirt or a half-merge.
 fn preflight_clean(repo: &Path) -> std::io::Result<()> {
-    if !git_capture(repo, &["status", "--porcelain"])?.stdout.is_empty() {
+    if !git_capture(repo, &["status", "--porcelain"])?
+        .stdout
+        .is_empty()
+    {
         return Err(std::io::Error::other(
             "worktree not clean — commit or stash before `ensemble merge`",
         ));
@@ -146,7 +149,11 @@ fn is_text_content_conflict(repo: &Path, p: &str) -> bool {
     let (mut ours, mut theirs) = (false, false);
     for line in String::from_utf8_lossy(&out.stdout).lines() {
         // format: "<mode> <sha> <stage>\t<path>"
-        match line.split('\t').next().and_then(|m| m.split_whitespace().nth(2)) {
+        match line
+            .split('\t')
+            .next()
+            .and_then(|m| m.split_whitespace().nth(2))
+        {
             Some("2") => ours = true,
             Some("3") => theirs = true,
             _ => {}
@@ -249,15 +256,12 @@ pub fn merge_with_resolver(
     resolve: impl FnOnce(&Path, &[String]) -> std::io::Result<()>,
 ) -> std::io::Result<MergeOutcome> {
     // Restore `into` to pre_sha, folding a restore failure into `base` so it's never lost.
-    fn fail_restoring(
-        repo: &Path,
-        pre_sha: &str,
-        into: &str,
-        base: String,
-    ) -> std::io::Error {
+    fn fail_restoring(repo: &Path, pre_sha: &str, into: &str, base: String) -> std::io::Error {
         let mut msg = base;
         if let Err(re) = restore_to(repo, pre_sha) {
-            msg.push_str(&format!("; AND restore failed — {into} may be left mid-merge: {re}"));
+            msg.push_str(&format!(
+                "; AND restore failed — {into} may be left mid-merge: {re}"
+            ));
         }
         std::io::Error::other(msg)
     }
@@ -667,7 +671,10 @@ mod tests {
             merge_branch(repo, "ensemble/y", "main").unwrap(),
             MergeOutcome::Landed
         );
-        assert!(repo.join("b").exists() && repo.join("c").exists(), "true merge keeps both");
+        assert!(
+            repo.join("b").exists() && repo.join("c").exists(),
+            "true merge keeps both"
+        );
     }
 
     #[test]
@@ -688,7 +695,10 @@ mod tests {
         git(repo, &["commit", "-q", "-m", "edit foo on main"]);
         match merge_branch(repo, "ensemble/z", "main").unwrap() {
             MergeOutcome::Conflict(paths) => {
-                assert!(paths.contains(&"foo".to_string()), "conflicting paths: {paths:?}")
+                assert!(
+                    paths.contains(&"foo".to_string()),
+                    "conflicting paths: {paths:?}"
+                )
             }
             o => panic!("expected Conflict, got {o:?}"),
         }
@@ -703,7 +713,10 @@ mod tests {
             .args(["status", "--porcelain"])
             .output()
             .unwrap();
-        assert!(st.stdout.is_empty(), "worktree must be clean after merge --abort");
+        assert!(
+            st.stdout.is_empty(),
+            "worktree must be clean after merge --abort"
+        );
     }
 
     #[test]
@@ -760,13 +773,20 @@ mod tests {
         let repo = tmp.path();
         setup_conflict(repo);
         let out = merge_with_resolver(repo, "ensemble/z", "main", |r, paths| {
-            assert_eq!(paths, &["foo".to_string()], "resolver gets the conflicting paths");
+            assert_eq!(
+                paths,
+                &["foo".to_string()],
+                "resolver gets the conflicting paths"
+            );
             std::fs::write(r.join("foo"), "RESOLVED\n")?; // marker-free resolution
             Ok(())
         })
         .unwrap();
         assert_eq!(out, MergeOutcome::Landed);
-        assert_eq!(std::fs::read_to_string(repo.join("foo")).unwrap(), "RESOLVED\n");
+        assert_eq!(
+            std::fs::read_to_string(repo.join("foo")).unwrap(),
+            "RESOLVED\n"
+        );
         assert!(is_clean(repo), "worktree clean after a resolved land");
         // HEAD is a real merge commit (has a second parent)
         let second_parent = Command::new("git")
@@ -775,7 +795,10 @@ mod tests {
             .args(["rev-parse", "--verify", "--quiet", "HEAD^2"])
             .output()
             .unwrap();
-        assert!(second_parent.status.success(), "landed result must be a merge commit");
+        assert!(
+            second_parent.status.success(),
+            "landed result must be a merge commit"
+        );
     }
 
     #[test]
@@ -791,7 +814,10 @@ mod tests {
             "main-edit\n",
             "foo restored to main's pre-merge version"
         );
-        assert!(is_clean(repo) && !mid_merge(repo), "restored to a pristine, non-merging state");
+        assert!(
+            is_clean(repo) && !mid_merge(repo),
+            "restored to a pristine, non-merging state"
+        );
     }
 
     #[test]
@@ -804,7 +830,10 @@ mod tests {
         })
         .unwrap();
         assert_eq!(out, MergeOutcome::Conflict(vec!["foo".to_string()]));
-        assert_eq!(std::fs::read_to_string(repo.join("foo")).unwrap(), "main-edit\n");
+        assert_eq!(
+            std::fs::read_to_string(repo.join("foo")).unwrap(),
+            "main-edit\n"
+        );
         assert!(is_clean(repo) && !mid_merge(repo));
     }
 
@@ -854,8 +883,15 @@ mod tests {
         })
         .unwrap();
         assert_eq!(out, MergeOutcome::Conflict(vec!["foo".to_string()]));
-        assert_eq!(head_sha(repo).unwrap(), pre, "main restored to its pre-merge tip");
-        assert!(!repo.join("foo").exists(), "foo stays deleted (main's side)");
+        assert_eq!(
+            head_sha(repo).unwrap(),
+            pre,
+            "main restored to its pre-merge tip"
+        );
+        assert!(
+            !repo.join("foo").exists(),
+            "foo stays deleted (main's side)"
+        );
         assert!(is_clean(repo) && !mid_merge(repo));
     }
 
@@ -875,8 +911,15 @@ mod tests {
         })
         .unwrap();
         assert_eq!(out, MergeOutcome::Conflict(vec!["foo".to_string()]));
-        assert_eq!(head_sha(repo).unwrap(), pre, "the resolver's bad merge commit was undone");
-        assert_eq!(std::fs::read_to_string(repo.join("foo")).unwrap(), "main-edit\n");
+        assert_eq!(
+            head_sha(repo).unwrap(),
+            pre,
+            "the resolver's bad merge commit was undone"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("foo")).unwrap(),
+            "main-edit\n"
+        );
         assert!(is_clean(repo) && !mid_merge(repo));
     }
 
@@ -897,8 +940,15 @@ mod tests {
         })
         .unwrap();
         assert_eq!(out, MergeOutcome::Conflict(vec!["foo".to_string()]));
-        assert_eq!(head_sha(repo).unwrap(), pre, "the bad self-commit was undone");
-        assert_eq!(std::fs::read_to_string(repo.join("foo")).unwrap(), "main-edit\n");
+        assert_eq!(
+            head_sha(repo).unwrap(),
+            pre,
+            "the bad self-commit was undone"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.join("foo")).unwrap(),
+            "main-edit\n"
+        );
         assert!(is_clean(repo) && !mid_merge(repo));
     }
 

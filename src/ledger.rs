@@ -350,7 +350,11 @@ mod tests {
         // double-complete is a no-op (already terminal, no longer claimed)
         assert!(!l.complete_owned("a", "alice", "again", 22).unwrap());
         let a = l.list().unwrap().into_iter().find(|t| t.id == "a").unwrap();
-        assert_eq!(a.outcome.as_deref(), Some("LANDED"), "outcome not overwritten");
+        assert_eq!(
+            a.outcome.as_deref(),
+            Some("LANDED"),
+            "outcome not overwritten"
+        );
     }
 
     #[test]

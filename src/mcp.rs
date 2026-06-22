@@ -10,6 +10,7 @@
 
 use crate::board::FileBoard;
 use fs2::FileExt;
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -21,6 +22,8 @@ const DEFAULT_PROTOCOL: &str = "2025-06-18";
 /// Max in-flight request threads. A client could otherwise pipeline unboundedly and exhaust threads;
 /// the reader loop blocks (backpressure) once this many are running.
 const MAX_INFLIGHT: usize = 16;
+const DEFAULT_MCP_LIMIT: usize = 50;
+const MAX_MCP_LIMIT: usize = 200;
 
 /// A tiny counting semaphore (std only) to cap concurrent request handlers.
 struct Semaphore {
@@ -29,7 +32,10 @@ struct Semaphore {
 }
 impl Semaphore {
     fn new(n: usize) -> Self {
-        Self { permits: Mutex::new(n), cv: Condvar::new() }
+        Self {
+            permits: Mutex::new(n),
+            cv: Condvar::new(),
+        }
     }
     /// Block until a permit is free, take it, and return an RAII guard that releases it on Drop —
     /// so the permit is returned whether the handler completes normally, PANICS (Drop runs during
@@ -63,10 +69,14 @@ impl Drop for PermitGuard {
 pub struct Ctx {
     pub repo: PathBuf,
     pub name: String,
+    pub team: String,
     /// How `ensemble_run` delegates a governed crew sub-run. The binary always wires this (a
     /// `Conductor` adapter); it is `None` only in hermetic unit tests of the OTHER tools, where an
     /// `ensemble_run` call returns an internal error rather than running anything.
     pub runner: Option<Arc<dyn CrewRunner>>,
+    /// Optional supervisor runner. When absent, `ensemble_supervise` is not advertised because this
+    /// library module deliberately does not know how to construct vendor adapters.
+    pub supervisor: Option<Arc<dyn SupervisorRunner>>,
 }
 
 /// The capability the MCP server uses to delegate a whole governed crew run for `ensemble_run`. The
@@ -95,6 +105,39 @@ pub struct RunSummary {
     pub detail: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct SuperviseRequest {
+    pub name: String,
+    pub team: Option<String>,
+    pub agent: String,
+    pub since: usize,
+    pub apply_steer: bool,
+    pub abort_on_critical: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SuperviseSummary {
+    pub name: String,
+    pub team: String,
+    pub agent: String,
+    pub recommendation: crate::SupervisorRecommendation,
+    pub reason: String,
+    pub steer: Option<String>,
+    pub critical: bool,
+    pub board_next: usize,
+    pub control_next: Option<usize>,
+}
+
+pub trait SupervisorRunner: Send + Sync {
+    fn supervise(
+        &self,
+        req: SuperviseRequest,
+        repo: &Path,
+        caller: &str,
+    ) -> Result<SuperviseSummary, String>;
+}
+
 /// A JSON-RPC error object (code + message).
 pub struct RpcError {
     pub code: i64,
@@ -102,13 +145,22 @@ pub struct RpcError {
 }
 impl RpcError {
     fn method_not_found(m: &str) -> Self {
-        Self { code: -32601, message: format!("method not found: {m}") }
+        Self {
+            code: -32601,
+            message: format!("method not found: {m}"),
+        }
     }
     fn invalid_params(m: impl Into<String>) -> Self {
-        Self { code: -32602, message: m.into() }
+        Self {
+            code: -32602,
+            message: m.into(),
+        }
     }
     fn internal(m: impl Into<String>) -> Self {
-        Self { code: -32603, message: m.into() }
+        Self {
+            code: -32603,
+            message: m.into(),
+        }
     }
 }
 
@@ -164,6 +216,84 @@ fn tools_list(ctx: &Ctx) -> Value {
                     "body": { "type": "string", "description": "the message text" }
                 },
                 "required": ["kind", "body"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "ensemble_team_status",
+            "description": "Read repo-local team state for this MCP server's team: board length, ledger counts, and known stream/control feeds. Optional `team` overrides the server default for one call.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "team": { "type": "string", "description": "team name to inspect; defaults to this server's team" }
+                },
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "ensemble_team_say",
+            "description": "Post a message to the repo-local team board as THIS MCP member. `body` is required; `kind` defaults to note. The author is always the server identity, never a client-supplied field.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "team": { "type": "string", "description": "team name; defaults to this server's team" },
+                    "kind": { "type": "string", "description": "short tag for the message (default note)" },
+                    "body": { "type": "string", "description": "message body" }
+                },
+                "required": ["body"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "ensemble_team_inbox",
+            "description": "Read bounded messages from the repo-local team board with a cursor. Returns at most `limit` messages and a `next` cursor for polling.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "team": { "type": "string", "description": "team name; defaults to this server's team" },
+                    "since": { "type": "integer", "minimum": 0, "description": "return messages from this cursor (default 0)" },
+                    "limit": { "type": "integer", "minimum": 0, "maximum": 200, "description": "maximum messages to return (default 50)" }
+                },
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "ensemble_watch",
+            "description": "Read bounded raw stream events for a live run/member name from the same stream feed used by `ensemble watch`. Returns JSON events with indexes and a `next` cursor.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "watch/run/member name" },
+                    "since": { "type": "integer", "minimum": 0, "description": "return events from this cursor (default 0)" },
+                    "limit": { "type": "integer", "minimum": 0, "maximum": 200, "description": "maximum events to return (default 50)" }
+                },
+                "required": ["name"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "ensemble_steer",
+            "description": "Append a steer command to the same control feed used by `ensemble steer`. The command is attributed to THIS MCP member.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "watch/run/member name to steer" },
+                    "prompt": { "type": "string", "description": "instruction to inject into the next round" }
+                },
+                "required": ["name", "prompt"],
+                "additionalProperties": false
+            }
+        },
+        {
+            "name": "ensemble_abort",
+            "description": "Append an abort command to the same control feed used by `ensemble abort`. Clean abort waits for a round boundary; `hard` asks the running adapter to stop immediately.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "watch/run/member name to abort" },
+                    "hard": { "type": "boolean", "description": "kill the running CLI immediately when true (default false)" }
+                },
+                "required": ["name"],
                 "additionalProperties": false
             }
         },
@@ -254,6 +384,27 @@ fn tools_list(ctx: &Ctx) -> Value {
             }));
         }
     }
+    if ctx.supervisor.is_some() {
+        if let Some(tools) = out["tools"].as_array_mut() {
+            tools.push(json!({
+                "name": "ensemble_supervise",
+                "description": "Ask a configured supervisor agent to inspect recent stream events, team-board messages, git status, and diff summary for a live run/member. Advisory by default; set applySteer or abortOnCritical to allow control-feed mutation from parsed recommendations.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "watch/run/member name to inspect" },
+                        "team": { "type": "string", "description": "team name; defaults to this server's team" },
+                        "agent": { "type": "string", "description": "local supervisor agent to ask (default claude)" },
+                        "since": { "type": "integer", "minimum": 0, "description": "stream cursor to inspect from (default 0)" },
+                        "applySteer": { "type": "boolean", "description": "write a steer command only when the parsed recommendation is steer (default false)" },
+                        "abortOnCritical": { "type": "boolean", "description": "write a hard abort only for an explicit critical abort recommendation (default false)" }
+                    },
+                    "required": ["name"],
+                    "additionalProperties": false
+                }
+            }));
+        }
+    }
     out
 }
 
@@ -267,6 +418,13 @@ fn tools_call(params: &Value, ctx: &Ctx) -> Result<Value, RpcError> {
         "ensemble_mesh" => tool_mesh(),
         "ensemble_board_read" => tool_board_read(&args, ctx)?,
         "ensemble_board_post" => tool_board_post(&args, ctx)?,
+        "ensemble_team_status" => tool_team_status(&args, ctx)?,
+        "ensemble_team_say" => tool_team_say(&args, ctx)?,
+        "ensemble_team_inbox" => tool_team_inbox(&args, ctx)?,
+        "ensemble_watch" => tool_watch(&args, ctx)?,
+        "ensemble_steer" => tool_steer(&args, ctx)?,
+        "ensemble_abort" => tool_abort(&args, ctx)?,
+        "ensemble_supervise" => tool_supervise(&args, ctx)?,
         "ensemble_worktree" => tool_worktree(&args, ctx)?,
         "ensemble_enqueue" => tool_enqueue(&args, ctx)?,
         "ensemble_claim" => tool_claim(&args, ctx)?,
@@ -345,12 +503,286 @@ fn required_str<'a>(args: &'a Value, field: &str) -> Result<&'a str, RpcError> {
                 .as_str()
                 .ok_or_else(|| RpcError::invalid_params(format!("`{field}` must be a string")))?;
             if s.trim().is_empty() {
-                Err(RpcError::invalid_params(format!("`{field}` must not be empty")))
+                Err(RpcError::invalid_params(format!(
+                    "`{field}` must not be empty"
+                )))
             } else {
                 Ok(s)
             }
         }
     }
+}
+
+fn optional_str<'a>(args: &'a Value, field: &str) -> Result<Option<&'a str>, RpcError> {
+    match args.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => {
+            let s = v
+                .as_str()
+                .ok_or_else(|| RpcError::invalid_params(format!("`{field}` must be a string")))?;
+            if s.trim().is_empty() {
+                Err(RpcError::invalid_params(format!(
+                    "`{field}` must not be empty"
+                )))
+            } else {
+                Ok(Some(s))
+            }
+        }
+    }
+}
+
+fn optional_usize(args: &Value, field: &str, default: usize) -> Result<usize, RpcError> {
+    match args.get(field) {
+        None | Some(Value::Null) => Ok(default),
+        Some(v) => {
+            let n = v.as_u64().ok_or_else(|| {
+                RpcError::invalid_params(format!("`{field}` must be a non-negative integer"))
+            })?;
+            usize::try_from(n)
+                .map_err(|_| RpcError::invalid_params(format!("`{field}` is too large")))
+        }
+    }
+}
+
+fn optional_bool(args: &Value, field: &str, default: bool) -> Result<bool, RpcError> {
+    match args.get(field) {
+        None | Some(Value::Null) => Ok(default),
+        Some(v) => v
+            .as_bool()
+            .ok_or_else(|| RpcError::invalid_params(format!("`{field}` must be a boolean"))),
+    }
+}
+
+fn optional_args(args: &Value) -> Result<(), RpcError> {
+    if args.is_null() || args.is_object() {
+        Ok(())
+    } else {
+        Err(RpcError::invalid_params("arguments must be an object"))
+    }
+}
+
+fn required_args(args: &Value, fields: &str) -> Result<(), RpcError> {
+    if args.is_object() {
+        Ok(())
+    } else {
+        Err(RpcError::invalid_params(format!(
+            "arguments must be an object with {fields}"
+        )))
+    }
+}
+
+fn reject_unknown_fields(args: &Value, allowed: &[&str]) -> Result<(), RpcError> {
+    let Some(obj) = args.as_object() else {
+        return Ok(());
+    };
+    for key in obj.keys() {
+        if !allowed.iter().any(|field| field == key) {
+            return Err(RpcError::invalid_params(format!(
+                "unknown argument `{key}`"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn mcp_limit(args: &Value) -> Result<usize, RpcError> {
+    let limit = optional_usize(args, "limit", DEFAULT_MCP_LIMIT)?;
+    if limit > MAX_MCP_LIMIT {
+        return Err(RpcError::invalid_params(format!(
+            "`limit` must be <= {MAX_MCP_LIMIT}"
+        )));
+    }
+    Ok(limit)
+}
+
+fn mcp_team(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
+    Ok(crate::team::default_team_name(
+        optional_str(args, "team")?.or(Some(ctx.team.as_str())),
+    ))
+}
+
+fn mcp_session(
+    args: &Value,
+    ctx: &Ctx,
+    member: &str,
+) -> Result<crate::team::TeamSession, RpcError> {
+    let team = mcp_team(args, ctx)?;
+    Ok(crate::team::resolve_team_session(
+        &ctx.repo,
+        Some(&team),
+        "mcp",
+        Some(member),
+        None,
+    ))
+}
+
+fn tool_team_status(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
+    optional_args(args)?;
+    reject_unknown_fields(args, &["team"])?;
+    let session = mcp_session(args, ctx, &ctx.name)?;
+    let status = crate::team::team_status(&session)
+        .map_err(|e| RpcError::internal(format!("team status: {e}")))?;
+    serde_json::to_string(&status).map_err(|e| RpcError::internal(format!("team status json: {e}")))
+}
+
+fn tool_team_say(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
+    required_args(args, "`body`")?;
+    reject_unknown_fields(args, &["team", "kind", "body"])?;
+    let body = required_str(args, "body")?;
+    let kind = optional_str(args, "kind")?.unwrap_or("note");
+    let session = mcp_session(args, ctx, &ctx.name)?;
+    let next = crate::team::post_team_message(&session, &ctx.name, kind, body)
+        .map_err(|e| RpcError::internal(format!("team say: {e}")))?;
+    Ok(json!({ "posted": true, "team": session.team, "next": next }).to_string())
+}
+
+fn tool_team_inbox(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
+    optional_args(args)?;
+    reject_unknown_fields(args, &["team", "since", "limit"])?;
+    let since = optional_usize(args, "since", 0)?;
+    let limit = mcp_limit(args)?;
+    let session = mcp_session(args, ctx, &ctx.name)?;
+    let mut inbox = crate::team::read_team_inbox(&session, since)
+        .map_err(|e| RpcError::internal(format!("team inbox: {e}")))?;
+    if inbox.messages.len() > limit {
+        inbox.messages.truncate(limit);
+    }
+    inbox.next = since + inbox.messages.len();
+    Ok(json!({ "team": session.team, "messages": inbox.messages, "next": inbox.next }).to_string())
+}
+
+fn feed_target(args: &Value) -> Result<&str, RpcError> {
+    let name = required_str(args, "name")?.trim();
+    if name
+        .chars()
+        .any(|c| c == '/' || c == '\\' || c.is_control())
+    {
+        return Err(RpcError::invalid_params(
+            "`name` must not contain path separators or control characters",
+        ));
+    }
+    if name.chars().all(|c| c == '.') {
+        return Err(RpcError::invalid_params("`name` must not be dot-only"));
+    }
+    Ok(name)
+}
+
+fn tool_watch(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
+    required_args(args, "`name`")?;
+    reject_unknown_fields(args, &["name", "since", "limit"])?;
+    let name = feed_target(args)?;
+    let since = optional_usize(args, "since", 0)?;
+    let limit = mcp_limit(args)?;
+    let feed = crate::Feed::open(crate::member_stream_path(&ctx.repo, name));
+    let lines = feed
+        .read_since(since)
+        .map_err(|e| RpcError::internal(format!("watch: {e}")))?;
+    let messages: Vec<Value> = lines
+        .into_iter()
+        .take(limit)
+        .enumerate()
+        .map(|(offset, line)| {
+            let event = serde_json::from_str::<Value>(&line).unwrap_or(Value::String(line));
+            json!({ "index": since + offset, "event": event })
+        })
+        .collect();
+    let next = since + messages.len();
+    Ok(json!({
+        "name": name,
+        "stem": crate::member_file_stem(name),
+        "messages": messages,
+        "next": next
+    })
+    .to_string())
+}
+
+fn append_control(ctx: &Ctx, name: &str, cmd: &crate::ControlCmd) -> Result<usize, RpcError> {
+    let feed = crate::Feed::open(crate::member_control_path(&ctx.repo, name));
+    let line = serde_json::to_string(cmd)
+        .map_err(|e| RpcError::internal(format!("control encode: {e}")))?;
+    feed.append(&line)
+        .map_err(|e| RpcError::internal(format!("control append: {e}")))
+}
+
+fn tool_steer(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
+    required_args(args, "`name` and `prompt`")?;
+    reject_unknown_fields(args, &["name", "prompt"])?;
+    let name = feed_target(args)?;
+    let prompt = required_str(args, "prompt")?;
+    let cmd = crate::ControlCmd::Steer {
+        from: ctx.name.clone(),
+        prompt: prompt.to_string(),
+    };
+    let next = append_control(ctx, name, &cmd)?;
+    Ok(json!({
+        "steered": true,
+        "name": name,
+        "stem": crate::member_file_stem(name),
+        "next": next
+    })
+    .to_string())
+}
+
+fn tool_abort(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
+    required_args(args, "`name`")?;
+    reject_unknown_fields(args, &["name", "hard"])?;
+    let name = feed_target(args)?;
+    let hard = optional_bool(args, "hard", false)?;
+    let cmd = crate::ControlCmd::Abort {
+        from: ctx.name.clone(),
+        hard,
+    };
+    let next = append_control(ctx, name, &cmd)?;
+    Ok(json!({
+        "aborted": true,
+        "name": name,
+        "stem": crate::member_file_stem(name),
+        "hard": hard,
+        "next": next
+    })
+    .to_string())
+}
+
+fn tool_supervise(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
+    required_args(args, "`name`")?;
+    reject_unknown_fields(
+        args,
+        &[
+            "name",
+            "team",
+            "agent",
+            "since",
+            "applySteer",
+            "abortOnCritical",
+        ],
+    )?;
+    let name = feed_target(args)?.to_string();
+    let team = optional_str(args, "team")?
+        .map(str::to_string)
+        .or_else(|| Some(ctx.team.clone()));
+    let agent = optional_str(args, "agent")?.unwrap_or("claude").to_string();
+    let since = optional_usize(args, "since", 0)?;
+    let apply_steer = optional_bool(args, "applySteer", false)?;
+    let abort_on_critical = optional_bool(args, "abortOnCritical", false)?;
+    let runner = ctx
+        .supervisor
+        .as_ref()
+        .ok_or_else(|| RpcError::internal("supervisor runner is not configured"))?;
+    let summary = runner
+        .supervise(
+            SuperviseRequest {
+                name,
+                team,
+                agent,
+                since,
+                apply_steer,
+                abort_on_critical,
+            },
+            &ctx.repo,
+            &ctx.name,
+        )
+        .map_err(|e| RpcError::internal(format!("supervise: {e}")))?;
+    serde_json::to_string(&summary).map_err(|e| RpcError::internal(format!("supervise json: {e}")))
 }
 
 /// Create (or idempotently re-attach to) THIS member's persistent worktree for an OPTIONAL `task`
@@ -376,7 +808,10 @@ fn tool_worktree(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
     };
     let wt = crate::worktree::ensure_kept_worktree(&ctx.repo, &ctx.name, task)
         .map_err(|e| RpcError::internal(format!("worktree: {e}")))?;
-    Ok(json!({ "path": wt.path.to_string_lossy(), "branch": wt.branch, "slug": wt.slug }).to_string())
+    Ok(
+        json!({ "path": wt.path.to_string_lossy(), "branch": wt.branch, "slug": wt.slug })
+            .to_string(),
+    )
 }
 
 /// Seconds since the Unix epoch — the ledger's timestamps (claim/complete times). A bad clock yields
@@ -404,7 +839,9 @@ fn open_ledger(repo: &Path) -> Result<crate::ledger::Ledger, RpcError> {
 /// (no-op). Returns `{enqueued, id}` — `enqueued` is false when that id was already present.
 fn tool_enqueue(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
     if !args.is_object() {
-        return Err(RpcError::invalid_params("arguments must be an object with `descr`"));
+        return Err(RpcError::invalid_params(
+            "arguments must be an object with `descr`",
+        ));
     }
     let descr = required_str(args, "descr")?;
     let id = crate::dispatch::task_id(descr);
@@ -462,7 +899,9 @@ fn lock_repo(repo: &Path, name: &str) -> Result<std::fs::File, RpcError> {
 /// conflict:[paths]}` — a conflict is a reported OUTCOME, not an error (escalate/resolve, then retry).
 fn tool_merge(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
     if !args.is_object() {
-        return Err(RpcError::invalid_params("arguments must be an object with `branch`"));
+        return Err(RpcError::invalid_params(
+            "arguments must be an object with `branch`",
+        ));
     }
     let branch = required_str(args, "branch")?;
     let into = match args.get("into") {
@@ -490,7 +929,9 @@ fn tool_merge(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
         // plumbing) would, if passed raw to `git checkout`/`git merge`, be parsed as a FLAG — the
         // existence check alone doesn't stop that. A legitimate branch never starts with '-'.
         if name.starts_with('-') {
-            return Err(RpcError::invalid_params(format!("`{field}` must not start with '-'")));
+            return Err(RpcError::invalid_params(format!(
+                "`{field}` must not start with '-'"
+            )));
         }
         // Prove the SHORT name resolves — under git's OWN revision rules, the same ones `git
         // checkout`/`git merge` use — to EXACTLY the local branch `refs/heads/<name>`. A mere
@@ -503,13 +944,21 @@ fn tool_merge(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
         let out = std::process::Command::new("git")
             .arg("-C")
             .arg(&ctx.repo)
-            .args(["rev-parse", "--quiet", "--verify", "--symbolic-full-name", name])
+            .args([
+                "rev-parse",
+                "--quiet",
+                "--verify",
+                "--symbolic-full-name",
+                name,
+            ])
             .output()
             .map_err(|e| RpcError::internal(format!("git rev-parse: {e}")))?;
         if !out.status.success()
             || String::from_utf8_lossy(&out.stdout).trim() != format!("refs/heads/{name}")
         {
-            return Err(RpcError::invalid_params(format!("`{field}` is not a local branch: {name}")));
+            return Err(RpcError::invalid_params(format!(
+                "`{field}` is not a local branch: {name}"
+            )));
         }
     }
     let _lock = lock_repo(&ctx.repo, "ensemble-merge.lock")?; // serialize concurrent merges
@@ -541,7 +990,9 @@ const NOT_OWNED_DETAIL: &str = "task is not claimed by this member (unknown id, 
 /// it (a reported outcome, not an error — the member can re-check the board/queue).
 fn tool_complete(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
     if !args.is_object() {
-        return Err(RpcError::invalid_params("arguments must be an object with `id` and `outcome`"));
+        return Err(RpcError::invalid_params(
+            "arguments must be an object with `id` and `outcome`",
+        ));
     }
     let id = required_str(args, "id")?;
     let outcome = required_str(args, "outcome")?;
@@ -561,7 +1012,9 @@ fn tool_complete(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
 /// (`ledger::fail_owned`). Returns `{failed:true, id}` or `{failed:false, id, detail}`.
 fn tool_fail(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
     if !args.is_object() {
-        return Err(RpcError::invalid_params("arguments must be an object with `id` and `reason`"));
+        return Err(RpcError::invalid_params(
+            "arguments must be an object with `id` and `reason`",
+        ));
     }
     let id = required_str(args, "id")?;
     let reason = required_str(args, "reason")?;
@@ -588,7 +1041,9 @@ fn tool_fail(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
 /// -32603 internal condition — never a silent fake-land.
 fn tool_run(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
     if !args.is_object() {
-        return Err(RpcError::invalid_params("arguments must be an object with `task`"));
+        return Err(RpcError::invalid_params(
+            "arguments must be an object with `task`",
+        ));
     }
     let task = required_str(args, "task")?;
     let runner = ctx.runner.as_ref().ok_or_else(|| {
@@ -613,7 +1068,13 @@ fn tool_run(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
 pub fn handle_message(line: &str, ctx: &Ctx) -> Option<String> {
     let req: Value = match serde_json::from_str(line) {
         Ok(v) => v,
-        Err(e) => return Some(error_response(Value::Null, -32700, format!("parse error: {e}"))),
+        Err(e) => {
+            return Some(error_response(
+                Value::Null,
+                -32700,
+                format!("parse error: {e}"),
+            ))
+        }
     };
     // No `id` member at all ⇒ notification (no response). `id: null` IS a request id (respond).
     let id = req.get("id")?.clone();
@@ -621,13 +1082,19 @@ pub fn handle_message(line: &str, ctx: &Ctx) -> Option<String> {
     let method = match req.get("method").and_then(|m| m.as_str()) {
         Some(m) => m,
         None => {
-            return Some(error_response(id, -32600, "invalid request: missing or non-string method"))
+            return Some(error_response(
+                id,
+                -32600,
+                "invalid request: missing or non-string method",
+            ))
         }
     };
     let params = req.get("params").cloned().unwrap_or(Value::Null);
     let resp = match dispatch(method, &params, ctx) {
         Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
-        Err(e) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": e.code, "message": e.message } }),
+        Err(e) => {
+            json!({ "jsonrpc": "2.0", "id": id, "error": { "code": e.code, "message": e.message } })
+        }
     };
     Some(resp.to_string())
 }
@@ -710,15 +1177,29 @@ mod tests {
             let _permit = s.acquire(); // available → 1
             panic!("handler boom"); // unwind drops _permit → release
         }));
-        assert_eq!(sem.available(), 2, "permit returned during unwind, not leaked");
+        assert_eq!(
+            sem.available(),
+            2,
+            "permit returned during unwind, not leaked"
+        );
     }
 
     fn ctx(repo: &std::path::Path) -> Ctx {
-        Ctx { repo: repo.to_path_buf(), name: "tester".into(), runner: None }
+        Ctx {
+            repo: repo.to_path_buf(),
+            name: "tester".into(),
+            team: "default".into(),
+            runner: None,
+            supervisor: None,
+        }
     }
 
     fn call(line: &str, ctx: &Ctx) -> Option<Value> {
         super::handle_message(line, ctx).map(|s| serde_json::from_str(&s).unwrap())
+    }
+
+    fn tool_payload(r: &Value) -> Value {
+        serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
     }
 
     #[test]
@@ -730,7 +1211,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r["id"], 1);
-        assert_eq!(r["result"]["protocolVersion"], "2025-03-26", "echoes the client's version");
+        assert_eq!(
+            r["result"]["protocolVersion"], "2025-03-26",
+            "echoes the client's version"
+        );
         assert!(r["result"]["capabilities"]["tools"].is_object());
         assert_eq!(r["result"]["serverInfo"]["name"], "ensemble");
     }
@@ -738,7 +1222,11 @@ mod tests {
     #[test]
     fn tools_list_includes_mesh_and_board_read() {
         let tmp = tempfile::tempdir().unwrap();
-        let r = call(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#, &ctx(tmp.path())).unwrap();
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
         let names: Vec<&str> = r["result"]["tools"]
             .as_array()
             .unwrap()
@@ -752,7 +1240,11 @@ mod tests {
     #[test]
     fn unknown_method_is_method_not_found() {
         let tmp = tempfile::tempdir().unwrap();
-        let r = call(r#"{"jsonrpc":"2.0","id":3,"method":"bogus/thing"}"#, &ctx(tmp.path())).unwrap();
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":3,"method":"bogus/thing"}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
         assert_eq!(r["error"]["code"], -32601);
     }
 
@@ -760,7 +1252,10 @@ mod tests {
     fn request_with_missing_method_is_invalid_request() {
         let tmp = tempfile::tempdir().unwrap();
         let r = call(r#"{"jsonrpc":"2.0","id":7}"#, &ctx(tmp.path())).unwrap();
-        assert_eq!(r["error"]["code"], -32600, "a request with no method is -32600 Invalid Request");
+        assert_eq!(
+            r["error"]["code"], -32600,
+            "a request with no method is -32600 Invalid Request"
+        );
     }
 
     #[test]
@@ -786,8 +1281,15 @@ mod tests {
         // a message WITH an id member (even null) is a request → gets a response; only a MISSING id
         // is a notification.
         let tmp = tempfile::tempdir().unwrap();
-        let r = call(r#"{"jsonrpc":"2.0","id":null,"method":"tools/list"}"#, &ctx(tmp.path())).unwrap();
-        assert!(r["result"]["tools"].is_array(), "id:null still gets a response");
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":null,"method":"tools/list"}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
+        assert!(
+            r["result"]["tools"].is_array(),
+            "id:null still gets a response"
+        );
     }
 
     #[test]
@@ -798,7 +1300,10 @@ mod tests {
             &ctx(tmp.path()),
         )
         .unwrap();
-        assert_eq!(r["error"]["code"], -32602, "a bad `since` is invalid params, not a silent reset");
+        assert_eq!(
+            r["error"]["code"], -32602,
+            "a bad `since` is invalid params, not a silent reset"
+        );
     }
 
     #[test]
@@ -838,7 +1343,11 @@ mod tests {
     #[test]
     fn tools_list_includes_board_post_requiring_kind_and_body() {
         let tmp = tempfile::tempdir().unwrap();
-        let r = call(r#"{"jsonrpc":"2.0","id":20,"method":"tools/list"}"#, &ctx(tmp.path())).unwrap();
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":20,"method":"tools/list"}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
         let tools = r["result"]["tools"].as_array().unwrap();
         let post = tools
             .iter()
@@ -848,6 +1357,268 @@ mod tests {
         assert!(
             req.iter().any(|v| v == "kind") && req.iter().any(|v| v == "body"),
             "board_post declares kind+body required: {req:?}"
+        );
+    }
+
+    #[test]
+    fn tools_list_includes_team_and_control_tools() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":80,"method":"tools/list"}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
+        let names: Vec<&str> = r["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        for name in [
+            "ensemble_team_status",
+            "ensemble_team_say",
+            "ensemble_team_inbox",
+            "ensemble_watch",
+            "ensemble_steer",
+            "ensemble_abort",
+        ] {
+            assert!(names.contains(&name), "{name} should be advertised");
+        }
+    }
+
+    #[test]
+    fn team_say_posts_as_this_member_and_inbox_reads_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = ctx(tmp.path());
+        let said = call(
+            r#"{"jsonrpc":"2.0","id":81,"method":"tools/call","params":{"name":"ensemble_team_say","arguments":{"body":"hello team"}}}"#,
+            &c,
+        )
+        .unwrap();
+        let p = tool_payload(&said);
+        assert_eq!(p["posted"], true);
+        assert_eq!(p["next"], 1);
+
+        let inbox = call(
+            r#"{"jsonrpc":"2.0","id":82,"method":"tools/call","params":{"name":"ensemble_team_inbox","arguments":{"since":0}}}"#,
+            &c,
+        )
+        .unwrap();
+        let p = tool_payload(&inbox);
+        assert_eq!(p["next"], 1);
+        assert_eq!(
+            p["messages"][0]["from"], "tester",
+            "server identity wins over client `from`"
+        );
+        assert_eq!(p["messages"][0]["kind"], "note");
+        assert_eq!(p["messages"][0]["body"], "hello team");
+    }
+
+    #[test]
+    fn team_say_rejects_client_supplied_author_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":811,"method":"tools/call","params":{"name":"ensemble_team_say","arguments":{"body":"hello team","from":"mallory"}}}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
+        assert_eq!(r["error"]["code"], -32602);
+        assert!(r["error"]["message"].as_str().unwrap().contains("from"));
+        assert!(
+            crate::FileBoard::open_at(&tmp.path().join(".ensemble"))
+                .read_since(0)
+                .unwrap()
+                .is_empty(),
+            "unknown author fields are rejected before any post"
+        );
+    }
+
+    #[test]
+    fn team_tools_can_target_a_named_team_without_touching_default_board() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = ctx(tmp.path());
+        call(
+            r#"{"jsonrpc":"2.0","id":83,"method":"tools/call","params":{"name":"ensemble_team_say","arguments":{"team":"ops","kind":"plan","body":"ops online"}}}"#,
+            &c,
+        )
+        .unwrap();
+
+        let ops = call(
+            r#"{"jsonrpc":"2.0","id":84,"method":"tools/call","params":{"name":"ensemble_team_status","arguments":{"team":"ops"}}}"#,
+            &c,
+        )
+        .unwrap();
+        let ops = tool_payload(&ops);
+        assert_eq!(ops["team"], "ops");
+        assert_eq!(ops["boardLen"], 1);
+
+        let default = call(
+            r#"{"jsonrpc":"2.0","id":85,"method":"tools/call","params":{"name":"ensemble_team_status"}}"#,
+            &c,
+        )
+        .unwrap();
+        let default = tool_payload(&default);
+        assert_eq!(default["team"], "default");
+        assert_eq!(
+            default["boardLen"], 0,
+            "named team writes must not leak to default board"
+        );
+    }
+
+    #[test]
+    fn team_inbox_rejects_a_bad_since_before_writing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":86,"method":"tools/call","params":{"name":"ensemble_team_inbox","arguments":{"since":"bad"}}}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
+        assert_eq!(r["error"]["code"], -32602);
+        assert!(r["error"]["message"].as_str().unwrap().contains("since"));
+        assert!(
+            !tmp.path().join(".ensemble").exists(),
+            "validation failure should not create state"
+        );
+    }
+
+    #[test]
+    fn watch_returns_bounded_stream_lines_with_a_cursor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let feed = crate::Feed::open(crate::member_stream_path(tmp.path(), "run-1"));
+        feed.append(r#"{"ev":"msg","body":"first"}"#).unwrap();
+        feed.append(r#"{"ev":"msg","body":"second"}"#).unwrap();
+
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":87,"method":"tools/call","params":{"name":"ensemble_watch","arguments":{"name":"run-1","since":0,"limit":1}}}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
+        let p = tool_payload(&r);
+        assert_eq!(p["name"], "run-1");
+        assert_eq!(p["next"], 1);
+        assert_eq!(p["messages"].as_array().unwrap().len(), 1);
+        assert_eq!(p["messages"][0]["index"], 0);
+        assert_eq!(p["messages"][0]["event"]["body"], "first");
+    }
+
+    #[test]
+    fn steer_and_abort_append_control_commands_as_this_member() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = ctx(tmp.path());
+        let steer = call(
+            r#"{"jsonrpc":"2.0","id":88,"method":"tools/call","params":{"name":"ensemble_steer","arguments":{"name":"run-2","prompt":"stay focused"}}}"#,
+            &c,
+        )
+        .unwrap();
+        assert_eq!(tool_payload(&steer)["next"], 1);
+        let abort = call(
+            r#"{"jsonrpc":"2.0","id":89,"method":"tools/call","params":{"name":"ensemble_abort","arguments":{"name":"run-2","hard":true}}}"#,
+            &c,
+        )
+        .unwrap();
+        assert_eq!(tool_payload(&abort)["next"], 2);
+
+        let lines = crate::Feed::open(crate::member_control_path(tmp.path(), "run-2"))
+            .read_since(0)
+            .unwrap();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(
+            serde_json::from_str::<crate::ControlCmd>(&lines[0]).unwrap(),
+            crate::ControlCmd::Steer {
+                from: "tester".into(),
+                prompt: "stay focused".into(),
+            }
+        );
+        assert_eq!(
+            serde_json::from_str::<crate::ControlCmd>(&lines[1]).unwrap(),
+            crate::ControlCmd::Abort {
+                from: "tester".into(),
+                hard: true,
+            }
+        );
+    }
+
+    #[test]
+    fn watch_and_control_tools_use_the_same_feeds_as_the_cli_even_for_named_server_teams() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = Ctx {
+            repo: tmp.path().to_path_buf(),
+            name: "tester".into(),
+            team: "ops".into(),
+            runner: None,
+            supervisor: None,
+        };
+        crate::Feed::open(crate::member_stream_path(tmp.path(), "run-ops"))
+            .append(r#"{"ev":"msg","body":"cli stream"}"#)
+            .unwrap();
+
+        let watched = call(
+            r#"{"jsonrpc":"2.0","id":881,"method":"tools/call","params":{"name":"ensemble_watch","arguments":{"name":"run-ops","since":0,"limit":10}}}"#,
+            &c,
+        )
+        .unwrap();
+        let watched = tool_payload(&watched);
+        assert_eq!(watched["messages"][0]["event"]["body"], "cli stream");
+        assert!(
+            !tmp.path()
+                .join(".ensemble")
+                .join("teams")
+                .join("ops")
+                .join("stream")
+                .join("run-ops.ndjson")
+                .exists(),
+            "watch must not silently switch to a team-scoped stream feed before runs are team-aware"
+        );
+
+        call(
+            r#"{"jsonrpc":"2.0","id":882,"method":"tools/call","params":{"name":"ensemble_steer","arguments":{"name":"run-ops","prompt":"same feed"}}}"#,
+            &c,
+        )
+        .unwrap();
+        let lines = crate::Feed::open(crate::member_control_path(tmp.path(), "run-ops"))
+            .read_since(0)
+            .unwrap();
+        assert_eq!(lines.len(), 1, "MCP steer writes to the CLI control feed");
+        assert!(
+            !tmp.path()
+                .join(".ensemble")
+                .join("teams")
+                .join("ops")
+                .join("control")
+                .join("run-ops.ndjson")
+                .exists(),
+            "steer must not silently switch to a team-scoped control feed before runs are team-aware"
+        );
+    }
+
+    #[test]
+    fn control_tools_reject_ambiguous_target_names() {
+        let tmp = tempfile::tempdir().unwrap();
+        for name in ["../run", r"ops\run", "..", "."] {
+            let body = format!(
+                r#"{{"jsonrpc":"2.0","id":883,"method":"tools/call","params":{{"name":"ensemble_abort","arguments":{{"name":"{name}"}}}}}}"#
+            );
+            let r = call(&body, &ctx(tmp.path())).unwrap();
+            assert_eq!(r["error"]["code"], -32602, "{name} should be rejected");
+        }
+    }
+
+    #[test]
+    fn steer_requires_a_prompt_without_writing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":90,"method":"tools/call","params":{"name":"ensemble_steer","arguments":{"name":"run-3"}}}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
+        assert_eq!(r["error"]["code"], -32602);
+        assert!(r["error"]["message"].as_str().unwrap().contains("prompt"));
+        assert!(
+            crate::Feed::open(crate::member_control_path(tmp.path(), "run-3"))
+                .read_since(0)
+                .unwrap()
+                .is_empty(),
+            "validation happens before appending control"
         );
     }
 
@@ -862,11 +1633,17 @@ mod tests {
         let text = r["result"]["content"][0]["text"].as_str().unwrap();
         let payload: Value = serde_json::from_str(text).unwrap();
         assert_eq!(payload["posted"], true);
-        assert_eq!(payload["next"], 1, "the board length after the post is the new cursor");
+        assert_eq!(
+            payload["next"], 1,
+            "the board length after the post is the new cursor"
+        );
         // the message actually landed on the shared board, attributed to ctx.name (NOT a client field)
         let posted = FileBoard::open(tmp.path()).read_since(0).unwrap();
         assert_eq!(posted.len(), 1);
-        assert_eq!(posted[0].from, "tester", "attributed to this member, not client-supplied");
+        assert_eq!(
+            posted[0].from, "tester",
+            "attributed to this member, not client-supplied"
+        );
         assert_eq!(posted[0].kind, "result");
         assert_eq!(posted[0].body, "shipped the parser");
     }
@@ -902,7 +1679,10 @@ mod tests {
         .unwrap();
         assert_eq!(r["error"]["code"], -32602);
         let msg = r["error"]["message"].as_str().unwrap();
-        assert!(msg.contains("body"), "names the missing field, not 'unknown tool': {msg}");
+        assert!(
+            msg.contains("body"),
+            "names the missing field, not 'unknown tool': {msg}"
+        );
     }
 
     #[test]
@@ -937,7 +1717,10 @@ mod tests {
             &ctx(tmp.path()),
         )
         .unwrap();
-        assert_eq!(r["error"]["code"], -32602, "a blank body is a client error, not a silent empty post");
+        assert_eq!(
+            r["error"]["code"], -32602,
+            "a blank body is a client error, not a silent empty post"
+        );
         assert!(
             FileBoard::open(tmp.path()).is_empty().unwrap(),
             "validation happens BEFORE the post, so nothing is written"
@@ -986,7 +1769,11 @@ mod tests {
     #[test]
     fn tools_list_includes_worktree() {
         let tmp = tempfile::tempdir().unwrap();
-        let r = call(r#"{"jsonrpc":"2.0","id":30,"method":"tools/list"}"#, &ctx(tmp.path())).unwrap();
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":30,"method":"tools/list"}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
         let names: Vec<&str> = r["result"]["tools"]
             .as_array()
             .unwrap()
@@ -1007,10 +1794,16 @@ mod tests {
         .unwrap();
         let payload: Value =
             serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-        assert_eq!(payload["branch"], "ensemble/tester/feature-x", "branch carries the member");
+        assert_eq!(
+            payload["branch"], "ensemble/tester/feature-x",
+            "branch carries the member"
+        );
         assert_eq!(payload["slug"], "tester/feature-x");
         let path = payload["path"].as_str().unwrap();
-        assert!(std::path::Path::new(path).exists(), "the worktree dir persists (not RAII-removed)");
+        assert!(
+            std::path::Path::new(path).exists(),
+            "the worktree dir persists (not RAII-removed)"
+        );
     }
 
     #[test]
@@ -1028,9 +1821,14 @@ mod tests {
             &c,
         )
         .unwrap();
-        let p1: Value = serde_json::from_str(one["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-        let p2: Value = serde_json::from_str(two["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-        assert_eq!(p1["path"], p2["path"], "same member+task re-attaches to the same worktree");
+        let p1: Value =
+            serde_json::from_str(one["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        let p2: Value =
+            serde_json::from_str(two["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            p1["path"], p2["path"],
+            "same member+task re-attaches to the same worktree"
+        );
     }
 
     #[test]
@@ -1044,7 +1842,10 @@ mod tests {
         .unwrap();
         let payload: Value =
             serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-        assert_eq!(payload["slug"], "tester/work", "an absent task defaults to 'work'");
+        assert_eq!(
+            payload["slug"], "tester/work",
+            "an absent task defaults to 'work'"
+        );
     }
 
     #[test]
@@ -1059,7 +1860,10 @@ mod tests {
         .unwrap();
         let payload: Value =
             serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-        assert_eq!(payload["slug"], "tester/work", "a null task defaults to 'work'");
+        assert_eq!(
+            payload["slug"], "tester/work",
+            "a null task defaults to 'work'"
+        );
     }
 
     #[test]
@@ -1078,7 +1882,11 @@ mod tests {
     #[test]
     fn tools_list_includes_enqueue_and_claim() {
         let tmp = tempfile::tempdir().unwrap();
-        let r = call(r#"{"jsonrpc":"2.0","id":40,"method":"tools/list"}"#, &ctx(tmp.path())).unwrap();
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":40,"method":"tools/list"}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
         let names: Vec<&str> = r["result"]["tools"]
             .as_array()
             .unwrap()
@@ -1098,7 +1906,8 @@ mod tests {
             &c,
         )
         .unwrap();
-        let ep: Value = serde_json::from_str(e["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        let ep: Value =
+            serde_json::from_str(e["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(ep["enqueued"], true);
         let id = ep["id"].as_str().unwrap().to_string();
 
@@ -1107,7 +1916,8 @@ mod tests {
             &c,
         )
         .unwrap();
-        let cp: Value = serde_json::from_str(cl["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        let cp: Value =
+            serde_json::from_str(cl["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(cp["claimed"], true);
         assert_eq!(cp["descr"], "port the parser");
         assert_eq!(cp["id"], id, "claimed the very task we enqueued");
@@ -1118,12 +1928,23 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let c = ctx(tmp.path());
         let body = r#"{"jsonrpc":"2.0","id":43,"method":"tools/call","params":{"name":"ensemble_enqueue","arguments":{"descr":"same task"}}}"#;
-        let first: Value =
-            serde_json::from_str(call(body, &c).unwrap()["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-        let second: Value =
-            serde_json::from_str(call(body, &c).unwrap()["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        let first: Value = serde_json::from_str(
+            call(body, &c).unwrap()["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        let second: Value = serde_json::from_str(
+            call(body, &c).unwrap()["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(first["enqueued"], true);
-        assert_eq!(second["enqueued"], false, "the same descr is a no-op (stable-hash id)");
+        assert_eq!(
+            second["enqueued"], false,
+            "the same descr is a no-op (stable-hash id)"
+        );
         assert_eq!(first["id"], second["id"]);
     }
 
@@ -1135,8 +1956,12 @@ mod tests {
             &ctx(tmp.path()),
         )
         .unwrap();
-        let p: Value = serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-        assert_eq!(p["claimed"], false, "an empty queue is a normal result, not an error");
+        let p: Value =
+            serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            p["claimed"], false,
+            "an empty queue is a normal result, not an error"
+        );
     }
 
     #[test]
@@ -1148,10 +1973,20 @@ mod tests {
             &c,
         )
         .unwrap();
-        call(r#"{"jsonrpc":"2.0","id":46,"method":"tools/call","params":{"name":"ensemble_claim"}}"#, &c).unwrap();
+        call(
+            r#"{"jsonrpc":"2.0","id":46,"method":"tools/call","params":{"name":"ensemble_claim"}}"#,
+            &c,
+        )
+        .unwrap();
         // the claim is recorded under THIS member's identity (ctx.name), not a client-supplied worker
-        let l = crate::ledger::Ledger::open(&tmp.path().join(".ensemble").join("ledger.db")).unwrap();
-        let t = l.list().unwrap().into_iter().find(|t| t.descr == "x").unwrap();
+        let l =
+            crate::ledger::Ledger::open(&tmp.path().join(".ensemble").join("ledger.db")).unwrap();
+        let t = l
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|t| t.descr == "x")
+            .unwrap();
         assert_eq!(t.claimed_by.as_deref(), Some("tester"));
     }
 
@@ -1164,13 +1999,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r["error"]["code"], -32602);
-        assert!(r["error"]["message"].as_str().unwrap().contains("descr"), "names the field, not 'unknown tool'");
+        assert!(
+            r["error"]["message"].as_str().unwrap().contains("descr"),
+            "names the field, not 'unknown tool'"
+        );
     }
 
     #[test]
     fn tools_list_includes_merge() {
         let tmp = tempfile::tempdir().unwrap();
-        let r = call(r#"{"jsonrpc":"2.0","id":50,"method":"tools/list"}"#, &ctx(tmp.path())).unwrap();
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":50,"method":"tools/list"}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
         let names: Vec<&str> = r["result"]["tools"]
             .as_array()
             .unwrap()
@@ -1197,11 +2039,15 @@ mod tests {
             &ctx(repo),
         )
         .unwrap();
-        let p: Value = serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        let p: Value =
+            serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(p["landed"], true);
         assert_eq!(p["branch"], "ensemble/feat");
         assert_eq!(p["into"], "main");
-        assert!(repo.join("new.txt").exists(), "the branch's file is now on main's worktree");
+        assert!(
+            repo.join("new.txt").exists(),
+            "the branch's file is now on main's worktree"
+        );
     }
 
     #[test]
@@ -1222,14 +2068,21 @@ mod tests {
             &ctx(repo),
         )
         .unwrap();
-        let p: Value = serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-        assert_eq!(p["landed"], false, "a conflict is a reported outcome, not an error");
+        let p: Value =
+            serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            p["landed"], false,
+            "a conflict is a reported outcome, not an error"
+        );
         assert!(
             p["conflict"].as_array().unwrap().iter().any(|v| v == "f"),
             "names the conflicting path: {p}"
         );
         // the merge was aborted and main restored to its own edit (clean tree)
-        assert_eq!(std::fs::read_to_string(repo.join("f")).unwrap(), "main-edit");
+        assert_eq!(
+            std::fs::read_to_string(repo.join("f")).unwrap(),
+            "main-edit"
+        );
     }
 
     #[test]
@@ -1242,7 +2095,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r["error"]["code"], -32602);
-        assert!(r["error"]["message"].as_str().unwrap().contains("branch"), "names the field, not 'unknown tool'");
+        assert!(
+            r["error"]["message"].as_str().unwrap().contains("branch"),
+            "names the field, not 'unknown tool'"
+        );
     }
 
     #[test]
@@ -1255,7 +2111,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r["error"]["code"], -32602);
-        assert!(r["error"]["message"].as_str().unwrap().contains("branch"), "rejects a '-'-leading ref: {}", r["error"]["message"]);
+        assert!(
+            r["error"]["message"].as_str().unwrap().contains("branch"),
+            "rejects a '-'-leading ref: {}",
+            r["error"]["message"]
+        );
     }
 
     #[test]
@@ -1277,7 +2137,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r["error"]["code"], -32602);
-        assert!(r["error"]["message"].as_str().unwrap().contains("not a local branch"));
+        assert!(r["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not a local branch"));
     }
 
     #[test]
@@ -1299,7 +2162,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r["error"]["code"], -32602);
-        assert!(r["error"]["message"].as_str().unwrap().contains("not a local branch"));
+        assert!(r["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not a local branch"));
     }
 
     #[test]
@@ -1313,7 +2179,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r["error"]["code"], -32602);
-        assert!(r["error"]["message"].as_str().unwrap().contains("not a local branch"));
+        assert!(r["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not a local branch"));
     }
 
     #[test]
@@ -1353,7 +2222,11 @@ mod tests {
     #[test]
     fn tools_list_includes_complete_and_fail() {
         let tmp = tempfile::tempdir().unwrap();
-        let r = call(r#"{"jsonrpc":"2.0","id":58,"method":"tools/list"}"#, &ctx(tmp.path())).unwrap();
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":58,"method":"tools/list"}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
         let names: Vec<&str> = r["result"]["tools"]
             .as_array()
             .unwrap()
@@ -1379,16 +2252,22 @@ mod tests {
                 serde_json::from_str(e["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
             ep["id"].as_str().unwrap().to_string()
         };
-        call(r#"{"jsonrpc":"2.0","id":62,"method":"tools/call","params":{"name":"ensemble_claim"}}"#, &c).unwrap();
+        call(
+            r#"{"jsonrpc":"2.0","id":62,"method":"tools/call","params":{"name":"ensemble_claim"}}"#,
+            &c,
+        )
+        .unwrap();
         let body = format!(
             r#"{{"jsonrpc":"2.0","id":63,"method":"tools/call","params":{{"name":"ensemble_complete","arguments":{{"id":"{id}","outcome":"LANDED ensemble/tester/x"}}}}}}"#
         );
         let r = call(&body, &c).unwrap();
-        let p: Value = serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        let p: Value =
+            serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(p["completed"], true);
         assert_eq!(p["id"], id);
         // a terminal DONE record with our outcome actually landed in the shared ledger
-        let l = crate::ledger::Ledger::open(&tmp.path().join(".ensemble").join("ledger.db")).unwrap();
+        let l =
+            crate::ledger::Ledger::open(&tmp.path().join(".ensemble").join("ledger.db")).unwrap();
         let t = l.list().unwrap().into_iter().find(|t| t.id == id).unwrap();
         assert_eq!(t.state_str(), "done");
         assert_eq!(t.outcome.as_deref(), Some("LANDED ensemble/tester/x"));
@@ -1413,12 +2292,21 @@ mod tests {
             &ctx(tmp.path()),
         )
         .unwrap();
-        let p: Value = serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-        assert_eq!(p["completed"], false, "can't complete another member's task");
+        let p: Value =
+            serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            p["completed"], false,
+            "can't complete another member's task"
+        );
         assert!(p["detail"].is_string(), "explains why it didn't take: {p}");
         // the task is untouched: still claimed by the real owner, no outcome written
         let l = crate::ledger::Ledger::open(&db).unwrap();
-        let t = l.list().unwrap().into_iter().find(|t| t.id == "t1").unwrap();
+        let t = l
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id == "t1")
+            .unwrap();
         assert_eq!(t.state_str(), "claimed");
         assert_eq!(t.claimed_by.as_deref(), Some("other-member"));
         assert_eq!(t.outcome, None);
@@ -1433,7 +2321,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r["error"]["code"], -32602);
-        assert!(r["error"]["message"].as_str().unwrap().contains("outcome"), "names the missing field");
+        assert!(
+            r["error"]["message"].as_str().unwrap().contains("outcome"),
+            "names the missing field"
+        );
     }
 
     #[test]
@@ -1450,14 +2341,20 @@ mod tests {
                 serde_json::from_str(e["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
             ep["id"].as_str().unwrap().to_string()
         };
-        call(r#"{"jsonrpc":"2.0","id":67,"method":"tools/call","params":{"name":"ensemble_claim"}}"#, &c).unwrap();
+        call(
+            r#"{"jsonrpc":"2.0","id":67,"method":"tools/call","params":{"name":"ensemble_claim"}}"#,
+            &c,
+        )
+        .unwrap();
         let body = format!(
             r#"{{"jsonrpc":"2.0","id":68,"method":"tools/call","params":{{"name":"ensemble_fail","arguments":{{"id":"{id}","reason":"ESCALATED: tests never passed"}}}}}}"#
         );
         let r = call(&body, &c).unwrap();
-        let p: Value = serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        let p: Value =
+            serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(p["failed"], true);
-        let l = crate::ledger::Ledger::open(&tmp.path().join(".ensemble").join("ledger.db")).unwrap();
+        let l =
+            crate::ledger::Ledger::open(&tmp.path().join(".ensemble").join("ledger.db")).unwrap();
         let t = l.list().unwrap().into_iter().find(|t| t.id == id).unwrap();
         assert_eq!(t.state_str(), "failed");
         assert_eq!(t.outcome.as_deref(), Some("ESCALATED: tests never passed"));
@@ -1477,7 +2374,39 @@ mod tests {
     }
 
     fn ctx_with_runner(repo: &std::path::Path, runner: Arc<dyn CrewRunner>) -> Ctx {
-        Ctx { repo: repo.to_path_buf(), name: "tester".into(), runner: Some(runner) }
+        Ctx {
+            repo: repo.to_path_buf(),
+            name: "tester".into(),
+            team: "default".into(),
+            runner: Some(runner),
+            supervisor: None,
+        }
+    }
+
+    struct FakeSupervisor {
+        seen: std::sync::Mutex<Option<(SuperviseRequest, std::path::PathBuf, String)>>,
+        summary: SuperviseSummary,
+    }
+    impl SupervisorRunner for FakeSupervisor {
+        fn supervise(
+            &self,
+            req: SuperviseRequest,
+            repo: &std::path::Path,
+            caller: &str,
+        ) -> Result<SuperviseSummary, String> {
+            *self.seen.lock().unwrap() = Some((req, repo.to_path_buf(), caller.to_string()));
+            Ok(self.summary.clone())
+        }
+    }
+
+    fn ctx_with_supervisor(repo: &std::path::Path, supervisor: Arc<dyn SupervisorRunner>) -> Ctx {
+        Ctx {
+            repo: repo.to_path_buf(),
+            name: "tester".into(),
+            team: "default".into(),
+            runner: None,
+            supervisor: Some(supervisor),
+        }
     }
 
     fn tool_names(r: &Value) -> Vec<String> {
@@ -1494,7 +2423,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         // no runner → ensemble_run is NOT advertised: tools/list is a capability contract and must not
         // promise a tool a call would reject with -32603 (codex gate, slice 4b-ii).
-        let bare = call(r#"{"jsonrpc":"2.0","id":70,"method":"tools/list"}"#, &ctx(tmp.path())).unwrap();
+        let bare = call(
+            r#"{"jsonrpc":"2.0","id":70,"method":"tools/list"}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
         assert!(
             !tool_names(&bare).iter().any(|n| n == "ensemble_run"),
             "an unconfigured run must not be advertised"
@@ -1504,7 +2437,12 @@ mod tests {
         // with a runner wired → it IS advertised
         let fake = Arc::new(FakeRunner {
             seen: std::sync::Mutex::new(None),
-            summary: RunSummary { landed: true, rounds: 1, branch: None, detail: String::new() },
+            summary: RunSummary {
+                landed: true,
+                rounds: 1,
+                branch: None,
+                detail: String::new(),
+            },
         });
         let wired = call(
             r#"{"jsonrpc":"2.0","id":70,"method":"tools/list"}"#,
@@ -1515,6 +2453,81 @@ mod tests {
             tool_names(&wired).iter().any(|n| n == "ensemble_run"),
             "a configured runner advertises ensemble_run"
         );
+    }
+
+    #[test]
+    fn tools_list_advertises_supervise_only_when_supervisor_is_configured() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bare = call(
+            r#"{"jsonrpc":"2.0","id":75,"method":"tools/list"}"#,
+            &ctx(tmp.path()),
+        )
+        .unwrap();
+        assert!(
+            !tool_names(&bare).iter().any(|n| n == "ensemble_supervise"),
+            "an unconfigured supervisor must not be advertised"
+        );
+        let fake = Arc::new(FakeSupervisor {
+            seen: std::sync::Mutex::new(None),
+            summary: SuperviseSummary {
+                name: "run".into(),
+                team: "default".into(),
+                agent: "claude".into(),
+                recommendation: crate::SupervisorRecommendation::OnTrack,
+                reason: "ok".into(),
+                steer: None,
+                critical: false,
+                board_next: 1,
+                control_next: None,
+            },
+        });
+        let wired = call(
+            r#"{"jsonrpc":"2.0","id":76,"method":"tools/list"}"#,
+            &ctx_with_supervisor(tmp.path(), fake),
+        )
+        .unwrap();
+        assert!(
+            tool_names(&wired).iter().any(|n| n == "ensemble_supervise"),
+            "a configured supervisor advertises ensemble_supervise"
+        );
+    }
+
+    #[test]
+    fn supervise_tool_delegates_to_runner_and_shapes_summary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fake = Arc::new(FakeSupervisor {
+            seen: std::sync::Mutex::new(None),
+            summary: SuperviseSummary {
+                name: "run-1".into(),
+                team: "ops".into(),
+                agent: "codex".into(),
+                recommendation: crate::SupervisorRecommendation::Steer,
+                reason: "drifting".into(),
+                steer: Some("focus on Task 6".into()),
+                critical: false,
+                board_next: 3,
+                control_next: Some(1),
+            },
+        });
+        let c = ctx_with_supervisor(tmp.path(), fake.clone());
+
+        let r = call(
+            r#"{"jsonrpc":"2.0","id":77,"method":"tools/call","params":{"name":"ensemble_supervise","arguments":{"name":"run-1","team":"ops","agent":"codex","since":4,"applySteer":true}}}"#,
+            &c,
+        )
+        .unwrap();
+        let p = tool_payload(&r);
+        assert_eq!(p["recommendation"], "steer");
+        assert_eq!(p["controlNext"], 1);
+
+        let seen = fake.seen.lock().unwrap().clone().unwrap();
+        assert_eq!(seen.0.name, "run-1");
+        assert_eq!(seen.0.team.as_deref(), Some("ops"));
+        assert_eq!(seen.0.agent, "codex");
+        assert_eq!(seen.0.since, 4);
+        assert!(seen.0.apply_steer);
+        assert_eq!(seen.1, tmp.path());
+        assert_eq!(seen.2, "tester");
     }
 
     #[test]
@@ -1535,7 +2548,8 @@ mod tests {
             &c,
         )
         .unwrap();
-        let p: Value = serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        let p: Value =
+            serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(p["landed"], true);
         assert_eq!(p["rounds"], 2);
         assert_eq!(p["branch"], "ensemble/x");
@@ -1564,7 +2578,8 @@ mod tests {
             &c,
         )
         .unwrap();
-        let p: Value = serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        let p: Value =
+            serde_json::from_str(r["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(p["landed"], false);
         assert_eq!(p["rounds"], 3);
         assert_eq!(p["reason"], "tests never passed");
@@ -1576,7 +2591,12 @@ mod tests {
         // even WITH a runner present, a missing task is a client error (-32602) — checked before the run
         let fake = Arc::new(FakeRunner {
             seen: std::sync::Mutex::new(None),
-            summary: RunSummary { landed: true, rounds: 1, branch: None, detail: String::new() },
+            summary: RunSummary {
+                landed: true,
+                rounds: 1,
+                branch: None,
+                detail: String::new(),
+            },
         });
         let c = ctx_with_runner(tmp.path(), fake.clone());
         let r = call(
@@ -1586,7 +2606,10 @@ mod tests {
         .unwrap();
         assert_eq!(r["error"]["code"], -32602);
         assert!(r["error"]["message"].as_str().unwrap().contains("task"));
-        assert!(fake.seen.lock().unwrap().is_none(), "the runner was never invoked");
+        assert!(
+            fake.seen.lock().unwrap().is_none(),
+            "the runner was never invoked"
+        );
     }
 
     #[test]

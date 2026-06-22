@@ -145,7 +145,11 @@ mod tests {
         assert_eq!(all.len(), 2);
         assert!(all[0].contains(r#""ev":"a""#));
         assert!(all[1].contains(r#""ev":"b""#));
-        assert_eq!(f.read_since(1).unwrap().len(), 1, "cursor skips earlier lines");
+        assert_eq!(
+            f.read_since(1).unwrap().len(),
+            1,
+            "cursor skips earlier lines"
+        );
     }
 
     #[test]
@@ -161,7 +165,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let f = feed(tmp.path(), "s.ndjson");
         assert!(f.append("not json").is_err());
-        assert!(f.read_since(0).unwrap().is_empty(), "a rejected append must write nothing");
+        assert!(
+            f.read_since(0).unwrap().is_empty(),
+            "a rejected append must write nothing"
+        );
     }
 
     #[test]
@@ -171,10 +178,22 @@ mod tests {
         // These ARE valid JSON values, but they span lines. NDJSON splits on '\n', so on read-back each
         // would fracture into a DIFFERENT record (`[\n1\n]` → `1`, a pretty object → its inner string),
         // silently violating the one-record-per-line + cursor guarantees. They must be rejected outright.
-        assert!(f.append("[\n1\n]").is_err(), "multi-line array must be rejected");
-        assert!(f.append("{\n\"ev\":\"x\"\n}").is_err(), "pretty object must be rejected");
-        assert!(f.append("{\"ev\":\"a\"}\r\n{\"ev\":\"b\"}").is_err(), "embedded CRLF must be rejected");
-        assert!(f.read_since(0).unwrap().is_empty(), "a rejected multi-line append must write nothing");
+        assert!(
+            f.append("[\n1\n]").is_err(),
+            "multi-line array must be rejected"
+        );
+        assert!(
+            f.append("{\n\"ev\":\"x\"\n}").is_err(),
+            "pretty object must be rejected"
+        );
+        assert!(
+            f.append("{\"ev\":\"a\"}\r\n{\"ev\":\"b\"}").is_err(),
+            "embedded CRLF must be rejected"
+        );
+        assert!(
+            f.read_since(0).unwrap().is_empty(),
+            "a rejected multi-line append must write nothing"
+        );
         // a compact single-line value with a trailing newline is still fine (trailing-only is normalized)
         assert!(f.append("{\"ev\":\"ok\"}\n").is_ok());
         assert_eq!(f.read_since(0).unwrap().len(), 1);
@@ -186,10 +205,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let f = feed(tmp.path(), "s.ndjson");
         f.append(r#"{"ev":"first"}"#).unwrap();
-        let mut raw = std::fs::OpenOptions::new().append(true).open(f.path()).unwrap();
+        let mut raw = std::fs::OpenOptions::new()
+            .append(true)
+            .open(f.path())
+            .unwrap();
         raw.write_all(br#"{"ev":"torn"#).unwrap(); // partial line, no newline
         drop(raw);
-        assert_eq!(f.read_since(0).unwrap().len(), 1, "the torn partial line is skipped");
+        assert_eq!(
+            f.read_since(0).unwrap().len(),
+            1,
+            "the torn partial line is skipped"
+        );
         f.append(r#"{"ev":"third"}"#).unwrap();
         let all = f.read_since(0).unwrap();
         assert_eq!(all.len(), 2, "torn line skipped; both real records kept");
@@ -202,7 +228,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let f = feed(tmp.path(), "s.ndjson");
         f.append(r#"{"ev":"one"}"#).unwrap();
-        let mut raw = std::fs::OpenOptions::new().append(true).open(f.path()).unwrap();
+        let mut raw = std::fs::OpenOptions::new()
+            .append(true)
+            .open(f.path())
+            .unwrap();
         raw.write_all(&[0xff, 0xfe, b'\n']).unwrap(); // non-UTF-8 / non-JSON, newline-terminated
         drop(raw);
         f.append(r#"{"ev":"three"}"#).unwrap();

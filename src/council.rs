@@ -25,7 +25,11 @@ pub fn council_targets(local: &[String], mesh: &[(String, Vec<String>)]) -> Vec<
     for cli in local {
         let label = format!("{cli}@local");
         if seen.insert(label.clone()) {
-            out.push(CouncilTarget { agent: cli.clone(), node: None, label });
+            out.push(CouncilTarget {
+                agent: cli.clone(),
+                node: None,
+                label,
+            });
         }
     }
     for (url, agents) in mesh {
@@ -33,7 +37,11 @@ pub fn council_targets(local: &[String], mesh: &[(String, Vec<String>)]) -> Vec<
         for agent in agents {
             let label = format!("{agent}@{host}");
             if seen.insert(label.clone()) {
-                out.push(CouncilTarget { agent: agent.clone(), node: Some(url.clone()), label });
+                out.push(CouncilTarget {
+                    agent: agent.clone(),
+                    node: Some(url.clone()),
+                    label,
+                });
             }
         }
     }
@@ -60,9 +68,10 @@ pub fn short_host(url: &str) -> String {
         _ => s,
     };
     // an IPv4 (every dotted segment numeric) is kept whole; a DNS name → its first label
-    let is_ipv4 = host.contains('.') && host.split('.').all(|seg| {
-        !seg.is_empty() && seg.chars().all(|c| c.is_ascii_digit())
-    });
+    let is_ipv4 = host.contains('.')
+        && host
+            .split('.')
+            .all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_digit()));
     if is_ipv4 {
         host.to_string()
     } else {
@@ -100,12 +109,18 @@ mod tests {
         let t = council_targets(&local, &mesh);
         let labels: Vec<&str> = t.iter().map(|c| c.label.as_str()).collect();
         assert!(labels.contains(&"codex@local") && labels.contains(&"claude@local"));
-        assert!(labels.contains(&"codex@ayaneo") && labels.contains(&"agy@ayaneo"), "got {labels:?}");
+        assert!(
+            labels.contains(&"codex@ayaneo") && labels.contains(&"agy@ayaneo"),
+            "got {labels:?}"
+        );
         // a local cli has no node; a remote one carries the serve URL
         let local_codex = t.iter().find(|c| c.label == "codex@local").unwrap();
         assert_eq!(local_codex.node, None);
         let remote_codex = t.iter().find(|c| c.label == "codex@ayaneo").unwrap();
-        assert_eq!(remote_codex.node.as_deref(), Some("http://ayaneo.tailf31eff.ts.net:7878"));
+        assert_eq!(
+            remote_codex.node.as_deref(),
+            Some("http://ayaneo.tailf31eff.ts.net:7878")
+        );
         assert_eq!(remote_codex.agent, "codex");
     }
 
@@ -114,8 +129,14 @@ mod tests {
         // same host appearing twice (or a local cli listed twice) yields one target per (agent,host)
         let local = vec!["codex".to_string(), "codex".to_string()];
         let mesh = vec![
-            ("http://h.ts.net:7878".to_string(), vec!["claude".to_string()]),
-            ("http://h.ts.net:7878".to_string(), vec!["claude".to_string()]),
+            (
+                "http://h.ts.net:7878".to_string(),
+                vec!["claude".to_string()],
+            ),
+            (
+                "http://h.ts.net:7878".to_string(),
+                vec!["claude".to_string()],
+            ),
         ];
         let t = council_targets(&local, &mesh);
         assert_eq!(t.iter().filter(|c| c.label == "codex@local").count(), 1);
@@ -133,8 +154,14 @@ mod tests {
     #[test]
     fn render_council_shows_every_reply_and_a_tally() {
         let results = vec![
-            ("codex@local".to_string(), Ok("risk A: unbounded loop".to_string())),
-            ("agy@ayaneo".to_string(), Err("agy flaked: timed out".to_string())),
+            (
+                "codex@local".to_string(),
+                Ok("risk A: unbounded loop".to_string()),
+            ),
+            (
+                "agy@ayaneo".to_string(),
+                Err("agy flaked: timed out".to_string()),
+            ),
         ];
         let out = render_council(&results);
         assert!(out.contains("codex@local") && out.contains("risk A"));

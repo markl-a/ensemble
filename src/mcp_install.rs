@@ -48,6 +48,8 @@ pub struct InstallParams {
     pub exe: PathBuf,
     /// `--repo` for `ensemble mcp` (absolute path to the crew session repo).
     pub repo: PathBuf,
+    /// `--team` for `ensemble mcp`.
+    pub team: String,
     /// `--name` — this member's identity (server-set, never client-supplied at runtime).
     pub name: String,
     /// `--crew` — `mcp_runner` tolerates a missing file (then `ensemble_run` is simply not advertised).
@@ -56,12 +58,14 @@ pub struct InstallParams {
 
 impl InstallParams {
     /// The argv passed to the ensemble binary AFTER the exe path:
-    /// `mcp --repo <repo> --name <name> --crew <crew>`.
-    fn server_args(&self) -> Vec<String> {
+    /// `mcp --repo <repo> --team <team> --name <name> --crew <crew>`.
+    pub fn server_args(&self) -> Vec<String> {
         vec![
             "mcp".to_string(),
             "--repo".to_string(),
             self.repo.to_string_lossy().into_owned(),
+            "--team".to_string(),
+            self.team.clone(),
             "--name".to_string(),
             self.name.clone(),
             "--crew".to_string(),
@@ -106,22 +110,7 @@ pub fn config_path(client: ClientKind, repo: &Path, env: &Env) -> PathBuf {
 /// ledger claim-ownership + orphan-recover rely on (so it must NOT key on a per-launch counter). Across
 /// the fleet (one CLI per host) `<client>@<host>` is collision-free with zero coordination.
 pub fn default_member_name(client: ClientKind, raw_host: Option<&str>) -> String {
-    let short = raw_host
-        .map(|h| {
-            h.trim()
-                .split('.')
-                .next()
-                .unwrap_or("")
-                .chars()
-                .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-                .collect::<String>()
-                .to_ascii_lowercase()
-        })
-        .filter(|s| !s.is_empty());
-    match short {
-        Some(h) => format!("{}@{}", client.as_str(), h),
-        None => client.as_str().to_string(),
-    }
+    crate::team::default_member_name(client.as_str(), raw_host)
 }
 
 /// opencode's per-request MCP timeout defaults to 5s — far too short for a long `ensemble_run`/
@@ -141,6 +130,16 @@ pub fn render_merged(
         ClientKind::Claude => render_claude(existing, params),
         ClientKind::Opencode => render_opencode(existing, params),
         ClientKind::Codex => render_codex(existing, params),
+    }
+}
+
+/// Remove ensemble's MCP-server entry from an existing client config. Returns `None` when there is no
+/// ensemble entry to remove, so the caller can avoid rewriting unrelated config files.
+pub fn render_removed(client: ClientKind, existing: &str) -> Result<Option<String>, String> {
+    match client {
+        ClientKind::Claude => remove_json_object(existing, "mcpServers", "ensemble"),
+        ClientKind::Opencode => remove_json_object(existing, "mcp", "ensemble"),
+        ClientKind::Codex => remove_codex(existing),
     }
 }
 
@@ -187,7 +186,10 @@ fn merge_json_object(
         .as_object_mut()
         .ok_or_else(|| "existing config is not a JSON object".to_string())?;
     if fresh && add_schema {
-        obj.insert("$schema".to_string(), json!("https://opencode.ai/config.json"));
+        obj.insert(
+            "$schema".to_string(),
+            json!("https://opencode.ai/config.json"),
+        );
     }
     let servers = obj.entry(outer).or_insert_with(|| json!({}));
     let servers = servers
@@ -195,6 +197,32 @@ fn merge_json_object(
         .ok_or_else(|| format!("`{outer}` in existing config is not an object"))?;
     servers.insert(inner.to_string(), entry);
     Ok(serde_json::to_string_pretty(&root).map_err(|e| e.to_string())? + "\n")
+}
+
+fn remove_json_object(existing: &str, outer: &str, inner: &str) -> Result<Option<String>, String> {
+    if existing.trim().is_empty() {
+        return Ok(None);
+    }
+    let mut root: Value = serde_json::from_str(existing)
+        .map_err(|e| format!("existing config is not valid JSON: {e}"))?;
+    let obj = root
+        .as_object_mut()
+        .ok_or_else(|| "existing config is not a JSON object".to_string())?;
+    let Some(servers) = obj.get_mut(outer) else {
+        return Ok(None);
+    };
+    let servers = servers
+        .as_object_mut()
+        .ok_or_else(|| format!("`{outer}` in existing config is not an object"))?;
+    if servers.remove(inner).is_none() {
+        return Ok(None);
+    }
+    if servers.is_empty() {
+        obj.remove(outer);
+    }
+    Ok(Some(
+        serde_json::to_string_pretty(&root).map_err(|e| e.to_string())? + "\n",
+    ))
 }
 
 /// codex `config.toml`: STRUCTURALLY set `mcp_servers.ensemble.{command, args}` with `toml_edit`, which
@@ -240,6 +268,28 @@ fn render_codex(existing: &str, params: &InstallParams) -> Result<String, String
     Ok(doc.to_string())
 }
 
+fn remove_codex(existing: &str) -> Result<Option<String>, String> {
+    if existing.trim().is_empty() {
+        return Ok(None);
+    }
+    let mut doc: toml_edit::DocumentMut = existing
+        .parse()
+        .map_err(|e| format!("existing config is not valid TOML: {e}"))?;
+    let Some(servers) = doc.get_mut("mcp_servers") else {
+        return Ok(None);
+    };
+    let servers = servers
+        .as_table_mut()
+        .ok_or_else(|| "`mcp_servers` in existing config is not a table".to_string())?;
+    if servers.remove("ensemble").is_none() {
+        return Ok(None);
+    }
+    if servers.is_empty() {
+        doc.remove("mcp_servers");
+    }
+    Ok(Some(doc.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,6 +298,7 @@ mod tests {
         InstallParams {
             exe: PathBuf::from(r"C:\ctgt\ensemble\debug\ensemble.exe"),
             repo: PathBuf::from(r"D:\crewdemo"),
+            team: "ops".to_string(),
             name: "codex".to_string(),
             crew: PathBuf::from(r"D:\crewdemo\crew.toml"),
         }
@@ -255,22 +306,48 @@ mod tests {
 
     #[test]
     fn default_member_name_appends_short_lowercased_host() {
-        assert_eq!(default_member_name(ClientKind::Claude, Some("Z13")), "claude@z13");
-        assert_eq!(default_member_name(ClientKind::Codex, Some("z13.local")), "codex@z13", "domain stripped");
-        assert_eq!(default_member_name(ClientKind::Opencode, Some("  ayaneo \n")), "opencode@ayaneo", "trimmed");
+        assert_eq!(
+            default_member_name(ClientKind::Claude, Some("Z13")),
+            "claude@z13"
+        );
+        assert_eq!(
+            default_member_name(ClientKind::Codex, Some("z13.local")),
+            "codex@z13",
+            "domain stripped"
+        );
+        assert_eq!(
+            default_member_name(ClientKind::Opencode, Some("  ayaneo \n")),
+            "opencode@ayaneo",
+            "trimmed"
+        );
     }
 
     #[test]
     fn default_member_name_falls_back_to_bare_client_without_a_usable_host() {
-        assert_eq!(default_member_name(ClientKind::Claude, None), "claude", "no host → bare client");
-        assert_eq!(default_member_name(ClientKind::Claude, Some("")), "claude", "empty → bare");
-        assert_eq!(default_member_name(ClientKind::Claude, Some("...")), "claude", "all-stripped → bare");
+        assert_eq!(
+            default_member_name(ClientKind::Claude, None),
+            "claude",
+            "no host → bare client"
+        );
+        assert_eq!(
+            default_member_name(ClientKind::Claude, Some("")),
+            "claude",
+            "empty → bare"
+        );
+        assert_eq!(
+            default_member_name(ClientKind::Claude, Some("...")),
+            "claude",
+            "all-stripped → bare"
+        );
     }
 
     #[test]
     fn default_member_name_sanitizes_unexpected_chars() {
         // a name flows into board posts / ledger claimed_by / the baked --name arg, so keep it tame.
-        assert_eq!(default_member_name(ClientKind::Codex, Some("My Box!")), "codex@mybox");
+        assert_eq!(
+            default_member_name(ClientKind::Codex, Some("My Box!")),
+            "codex@mybox"
+        );
     }
 
     #[test]
@@ -279,27 +356,45 @@ mod tests {
         assert_eq!(ClientKind::parse("codex").unwrap(), ClientKind::Codex);
         assert_eq!(ClientKind::parse("opencode").unwrap(), ClientKind::Opencode);
         let err = ClientKind::parse("cursor").unwrap_err();
-        assert!(err.contains("cursor") && err.contains("claude"), "names the bad + the valid set: {err}");
+        assert!(
+            err.contains("cursor") && err.contains("claude"),
+            "names the bad + the valid set: {err}"
+        );
     }
 
     #[test]
     fn config_path_is_project_scoped_for_claude_and_opencode() {
-        let env = Env { home: PathBuf::from("/home/u"), codex_home: None };
+        let env = Env {
+            home: PathBuf::from("/home/u"),
+            codex_home: None,
+        };
         let repo = Path::new("/work/repo");
-        assert_eq!(config_path(ClientKind::Claude, repo, &env), repo.join(".mcp.json"));
-        assert_eq!(config_path(ClientKind::Opencode, repo, &env), repo.join("opencode.json"));
+        assert_eq!(
+            config_path(ClientKind::Claude, repo, &env),
+            repo.join(".mcp.json")
+        );
+        assert_eq!(
+            config_path(ClientKind::Opencode, repo, &env),
+            repo.join("opencode.json")
+        );
     }
 
     #[test]
     fn config_path_codex_uses_home_then_codex_home_override() {
         let repo = Path::new("/work/repo");
-        let env = Env { home: PathBuf::from("/home/u"), codex_home: None };
+        let env = Env {
+            home: PathBuf::from("/home/u"),
+            codex_home: None,
+        };
         assert_eq!(
             config_path(ClientKind::Codex, repo, &env),
             PathBuf::from("/home/u/.codex/config.toml"),
             "default is <home>/.codex/config.toml"
         );
-        let env2 = Env { home: PathBuf::from("/home/u"), codex_home: Some(PathBuf::from("/custom/codex")) };
+        let env2 = Env {
+            home: PathBuf::from("/home/u"),
+            codex_home: Some(PathBuf::from("/custom/codex")),
+        };
         assert_eq!(
             config_path(ClientKind::Codex, repo, &env2),
             PathBuf::from("/custom/codex/config.toml"),
@@ -313,8 +408,26 @@ mod tests {
         let v: Value = serde_json::from_str(&out).unwrap();
         let e = &v["mcpServers"]["ensemble"];
         assert_eq!(e["command"], r"C:\ctgt\ensemble\debug\ensemble.exe");
-        let args: Vec<&str> = e["args"].as_array().unwrap().iter().map(|x| x.as_str().unwrap()).collect();
-        assert_eq!(args, ["mcp", "--repo", r"D:\crewdemo", "--name", "codex", "--crew", r"D:\crewdemo\crew.toml"]);
+        let args: Vec<&str> = e["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "mcp",
+                "--repo",
+                r"D:\crewdemo",
+                "--team",
+                "ops",
+                "--name",
+                "codex",
+                "--crew",
+                r"D:\crewdemo\crew.toml",
+            ]
+        );
     }
 
     #[test]
@@ -322,7 +435,10 @@ mod tests {
         let existing = r#"{ "mcpServers": { "other": { "command": "x" } }, "foo": 1 }"#;
         let out = render_merged(ClientKind::Claude, existing, &params()).unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(v["mcpServers"]["other"]["command"], "x", "existing server kept");
+        assert_eq!(
+            v["mcpServers"]["other"]["command"], "x",
+            "existing server kept"
+        );
         assert!(v["mcpServers"]["ensemble"].is_object(), "ensemble added");
         assert_eq!(v["foo"], 1, "unrelated keys kept");
     }
@@ -333,7 +449,32 @@ mod tests {
         let twice = render_merged(ClientKind::Claude, &once, &params()).unwrap();
         assert_eq!(once, twice, "re-installing is a no-op, never duplicates");
         let v: Value = serde_json::from_str(&twice).unwrap();
-        assert_eq!(v["mcpServers"].as_object().unwrap().len(), 1, "exactly one server");
+        assert_eq!(
+            v["mcpServers"].as_object().unwrap().len(),
+            1,
+            "exactly one server"
+        );
+    }
+
+    #[test]
+    fn claude_remove_deletes_only_ensemble_server() {
+        let existing = r#"{ "mcpServers": { "ensemble": { "command": "old" }, "other": { "command": "x" } }, "foo": 1 }"#;
+        let out = render_removed(ClientKind::Claude, existing)
+            .unwrap()
+            .unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert!(v["mcpServers"]["ensemble"].is_null());
+        assert_eq!(v["mcpServers"]["other"]["command"], "x");
+        assert_eq!(v["foo"], 1);
+    }
+
+    #[test]
+    fn json_remove_is_noop_when_ensemble_entry_is_absent() {
+        assert!(
+            render_removed(ClientKind::Claude, r#"{ "mcpServers": { "other": {} } }"#)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -349,10 +490,34 @@ mod tests {
         let e = &v["mcp"]["ensemble"];
         assert_eq!(e["type"], "local");
         assert_eq!(e["enabled"], true);
-        assert_eq!(e["timeout"], 600_000, "long timeout so ensemble_run isn't killed at opencode's 5s default");
-        let cmd: Vec<&str> = e["command"].as_array().unwrap().iter().map(|x| x.as_str().unwrap()).collect();
-        assert_eq!(cmd[0], r"C:\ctgt\ensemble\debug\ensemble.exe", "exe is command[0]");
-        assert_eq!(&cmd[1..], ["mcp", "--repo", r"D:\crewdemo", "--name", "codex", "--crew", r"D:\crewdemo\crew.toml"]);
+        assert_eq!(
+            e["timeout"], 600_000,
+            "long timeout so ensemble_run isn't killed at opencode's 5s default"
+        );
+        let cmd: Vec<&str> = e["command"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            cmd[0], r"C:\ctgt\ensemble\debug\ensemble.exe",
+            "exe is command[0]"
+        );
+        assert_eq!(
+            &cmd[1..],
+            [
+                "mcp",
+                "--repo",
+                r"D:\crewdemo",
+                "--team",
+                "ops",
+                "--name",
+                "codex",
+                "--crew",
+                r"D:\crewdemo\crew.toml",
+            ]
+        );
     }
 
     #[test]
@@ -365,13 +530,45 @@ mod tests {
     }
 
     #[test]
+    fn opencode_remove_deletes_mcp_outer_when_empty() {
+        let existing = r#"{ "$schema": "https://opencode.ai/config.json", "mcp": { "ensemble": { "type": "local" } } }"#;
+        let out = render_removed(ClientKind::Opencode, existing)
+            .unwrap()
+            .unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert!(v["mcp"].is_null(), "empty mcp object removed");
+        assert_eq!(v["$schema"], "https://opencode.ai/config.json");
+    }
+
+    #[test]
     fn codex_render_into_empty_creates_a_valid_table() {
         let out = render_merged(ClientKind::Codex, "", &params()).unwrap();
         let v: toml::Value = toml::from_str(&out).unwrap();
         let srv = &v["mcp_servers"]["ensemble"];
-        assert_eq!(srv["command"].as_str().unwrap(), r"C:\ctgt\ensemble\debug\ensemble.exe");
-        let args: Vec<&str> = srv["args"].as_array().unwrap().iter().map(|x| x.as_str().unwrap()).collect();
-        assert_eq!(args, ["mcp", "--repo", r"D:\crewdemo", "--name", "codex", "--crew", r"D:\crewdemo\crew.toml"]);
+        assert_eq!(
+            srv["command"].as_str().unwrap(),
+            r"C:\ctgt\ensemble\debug\ensemble.exe"
+        );
+        let args: Vec<&str> = srv["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "mcp",
+                "--repo",
+                r"D:\crewdemo",
+                "--team",
+                "ops",
+                "--name",
+                "codex",
+                "--crew",
+                r"D:\crewdemo\crew.toml",
+            ]
+        );
     }
 
     #[test]
@@ -383,28 +580,74 @@ mod tests {
         assert!(once.contains("model = \"gpt-5\""));
         assert!(once.contains("[plugins.foo]"));
         let v: toml::Value = toml::from_str(&once).unwrap();
-        assert_eq!(v["mcp_servers"]["ensemble"]["command"].as_str().unwrap(), r"C:\ctgt\ensemble\debug\ensemble.exe");
+        assert_eq!(
+            v["mcp_servers"]["ensemble"]["command"].as_str().unwrap(),
+            r"C:\ctgt\ensemble\debug\ensemble.exe"
+        );
         // idempotent: re-installing identical params is a byte-for-byte no-op, exactly one table
         let twice = render_merged(ClientKind::Codex, &once, &params()).unwrap();
         assert_eq!(once, twice, "re-install is a no-op");
-        assert_eq!(twice.matches("[mcp_servers.ensemble]").count(), 1, "exactly one table");
+        assert_eq!(
+            twice.matches("[mcp_servers.ensemble]").count(),
+            1,
+            "exactly one table"
+        );
     }
 
     #[test]
     fn codex_render_updates_in_place_and_keeps_extra_user_fields() {
         // a prior server entry with an EXTRA user field: re-install with a new name updates command/args
         // in place but PRESERVES the extra field and adds no second table.
-        let existing = "[mcp_servers.ensemble]\ncommand = 'old'\nargs = []\nstartup_timeout_ms = 20000\n";
+        let existing =
+            "[mcp_servers.ensemble]\ncommand = 'old'\nargs = []\nstartup_timeout_ms = 20000\n";
         let mut p2 = params();
         p2.name = "codex-2".to_string();
         let out = render_merged(ClientKind::Codex, existing, &p2).unwrap();
         assert_eq!(out.matches("[mcp_servers.ensemble]").count(), 1);
         let v: toml::Value = toml::from_str(&out).unwrap();
         let srv = &v["mcp_servers"]["ensemble"];
-        assert_eq!(srv["command"].as_str().unwrap(), r"C:\ctgt\ensemble\debug\ensemble.exe", "command updated");
-        let args: Vec<&str> = srv["args"].as_array().unwrap().iter().map(|x| x.as_str().unwrap()).collect();
-        assert!(args.contains(&"codex-2"), "args updated to the new name: {args:?}");
-        assert_eq!(srv["startup_timeout_ms"].as_integer().unwrap(), 20000, "the user's extra field is preserved");
+        assert_eq!(
+            srv["command"].as_str().unwrap(),
+            r"C:\ctgt\ensemble\debug\ensemble.exe",
+            "command updated"
+        );
+        let args: Vec<&str> = srv["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap())
+            .collect();
+        assert!(
+            args.contains(&"codex-2"),
+            "args updated to the new name: {args:?}"
+        );
+        assert_eq!(
+            srv["startup_timeout_ms"].as_integer().unwrap(),
+            20000,
+            "the user's extra field is preserved"
+        );
+    }
+
+    #[test]
+    fn codex_remove_deletes_ensemble_table_and_keeps_other_content() {
+        let existing = "# config\nmodel = \"gpt-5\"\n\n[mcp_servers.ensemble]\ncommand = 'old'\nargs = []\n\n[plugins.foo]\nenabled = true\n";
+        let out = render_removed(ClientKind::Codex, existing)
+            .unwrap()
+            .unwrap();
+        assert!(out.contains("# config"));
+        assert!(out.contains("model = \"gpt-5\""));
+        assert!(out.contains("[plugins.foo]"));
+        assert!(!out.contains("[mcp_servers.ensemble]"));
+        let v: toml::Value = toml::from_str(&out).unwrap();
+        assert!(v.get("mcp_servers").is_none());
+    }
+
+    #[test]
+    fn codex_remove_is_noop_without_ensemble_entry() {
+        let existing = "model = \"gpt-5\"\n[mcp_servers.other]\ncommand = 'x'\n";
+        assert!(render_removed(ClientKind::Codex, existing)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -416,9 +659,15 @@ mod tests {
     #[test]
     fn codex_render_refuses_a_non_table_mcp_servers() {
         // a scalar `mcp_servers` (or `mcp_servers.ensemble`) must NOT be indexed-through and clobbered.
-        let err = render_merged(ClientKind::Codex, "mcp_servers = \"oops\"\n", &params()).unwrap_err();
+        let err =
+            render_merged(ClientKind::Codex, "mcp_servers = \"oops\"\n", &params()).unwrap_err();
         assert!(err.contains("not a table"), "got: {err}");
-        let err2 = render_merged(ClientKind::Codex, "[mcp_servers]\nensemble = 1\n", &params()).unwrap_err();
+        let err2 = render_merged(
+            ClientKind::Codex,
+            "[mcp_servers]\nensemble = 1\n",
+            &params(),
+        )
+        .unwrap_err();
         assert!(err2.contains("not a table"), "got: {err2}");
     }
 
@@ -430,7 +679,14 @@ mod tests {
         let out = render_merged(ClientKind::Codex, "", &p).unwrap();
         let v: toml::Value = toml::from_str(&out).expect("valid TOML");
         let args: Vec<&str> = v["mcp_servers"]["ensemble"]["args"]
-            .as_array().unwrap().iter().map(|x| x.as_str().unwrap()).collect();
-        assert!(args.contains(&"a\"b\nc"), "the weird name round-trips: {args:?}");
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap())
+            .collect();
+        assert!(
+            args.contains(&"a\"b\nc"),
+            "the weird name round-trips: {args:?}"
+        );
     }
 }

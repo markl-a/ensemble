@@ -30,8 +30,13 @@ pub struct FileBoard {
 impl FileBoard {
     /// The board for `repo` lives at `<repo>/.ensemble/board.jsonl`.
     pub fn open(repo: &Path) -> Self {
+        Self::open_at(&repo.join(".ensemble"))
+    }
+
+    /// The board for an already-resolved ensemble state root.
+    pub fn open_at(root: &Path) -> Self {
         Self {
-            path: repo.join(".ensemble").join("board.jsonl"),
+            path: root.join("board.jsonl"),
         }
     }
 
@@ -188,14 +193,20 @@ mod tests {
         let huge = "x".repeat(5000);
         b.post("agy", "finding", &huge).unwrap();
         let got = &b.read_since(0).unwrap()[0].body;
-        assert!(got.chars().count() <= MAX_BODY + 1, "body excerpted, got {}", got.chars().count());
+        assert!(
+            got.chars().count() <= MAX_BODY + 1,
+            "body excerpted, got {}",
+            got.chars().count()
+        );
         assert!(got.ends_with('…'));
     }
 
     #[test]
     fn separate_handles_share_the_same_repo_board() {
         let tmp = tempfile::tempdir().unwrap();
-        FileBoard::open(tmp.path()).post("a", "question", "anyone on auth?").unwrap();
+        FileBoard::open(tmp.path())
+            .post("a", "question", "anyone on auth?")
+            .unwrap();
         let seen = FileBoard::open(tmp.path()).read_since(0).unwrap();
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].body, "anyone on auth?");
@@ -208,15 +219,25 @@ mod tests {
         b.post("a", "result", "first").unwrap();
         // simulate a crash mid-append: a partial line with NO trailing newline
         {
-            let mut f = std::fs::OpenOptions::new().append(true).open(b.path()).unwrap();
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(b.path())
+                .unwrap();
             f.write_all(b"{\"from\":\"x\",\"kind\":\"resul").unwrap();
         }
-        assert_eq!(b.read_since(0).unwrap().len(), 1, "the torn partial line is skipped");
+        assert_eq!(
+            b.read_since(0).unwrap().len(),
+            1,
+            "the torn partial line is skipped"
+        );
         // the NEXT post must not be welded onto the partial bytes and lost
         b.post("c", "verdict", "third").unwrap();
         let all = b.read_since(0).unwrap();
         let bodies: Vec<&str> = all.iter().map(|m| m.body.as_str()).collect();
-        assert!(bodies.contains(&"first") && bodies.contains(&"third"), "got {bodies:?}");
+        assert!(
+            bodies.contains(&"first") && bodies.contains(&"third"),
+            "got {bodies:?}"
+        );
         assert_eq!(all.len(), 2, "torn line skipped; both real messages kept");
     }
 
@@ -227,11 +248,19 @@ mod tests {
         b.post("a", "result", "one").unwrap();
         // a non-UTF-8 / malformed line in the MIDDLE (properly newline-terminated)
         {
-            let mut f = std::fs::OpenOptions::new().append(true).open(b.path()).unwrap();
+            let mut f = std::fs::OpenOptions::new()
+                .append(true)
+                .open(b.path())
+                .unwrap();
             f.write_all(&[0xff, 0xfe, b'\n']).unwrap();
         }
         b.post("c", "result", "three").unwrap();
-        let bodies: Vec<String> = b.read_since(0).unwrap().iter().map(|m| m.body.clone()).collect();
+        let bodies: Vec<String> = b
+            .read_since(0)
+            .unwrap()
+            .iter()
+            .map(|m| m.body.clone())
+            .collect();
         assert!(
             bodies.iter().any(|s| s == "one") && bodies.iter().any(|s| s == "three"),
             "a bad middle line must not stop the scan: {bodies:?}"
@@ -269,7 +298,11 @@ mod tests {
         // concurrency: no two posts claim the same `next`, and none skips another.
         let mut got = cursors.into_inner().unwrap_or_else(|e| e.into_inner());
         got.sort();
-        assert_eq!(got, (1..=20).collect::<Vec<_>>(), "cursors are a gap-free permutation of 1..=20");
+        assert_eq!(
+            got,
+            (1..=20).collect::<Vec<_>>(),
+            "cursors are a gap-free permutation of 1..=20"
+        );
     }
 
     #[test]
@@ -281,11 +314,18 @@ mod tests {
         let b = FileBoard::open(tmp.path());
         let c1 = b.post("a", "result", "first").unwrap();
         assert_eq!(c1, 1, "cursor sits one past my own message");
-        assert!(b.read_since(c1).unwrap().is_empty(), "nothing posted after me yet");
+        assert!(
+            b.read_since(c1).unwrap().is_empty(),
+            "nothing posted after me yet"
+        );
         let c2 = b.post("b", "result", "second").unwrap();
         assert_eq!(c2, 2);
         let after_me = b.read_since(c1).unwrap();
-        assert_eq!(after_me.len(), 1, "reading from my cursor yields exactly the later message");
+        assert_eq!(
+            after_me.len(),
+            1,
+            "reading from my cursor yields exactly the later message"
+        );
         assert_eq!(after_me[0].body, "second", "no skip, no dup of my own post");
     }
 
@@ -295,7 +335,11 @@ mod tests {
         let b = FileBoard::open(tmp.path());
         b.post("a", &"k".repeat(500), "body").unwrap();
         let got = &b.read_since(0).unwrap()[0].kind;
-        assert!(got.chars().count() <= MAX_KIND + 1, "kind excerpted, got {}", got.chars().count());
+        assert!(
+            got.chars().count() <= MAX_KIND + 1,
+            "kind excerpted, got {}",
+            got.chars().count()
+        );
         assert!(got.ends_with('…'));
     }
 }

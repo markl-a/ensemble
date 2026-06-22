@@ -93,11 +93,7 @@ impl Conductor {
     /// Whether the operator has aborted (firewall B). A driver loop (e.g. `dispatch`) checks this to
     /// stop claiming new work rather than fail-marking the whole queue.
     pub fn aborted(&self) -> bool {
-        self.abort.load(Ordering::Relaxed)
-            || self
-                .control
-                .as_ref()
-                .is_some_and(|c| c.aborted())
+        self.abort.load(Ordering::Relaxed) || self.control.as_ref().is_some_and(|c| c.aborted())
     }
 
     fn adapter_for_role(&self, role: &str) -> Option<&dyn Adapter> {
@@ -140,7 +136,12 @@ impl Conductor {
             // ── Firewall B: abort (Ctrl-C OR control plane) + wall-clock budget, at each round boundary ──
             if self.aborted() {
                 let hard = self.control.as_ref().is_some_and(|c| c.hard());
-                self.note(&mut bb, "operator", "interrupted", if hard { "hard abort" } else { "abort" });
+                self.note(
+                    &mut bb,
+                    "operator",
+                    "interrupted",
+                    if hard { "hard abort" } else { "abort" },
+                );
                 return RunOutcome {
                     decision: Decision::Escalated("aborted by operator".to_string()),
                     rounds: round,
@@ -274,7 +275,9 @@ impl Conductor {
                     .get(role)
                     .map(|r| r.agent.clone())
                     .unwrap_or_default();
-                let mut result = self.adapter_for_role(role).map(|a| self.run_adapter(a, &prompt, cwd));
+                let mut result = self
+                    .adapter_for_role(role)
+                    .map(|a| self.run_adapter(a, &prompt, cwd));
                 let mut effective_agent = agent_name.clone();
 
                 if matches!(result, Some(Err(_))) {
@@ -282,7 +285,9 @@ impl Conductor {
                         OnFlake::Exclude => {}
                         OnFlake::Retry => {
                             self.note(&mut bb, role, "finding", "reviewer flaked — retrying once");
-                            result = self.adapter_for_role(role).map(|a| self.run_adapter(a, &prompt, cwd));
+                            result = self
+                                .adapter_for_role(role)
+                                .map(|a| self.run_adapter(a, &prompt, cwd));
                         }
                         OnFlake::Substitute => {
                             if let Some(backup) = self.crew.backup_for(&agent_name) {
@@ -314,7 +319,12 @@ impl Conductor {
                         });
                     }
                     Some(Err(e)) => {
-                        self.note(&mut bb, role, "finding", &format!("reviewer excluded — flaked: {e}"));
+                        self.note(
+                            &mut bb,
+                            role,
+                            "finding",
+                            &format!("reviewer excluded — flaked: {e}"),
+                        );
                     }
                     None => {
                         self.note(
@@ -335,7 +345,12 @@ impl Conductor {
                     // — we don't discard completed work for the wall-clock net.
                     if self.aborted() {
                         let hard = self.control.as_ref().is_some_and(|c| c.hard());
-                        self.note(&mut bb, "operator", "interrupted", if hard { "hard abort" } else { "abort" });
+                        self.note(
+                            &mut bb,
+                            "operator",
+                            "interrupted",
+                            if hard { "hard abort" } else { "abort" },
+                        );
                         return RunOutcome {
                             decision: Decision::Escalated("aborted by operator".to_string()),
                             rounds: round + 1,
@@ -352,20 +367,30 @@ impl Conductor {
                     };
                 }
                 GateDecision::Escalate(why) => {
-                    self.note(&mut bb, "conductor", "decision", &format!("escalated: {why}"));
+                    self.note(
+                        &mut bb,
+                        "conductor",
+                        "decision",
+                        &format!("escalated: {why}"),
+                    );
                     return RunOutcome {
                         decision: Decision::Escalated(why),
                         rounds: round + 1,
                         blackboard: bb,
                         branch: None,
-                    }
+                    };
                 }
                 GateDecision::Iterate(changes) => {
                     feedback = changes;
                 }
             }
         }
-        self.note(&mut bb, "conductor", "decision", "escalated: max rounds reached");
+        self.note(
+            &mut bb,
+            "conductor",
+            "decision",
+            "escalated: max rounds reached",
+        );
         RunOutcome {
             decision: Decision::Escalated("max rounds reached".to_string()),
             rounds: max,
@@ -413,8 +438,12 @@ impl Conductor {
                     Decision::Landed => ("landed", out.branch.clone().unwrap_or_default()),
                     Decision::Escalated(why) => ("escalated", why.clone()),
                 };
-                let jsonl =
-                    crate::journal::render(out.blackboard.read_since(0), outcome, &detail, out.rounds);
+                let jsonl = crate::journal::render(
+                    out.blackboard.read_since(0),
+                    outcome,
+                    &detail,
+                    out.rounds,
+                );
                 let _ = crate::journal::write_run(repo, wt.slug(), &jsonl);
                 out // wt drops → worktree removed; branch kept iff we called keep()
             }
@@ -541,7 +570,10 @@ mod tests {
         struct Rec(Arc<Mutex<Vec<(String, String)>>>);
         impl RunObserver for Rec {
             fn post(&self, m: &crate::blackboard::Message) {
-                self.0.lock().unwrap().push((m.from.clone(), m.kind.clone()));
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((m.from.clone(), m.kind.clone()));
             }
         }
 
@@ -556,25 +588,63 @@ mod tests {
             },
             pipeline: vec!["implement".to_string(), "review".to_string()],
             roles: HashMap::from([
-                ("implement".to_string(), RoleConfig { agent: "impl".to_string(), blind: false }),
-                ("review".to_string(), RoleConfig { agent: "rev".to_string(), blind: false }),
+                (
+                    "implement".to_string(),
+                    RoleConfig {
+                        agent: "impl".to_string(),
+                        blind: false,
+                    },
+                ),
+                (
+                    "review".to_string(),
+                    RoleConfig {
+                        agent: "rev".to_string(),
+                        blind: false,
+                    },
+                ),
             ]),
             agents: HashMap::new(),
             test: None,
         };
         let mut adapters: HashMap<String, Box<dyn Adapter>> = HashMap::new();
-        adapters.insert("impl".to_string(), Box::new(MockAdapter::new("impl", vec![Ok("implemented it".to_string())])));
-        adapters.insert("rev".to_string(), Box::new(MockAdapter::new("rev", vec![Ok("VERDICT: LGTM".to_string())])));
+        adapters.insert(
+            "impl".to_string(),
+            Box::new(MockAdapter::new(
+                "impl",
+                vec![Ok("implemented it".to_string())],
+            )),
+        );
+        adapters.insert(
+            "rev".to_string(),
+            Box::new(MockAdapter::new(
+                "rev",
+                vec![Ok("VERDICT: LGTM".to_string())],
+            )),
+        );
 
         let log = Arc::new(Mutex::new(Vec::new()));
         let c = Conductor::new(crew, adapters).with_stream(Box::new(Rec(log.clone())));
         let out = c.run("do the thing", std::path::Path::new("."));
-        assert!(matches!(out.decision, Decision::Landed), "should land: {:?}", out.decision);
+        assert!(
+            matches!(out.decision, Decision::Landed),
+            "should land: {:?}",
+            out.decision
+        );
 
         let seen = log.lock().unwrap().clone();
-        assert!(seen.iter().any(|(f, k)| f == "impl" && k == "result"), "implementer result streamed: {seen:?}");
-        assert!(seen.iter().any(|(f, k)| f == "rev" && k == "verdict"), "reviewer verdict streamed: {seen:?}");
-        assert!(seen.iter().any(|(f, k)| f == "conductor" && k == "decision"), "terminal decision streamed: {seen:?}");
+        assert!(
+            seen.iter().any(|(f, k)| f == "impl" && k == "result"),
+            "implementer result streamed: {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|(f, k)| f == "rev" && k == "verdict"),
+            "reviewer verdict streamed: {seen:?}"
+        );
+        assert!(
+            seen.iter()
+                .any(|(f, k)| f == "conductor" && k == "decision"),
+            "terminal decision streamed: {seen:?}"
+        );
     }
 
     // ---- S1b control-plane tests ----
@@ -583,11 +653,29 @@ mod tests {
         use crate::crew::{CrewConfig, GatePolicy, OnFlake, RoleConfig};
         use std::collections::HashMap;
         CrewConfig {
-            gate: GatePolicy { min_approvals, max_rounds: 1, on_flake: OnFlake::Exclude, stall_limit: 0, max_task_secs: 0 },
+            gate: GatePolicy {
+                min_approvals,
+                max_rounds: 1,
+                on_flake: OnFlake::Exclude,
+                stall_limit: 0,
+                max_task_secs: 0,
+            },
             pipeline: vec!["implement".to_string(), "review".to_string()],
             roles: HashMap::from([
-                ("implement".to_string(), RoleConfig { agent: "impl".to_string(), blind: false }),
-                ("review".to_string(), RoleConfig { agent: "rev".to_string(), blind: false }),
+                (
+                    "implement".to_string(),
+                    RoleConfig {
+                        agent: "impl".to_string(),
+                        blind: false,
+                    },
+                ),
+                (
+                    "review".to_string(),
+                    RoleConfig {
+                        agent: "rev".to_string(),
+                        blind: false,
+                    },
+                ),
             ]),
             agents: HashMap::new(),
             test: None,
@@ -613,19 +701,37 @@ mod tests {
             }
             fn run(&self, prompt: &str, _cwd: &Path) -> Result<AgentOutput, AdapterError> {
                 self.prompts.lock().unwrap().push(prompt.to_string());
-                Ok(AgentOutput { agent: "impl".to_string(), text: "did it".to_string() })
+                Ok(AgentOutput {
+                    agent: "impl".to_string(),
+                    text: "did it".to_string(),
+                })
             }
         }
         let prompts = Arc::new(Mutex::new(Vec::new()));
         let mut adapters: HashMap<String, Box<dyn Adapter>> = HashMap::new();
-        adapters.insert("impl".to_string(), Box::new(Recorder { prompts: prompts.clone() }));
-        adapters.insert("rev".to_string(), Box::new(MockAdapter::new("rev", vec![Ok("VERDICT: LGTM".to_string())])));
+        adapters.insert(
+            "impl".to_string(),
+            Box::new(Recorder {
+                prompts: prompts.clone(),
+            }),
+        );
+        adapters.insert(
+            "rev".to_string(),
+            Box::new(MockAdapter::new(
+                "rev",
+                vec![Ok("VERDICT: LGTM".to_string())],
+            )),
+        );
 
         let ctrl = Arc::new(ControlState::default());
         ctrl.push_steer("FOCUS-ON-ERROR-HANDLING"); // seed a steer before the run
         let c = Conductor::new(impl_review_crew(1), adapters).with_control(ctrl);
         let out = c.run("do the thing", Path::new("."));
-        assert!(matches!(out.decision, Decision::Landed), "should land: {:?}", out.decision);
+        assert!(
+            matches!(out.decision, Decision::Landed),
+            "should land: {:?}",
+            out.decision
+        );
         let seen = prompts.lock().unwrap();
         assert!(
             seen.iter().any(|p| p.contains("FOCUS-ON-ERROR-HANDLING")),
@@ -647,12 +753,24 @@ mod tests {
         struct Rec(Arc<Mutex<Vec<(String, String)>>>);
         impl RunObserver for Rec {
             fn post(&self, m: &Message) {
-                self.0.lock().unwrap().push((m.from.clone(), m.kind.clone()));
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((m.from.clone(), m.kind.clone()));
             }
         }
         let mut adapters: HashMap<String, Box<dyn Adapter>> = HashMap::new();
-        adapters.insert("impl".to_string(), Box::new(MockAdapter::new("impl", vec![Ok("x".to_string())])));
-        adapters.insert("rev".to_string(), Box::new(MockAdapter::new("rev", vec![Ok("VERDICT: LGTM".to_string())])));
+        adapters.insert(
+            "impl".to_string(),
+            Box::new(MockAdapter::new("impl", vec![Ok("x".to_string())])),
+        );
+        adapters.insert(
+            "rev".to_string(),
+            Box::new(MockAdapter::new(
+                "rev",
+                vec![Ok("VERDICT: LGTM".to_string())],
+            )),
+        );
 
         let ctrl = Arc::new(ControlState::default());
         ctrl.abort_flag().store(true, Ordering::Relaxed); // operator already aborted (clean)
@@ -667,6 +785,10 @@ mod tests {
             out.decision
         );
         let seen = log.lock().unwrap();
-        assert!(seen.iter().any(|(f, k)| f == "operator" && k == "interrupted"), "interrupted streamed: {seen:?}");
+        assert!(
+            seen.iter()
+                .any(|(f, k)| f == "operator" && k == "interrupted"),
+            "interrupted streamed: {seen:?}"
+        );
     }
 }

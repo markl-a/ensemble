@@ -22,12 +22,17 @@ const USAGE: &str = "usage:\n  \
     ensemble mesh   (this node's CLIs + which agents each tailnet peer hosts)\n  \
     ensemble doctor   (check this machine is ready: which AI CLIs + tailscale are on PATH, is-git-repo)\n  \
     ensemble agent <name> \"<task>\" [--node auto|<host>] [--repo <path>] [--json]   (delegate ONE turn to one CLI)\n  \
+    ensemble [--repo <path>] [--team <name>] [--member <member>] [--confirm-policy ask|approve|deny] [--print-config] <codex|claude|opencode> [vendor args...]\n  \
+    ensemble [--repo <path>] [--team <name>] [--member <member>] [--timeout <secs>] [--confirm-policy ask|approve|deny] [--print-prompt] [--json] agy [vendor args...]   (no prompt: interactive; --prompt/-p: bounded team turn)\n  \
     ensemble merge <branch> [--into <target>] [--repo <path>] [--resolver <agent>]   (land a kept branch; conflict → escalate, or --resolver runs ONE AI round)\n  \
     ensemble serve [--bind <addr>]   (default: this node's tailnet IP:7878; loopback if no tailnet)\n  \
     ensemble up [--bind <addr>]   (quick start: show the mesh, then serve in the foreground)\n  \
-    ensemble mcp [--repo <path>] [--name <agent>] [--crew <crew.toml>]   (stdio MCP server: make a LIVE CLI a crew member — mesh + board + queue + worktree + merge + run)\n  \
-    ensemble mcp install --client <claude|codex|opencode> [--repo <p>] [--name <id>] [--exe <p>] [--crew <p>] [--config <p>] [--print]   (one-click: register `ensemble mcp` into that CLI's config)\n  \
+    ensemble mcp [--repo <path>] [--team <name>] [--name <agent>] [--crew <crew.toml>]   (stdio MCP server: make a LIVE CLI a crew member — mesh + board + queue + worktree + merge + run)\n  \
+    ensemble mcp install --client <claude|codex|opencode> [--repo <p>] [--team <name>] [--name <id>] [--exe <p>] [--crew <p>] [--config <p>] [--print]   (one-click: register `ensemble mcp` into that CLI's config)\n  \
+    ensemble mcp uninstall --client <claude|codex|opencode> [--repo <p>] [--config <p>] [--print]   (remove ensemble's MCP entry from that CLI's config)\n  \
+    ensemble team <status|say|inbox> [--repo <path>] [--team <name>] [--json]   (inspect and post to the repo-local team board)\n  \
     ensemble watch <member> [--repo <path>] [--since <n>] [--follow]   (tail a live member's stream feed)\n  \
+    ensemble supervise <name> [--repo <path>] [--team <name>] [--agent claude] [--since <n>] [--json] [--apply-steer] [--abort-on-critical]   (ask an AI to inspect recent team/run evidence)\n  \
     ensemble steer <name> \"<prompt>\" [--repo <path>]   (inject a redirect into a live --watch run's next round)\n  \
     ensemble abort <name> [--hard] [--repo <path>]   (stop a live --watch run; --hard kills the running CLI now)\n  \
     ensemble all \"<prompt>\" [--repo <path>] [--no-discover] [--json]   (COUNCIL: fan one prompt to EVERY reachable CLI, side-by-side replies)\n\n\
@@ -36,6 +41,18 @@ const USAGE: &str = "usage:\n  \
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    match parse_launcher_invocation(&args) {
+        Ok(Some(LauncherInvocation::Member {
+            client,
+            args: parsed,
+        })) => return member_launcher_cmd(client, parsed),
+        Ok(Some(LauncherInvocation::Agy(parsed))) => return agy_cmd(parsed),
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("ensemble: {e}");
+            std::process::exit(2);
+        }
+    }
     let sub = args.get(1).map(|s| s.as_str());
     // Firewall B: only the conductor-driven commands honor the abort flag, so install the Ctrl-C
     // handler ONLY for them. Installing it for `serve`/`ledger`/`nodes` would swallow their default
@@ -53,11 +70,20 @@ fn main() {
         Some("mesh") => mesh_cmd(&args),
         Some("doctor") => doctor_cmd(&args),
         Some("agent") => agent_cmd(&args),
+        Some("codex") | Some("claude") | Some("opencode") | Some("agy") => {
+            eprintln!(
+                "ensemble: launcher syntax is `ensemble [ensemble options] {} [vendor args...]`",
+                sub.unwrap_or("<ai-cli>")
+            );
+            std::process::exit(2);
+        }
         Some("merge") => merge_cmd(&args),
         Some("mcp") => mcp_cmd(&args),
+        Some("team") => team_cmd(&args),
         Some("serve") => serve_cmd(&args),
         Some("up") => up_cmd(&args),
         Some("watch") => watch_cmd(&args),
+        Some("supervise") => supervise_cmd(&args),
         Some("steer") => steer_cmd(&args),
         Some("abort") => abort_cmd(&args),
         Some("all") => all_cmd(&args),
@@ -138,10 +164,9 @@ fn watch_cmd(args: &[String]) {
             std::process::exit(2);
         }
     };
-    let repo = w
-        .repo
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
+    let repo = w.repo.map(std::path::PathBuf::from).unwrap_or_else(|| {
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    });
     let feed = ensemble::Feed::open(ensemble::member_stream_path(&repo, &member));
 
     // Read everything from `cursor` onward, render it, and advance the cursor PAST each line only after
@@ -168,7 +193,8 @@ fn watch_cmd(args: &[String]) {
     // fully-quiescent feed keeps polling until the next event or Ctrl-C.)
     let step = |cursor: &mut usize| {
         if let Err(e) = drain(cursor) {
-            let closed = e.kind() == std::io::ErrorKind::BrokenPipe || e.raw_os_error() == Some(232);
+            let closed =
+                e.kind() == std::io::ErrorKind::BrokenPipe || e.raw_os_error() == Some(232);
             if closed {
                 std::process::exit(0);
             }
@@ -185,6 +211,229 @@ fn watch_cmd(args: &[String]) {
     loop {
         std::thread::sleep(std::time::Duration::from_millis(250));
         step(&mut cursor);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SuperviseCliArgs {
+    name: String,
+    repo: String,
+    team: Option<String>,
+    agent: String,
+    since: usize,
+    json: bool,
+    apply_steer: bool,
+    abort_on_critical: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SuperviseCliOutput {
+    ok: bool,
+    name: String,
+    team: String,
+    agent: String,
+    recommendation: Option<ensemble::SupervisorRecommendation>,
+    reason: String,
+    steer: Option<String>,
+    critical: bool,
+    board_next: Option<usize>,
+    control_next: Option<usize>,
+    error_kind: Option<String>,
+}
+
+fn parse_supervise_args(args: &[String]) -> Result<SuperviseCliArgs, String> {
+    let mut name = None;
+    let mut repo = ".".to_string();
+    let mut team = None;
+    let mut agent = "claude".to_string();
+    let mut since = 0usize;
+    let mut json = false;
+    let mut apply_steer = false;
+    let mut abort_on_critical = false;
+    let mut i = 2;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--repo" => {
+                repo = take_member_flag_value(args, &mut i, "--repo")?;
+            }
+            "--team" => {
+                team = Some(take_member_flag_value(args, &mut i, "--team")?);
+            }
+            "--agent" => {
+                agent = take_member_flag_value(args, &mut i, "--agent")?;
+            }
+            "--since" => {
+                let raw = take_member_flag_value(args, &mut i, "--since")?;
+                since = raw
+                    .parse::<usize>()
+                    .map_err(|_| "--since must be a non-negative integer".to_string())?;
+            }
+            "--json" => {
+                json = true;
+                i += 1;
+            }
+            "--apply-steer" => {
+                apply_steer = true;
+                i += 1;
+            }
+            "--abort-on-critical" => {
+                abort_on_critical = true;
+                i += 1;
+            }
+            other if other.starts_with("--") => {
+                return Err(format!("unknown flag `{other}`"));
+            }
+            value => {
+                if name.is_some() {
+                    return Err(format!("unexpected positional argument `{value}`"));
+                }
+                name = Some(value.to_string());
+                i += 1;
+            }
+        }
+    }
+    let name = name.ok_or_else(|| "ensemble supervise needs <name>".to_string())?;
+    let agent = agent.trim();
+    if agent.is_empty() {
+        return Err("--agent must not be blank".to_string());
+    }
+    Ok(SuperviseCliArgs {
+        name,
+        repo,
+        team,
+        agent: agent.to_string(),
+        since,
+        json,
+        apply_steer,
+        abort_on_critical,
+    })
+}
+
+fn supervise_apply_mode(parsed: &SuperviseCliArgs) -> ensemble::SupervisorApply {
+    match (parsed.apply_steer, parsed.abort_on_critical) {
+        (true, true) => ensemble::SupervisorApply::ApplySteerAndAbortOnCritical,
+        (true, false) => ensemble::SupervisorApply::ApplySteer,
+        (false, true) => ensemble::SupervisorApply::AbortOnCritical,
+        (false, false) => ensemble::SupervisorApply::Advisory,
+    }
+}
+
+fn supervise_cmd(args: &[String]) {
+    let parsed = parse_supervise_args(args).unwrap_or_else(|e| {
+        eprintln!("ensemble supervise: {e}");
+        std::process::exit(2);
+    });
+    let repo = absolutize(std::path::PathBuf::from(&parsed.repo));
+    let evidence = ensemble::collect_supervisor_evidence(
+        &repo,
+        parsed.team.as_deref(),
+        &parsed.name,
+        parsed.since,
+        50,
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("ensemble supervise: collect evidence: {e}");
+        std::process::exit(1);
+    });
+    let prompt = ensemble::build_supervisor_prompt(&evidence);
+    let (adapter, _label) = resolve_one(&parsed.agent, None, false).unwrap_or_else(|| {
+        eprintln!(
+            "ensemble supervise: no local adapter for agent '{}'",
+            parsed.agent
+        );
+        std::process::exit(2);
+    });
+    let session = ensemble::resolve_team_session(
+        &repo,
+        Some(&evidence.team),
+        "supervisor",
+        Some("supervisor"),
+        None,
+    );
+
+    let raw = match adapter.run(&prompt, &repo) {
+        Ok(out) => out.text,
+        Err(e) => {
+            let kind = adapter_error_kind(&e).to_string();
+            let body = format!("supervisor `{}` flaked: {e}", parsed.agent);
+            let board_next =
+                ensemble::post_team_message(&session, "supervisor", "flake", &body).ok();
+            let output = SuperviseCliOutput {
+                ok: false,
+                name: parsed.name,
+                team: evidence.team,
+                agent: parsed.agent,
+                recommendation: None,
+                reason: body,
+                steer: None,
+                critical: false,
+                board_next,
+                control_next: None,
+                error_kind: Some(kind),
+            };
+            if parsed.json {
+                println!("{}", serde_json::to_string(&output).unwrap_or_default());
+            } else {
+                eprintln!("{}", output.reason);
+            }
+            std::process::exit(e.exit_code());
+        }
+    };
+
+    let report =
+        ensemble::parse_supervisor_report(&raw).unwrap_or_else(|e| ensemble::SupervisorReport {
+            recommendation: ensemble::SupervisorRecommendation::NeedsHuman,
+            reason: format!("unparseable supervisor output: {e}"),
+            steer: None,
+            critical: false,
+        });
+    let body = format!(
+        "supervise `{}` via `{}`: {:?} - {}",
+        parsed.name, parsed.agent, report.recommendation, report.reason
+    );
+    let board_next = ensemble::post_team_message(&session, "supervisor", "supervise", &body)
+        .unwrap_or_else(|e| {
+            eprintln!("ensemble supervise: post board result: {e}");
+            std::process::exit(1);
+        });
+    let action =
+        ensemble::control_action_for_report(&report, supervise_apply_mode(&parsed), "supervisor");
+    let control_next = action
+        .as_ref()
+        .map(|cmd| append_control_direct(&repo, &parsed.name, cmd))
+        .transpose()
+        .unwrap_or_else(|e| {
+            eprintln!("ensemble supervise: {e}");
+            std::process::exit(1);
+        });
+    let output = SuperviseCliOutput {
+        ok: true,
+        name: parsed.name,
+        team: evidence.team,
+        agent: parsed.agent,
+        recommendation: Some(report.recommendation),
+        reason: report.reason,
+        steer: report.steer,
+        critical: report.critical,
+        board_next: Some(board_next),
+        control_next,
+        error_kind: None,
+    };
+    if parsed.json {
+        println!("{}", serde_json::to_string(&output).unwrap_or_default());
+    } else {
+        println!(
+            "supervise `{}`: {:?} - {}",
+            output.name,
+            output
+                .recommendation
+                .unwrap_or(ensemble::SupervisorRecommendation::NeedsHuman),
+            output.reason
+        );
+        if let Some(next) = output.control_next {
+            println!("control next={next}");
+        }
     }
 }
 
@@ -227,15 +476,21 @@ fn abort_cmd(args: &[String]) {
 /// Append a control command to `<repo>/.ensemble/control/<name>.ndjson` (`--repo` defaults to cwd).
 fn append_control(args: &[String], name: &str, cmd: &ensemble::ControlCmd) {
     let repo = parse_flag(args, "--repo").unwrap_or_else(|| ".".to_string());
-    let feed = ensemble::Feed::open(ensemble::member_control_path(Path::new(&repo), name));
-    let line = serde_json::to_string(cmd).unwrap_or_else(|e| {
-        eprintln!("ensemble: encode control command: {e}");
-        std::process::exit(1);
-    });
-    if let Err(e) = feed.append(&line) {
-        eprintln!("ensemble: write control feed {}: {e}", feed.path().display());
+    if let Err(e) = append_control_direct(Path::new(&repo), name, cmd) {
+        eprintln!("ensemble: {e}");
         std::process::exit(1);
     }
+}
+
+fn append_control_direct(
+    repo: &Path,
+    name: &str,
+    cmd: &ensemble::ControlCmd,
+) -> Result<usize, String> {
+    let feed = ensemble::Feed::open(ensemble::member_control_path(repo, name));
+    let line = serde_json::to_string(cmd).map_err(|e| format!("encode control command: {e}"))?;
+    feed.append(&line)
+        .map_err(|e| format!("write control feed {}: {e}", feed.path().display()))
 }
 
 /// `ensemble all "<prompt>" [--repo <p>] [--no-discover] [--json]` — COUNCIL broadcast: fan the SAME
@@ -273,7 +528,10 @@ fn all_cmd(args: &[String]) {
             .collect();
         handles
             .into_iter()
-            .map(|h| h.join().unwrap_or_else(|_| ("?".to_string(), Err("worker panicked".to_string()))))
+            .map(|h| {
+                h.join()
+                    .unwrap_or_else(|_| ("?".to_string(), Err("worker panicked".to_string())))
+            })
             .collect()
     });
     if has_flag(args, "--json") {
@@ -287,6 +545,1134 @@ fn all_cmd(args: &[String]) {
         println!("{}", serde_json::to_string(&arr).unwrap_or_default());
     } else {
         print!("{}", ensemble::render_council(&results));
+    }
+}
+
+/// `ensemble team <status|say|inbox>` — inspect/post to the repo-local team state without starting a
+/// vendor CLI. This is the operator-facing shell around `team.rs`; MCP tools reuse the same data API.
+fn team_cmd(args: &[String]) {
+    let parsed = parse_team_cmd_args(args).unwrap_or_else(|e| {
+        eprintln!(
+            "ensemble team: {e}\nusage: ensemble team <status|say|inbox> [--repo <p>] [--team <name>] [--json]"
+        );
+        std::process::exit(2);
+    });
+    let repo = absolutize(std::path::PathBuf::from(&parsed.repo));
+    let session = ensemble::resolve_team_session(
+        &repo,
+        parsed.team.as_deref(),
+        "operator",
+        Some("operator"),
+        None,
+    );
+
+    match parsed.action {
+        TeamCliAction::Status => {
+            let status = ensemble::team_status(&session).unwrap_or_else(|e| {
+                eprintln!("ensemble team status: {e}");
+                std::process::exit(1);
+            });
+            if parsed.json {
+                println!("{}", serde_json::to_string(&status).unwrap_or_default());
+            } else {
+                println!("{}", ensemble::render_team_status(&status));
+            }
+        }
+        TeamCliAction::Say { from, message } => {
+            let cursor = ensemble::post_team_message(&session, &from, "note", &message)
+                .unwrap_or_else(|e| {
+                    eprintln!("ensemble team say: {e}");
+                    std::process::exit(1);
+                });
+            println!("posted team message next={cursor}");
+        }
+        TeamCliAction::Inbox { since } => {
+            let inbox = ensemble::read_team_inbox(&session, since).unwrap_or_else(|e| {
+                eprintln!("ensemble team inbox: {e}");
+                std::process::exit(1);
+            });
+            if parsed.json {
+                println!("{}", serde_json::to_string(&inbox).unwrap_or_default());
+            } else {
+                println!("{}", ensemble::render_team_inbox(&inbox));
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TeamCliArgs {
+    action: TeamCliAction,
+    repo: String,
+    team: Option<String>,
+    json: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TeamCliAction {
+    Status,
+    Say { from: String, message: String },
+    Inbox { since: usize },
+}
+
+fn parse_team_cmd_args(args: &[String]) -> Result<TeamCliArgs, String> {
+    let action = args
+        .get(2)
+        .map(String::as_str)
+        .ok_or_else(|| "missing subcommand (expected status | say | inbox)".to_string())?;
+    let mut repo = ".".to_string();
+    let mut team = None;
+    let mut from = None;
+    let mut since = None;
+    let mut json = false;
+    let mut positionals = Vec::new();
+    let mut i = 3;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--repo" => {
+                repo = take_team_flag_value(args, &mut i, "--repo")?;
+            }
+            "--team" => {
+                team = Some(take_team_flag_value(args, &mut i, "--team")?);
+            }
+            "--from" => {
+                from = Some(take_team_flag_value(args, &mut i, "--from")?);
+            }
+            "--since" => {
+                let raw = take_team_flag_value(args, &mut i, "--since")?;
+                since = Some(
+                    raw.parse::<usize>()
+                        .map_err(|_| "--since must be a non-negative integer".to_string())?,
+                );
+            }
+            "--json" => {
+                json = true;
+                i += 1;
+            }
+            other if other.starts_with("--") => {
+                return Err(format!("unknown flag `{other}`"));
+            }
+            value => {
+                positionals.push(value.to_string());
+                i += 1;
+            }
+        }
+    }
+
+    let action = match action {
+        "status" => {
+            if from.is_some() {
+                return Err("--from is only valid for team say".to_string());
+            }
+            if since.is_some() {
+                return Err("--since is only valid for team inbox".to_string());
+            }
+            if !positionals.is_empty() {
+                return Err("team status takes no positional arguments".to_string());
+            }
+            TeamCliAction::Status
+        }
+        "say" => {
+            if json {
+                return Err("--json is not valid for team say".to_string());
+            }
+            if since.is_some() {
+                return Err("--since is only valid for team inbox".to_string());
+            }
+            let [message] = positionals.as_slice() else {
+                return Err("team say needs exactly one message".to_string());
+            };
+            TeamCliAction::Say {
+                from: from.unwrap_or_else(|| "operator".to_string()),
+                message: message.clone(),
+            }
+        }
+        "inbox" => {
+            if from.is_some() {
+                return Err("--from is only valid for team say".to_string());
+            }
+            if !positionals.is_empty() {
+                return Err("team inbox takes no positional arguments".to_string());
+            }
+            TeamCliAction::Inbox {
+                since: since.unwrap_or(0),
+            }
+        }
+        other => {
+            return Err(format!(
+                "unknown subcommand `{other}` (expected status | say | inbox)"
+            ));
+        }
+    };
+
+    Ok(TeamCliArgs {
+        action,
+        repo,
+        team,
+        json,
+    })
+}
+
+fn take_team_flag_value(args: &[String], i: &mut usize, flag: &str) -> Result<String, String> {
+    let value = args
+        .get(*i + 1)
+        .filter(|v| !v.starts_with("--"))
+        .cloned()
+        .ok_or_else(|| format!("{flag} requires a value"))?;
+    *i += 2;
+    Ok(value)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfirmPolicy {
+    Ask,
+    Approve,
+    Deny,
+}
+
+impl ConfirmPolicy {
+    fn parse(raw: &str) -> Result<Self, String> {
+        match raw {
+            "ask" => Ok(Self::Ask),
+            "approve" => Ok(Self::Approve),
+            "deny" => Ok(Self::Deny),
+            _ => Err("--confirm-policy must be one of ask, approve, deny".to_string()),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::Approve => "approve",
+            Self::Deny => "deny",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LauncherKind {
+    Member(ensemble::mcp_install::ClientKind),
+    Agy,
+}
+
+impl LauncherKind {
+    fn parse(token: &str) -> Option<Self> {
+        match token {
+            "codex" => Some(Self::Member(ensemble::mcp_install::ClientKind::Codex)),
+            "claude" => Some(Self::Member(ensemble::mcp_install::ClientKind::Claude)),
+            "opencode" => Some(Self::Member(ensemble::mcp_install::ClientKind::Opencode)),
+            "agy" => Some(Self::Agy),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LauncherInvocation {
+    Member {
+        client: ensemble::mcp_install::ClientKind,
+        args: MemberLauncherArgs,
+    },
+    Agy(AgyCliArgs),
+}
+
+fn parse_launcher_invocation(args: &[String]) -> Result<Option<LauncherInvocation>, String> {
+    if args.len() <= 1 {
+        return Ok(None);
+    }
+    let Some(first) = args.get(1) else {
+        return Ok(None);
+    };
+    if LauncherKind::parse(first).is_none() && !is_launcher_leading_flag(first) {
+        if first.starts_with("--") {
+            return Err(format!("unknown flag `{first}`"));
+        }
+        return Ok(None);
+    }
+
+    let (launcher_idx, kind) = find_launcher_token(args)?.ok_or_else(|| {
+        "expected one of codex, claude, opencode, or agy after ensemble launcher options"
+            .to_string()
+    })?;
+    match kind {
+        LauncherKind::Member(client) => Ok(Some(LauncherInvocation::Member {
+            client,
+            args: parse_member_launcher_args_at(args, launcher_idx)?,
+        })),
+        LauncherKind::Agy => Ok(Some(LauncherInvocation::Agy(parse_agy_args_at(
+            args,
+            launcher_idx,
+        )?))),
+    }
+}
+
+fn find_launcher_token(args: &[String]) -> Result<Option<(usize, LauncherKind)>, String> {
+    let mut i = 1;
+    while i < args.len() {
+        let token = &args[i];
+        if let Some(kind) = LauncherKind::parse(token) {
+            return Ok(Some((i, kind)));
+        }
+        if !is_launcher_leading_flag(token) {
+            return Err(format!(
+                "unexpected argument `{token}` before launcher; expected ensemble options followed by codex|claude|opencode|agy"
+            ));
+        }
+        i += if launcher_flag_takes_value(token) {
+            if args
+                .get(i + 1)
+                .filter(|v| !v.starts_with("--") && LauncherKind::parse(v).is_none())
+                .is_none()
+            {
+                return Err(format!("{token} requires a value"));
+            }
+            2
+        } else {
+            1
+        };
+    }
+    Ok(None)
+}
+
+fn is_launcher_leading_flag(flag: &str) -> bool {
+    matches!(
+        flag,
+        "--repo"
+            | "--team"
+            | "--member"
+            | "--name"
+            | "--confirm-policy"
+            | "--print-config"
+            | "--timeout"
+            | "--prompt"
+            | "--print-prompt"
+            | "--json"
+    )
+}
+
+fn launcher_flag_takes_value(flag: &str) -> bool {
+    matches!(
+        flag,
+        "--repo" | "--team" | "--member" | "--name" | "--confirm-policy" | "--timeout" | "--prompt"
+    )
+}
+
+fn reject_old_member_tail(launcher: &str, vendor_args: &[String]) -> Result<(), String> {
+    if vendor_args.first().is_some_and(|a| a == "--") {
+        return Err(format!(
+            "old `--` separator syntax was removed; put vendor args directly after `{launcher}`"
+        ));
+    }
+    Ok(())
+}
+
+fn member_confirmation_args(
+    client: ensemble::mcp_install::ClientKind,
+    policy: ConfirmPolicy,
+) -> Result<Vec<String>, String> {
+    let args = match (client, policy) {
+        (_, ConfirmPolicy::Ask) => Vec::new(),
+        (ensemble::mcp_install::ClientKind::Codex, ConfirmPolicy::Approve) => {
+            vec!["--dangerously-bypass-approvals-and-sandbox".to_string()]
+        }
+        (ensemble::mcp_install::ClientKind::Codex, ConfirmPolicy::Deny) => vec![
+            "--sandbox".to_string(),
+            "read-only".to_string(),
+            "--ask-for-approval".to_string(),
+            "never".to_string(),
+        ],
+        (ensemble::mcp_install::ClientKind::Claude, ConfirmPolicy::Approve) => {
+            vec!["--dangerously-skip-permissions".to_string()]
+        }
+        (ensemble::mcp_install::ClientKind::Claude, ConfirmPolicy::Deny) => {
+            vec!["--permission-mode".to_string(), "dontAsk".to_string()]
+        }
+        (ensemble::mcp_install::ClientKind::Opencode, unsupported) => {
+            return Err(format!(
+                "`opencode --help` does not expose a stable non-interactive confirmation flag; \
+                 --confirm-policy {} is unsupported for opencode",
+                unsupported.as_str()
+            ));
+        }
+    };
+    Ok(args)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MemberLauncherArgs {
+    repo: String,
+    team: String,
+    name: Option<String>,
+    vendor_args: Vec<String>,
+    confirm_policy: ConfirmPolicy,
+    print_config: bool,
+}
+
+#[derive(Debug, Clone)]
+struct MemberLauncherEnv {
+    cwd: std::path::PathBuf,
+    exe: std::path::PathBuf,
+    raw_host: Option<String>,
+    home: std::path::PathBuf,
+    codex_home: Option<std::path::PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+struct MemberLaunchPlan {
+    client: ensemble::mcp_install::ClientKind,
+    repo: std::path::PathBuf,
+    team: String,
+    member: String,
+    crew: std::path::PathBuf,
+    config_path: std::path::PathBuf,
+    session: ensemble::TeamSession,
+    params: ensemble::mcp_install::InstallParams,
+    vendor_program: String,
+    vendor_args: Vec<String>,
+    confirm_policy: ConfirmPolicy,
+    print_config: bool,
+}
+
+#[cfg(test)]
+fn parse_member_launcher_args(args: &[String]) -> Result<MemberLauncherArgs, String> {
+    let (launcher_idx, kind) = find_launcher_token(args)?.ok_or_else(|| {
+        "expected codex, claude, or opencode after ensemble launcher options".to_string()
+    })?;
+    match kind {
+        LauncherKind::Member(_) => parse_member_launcher_args_at(args, launcher_idx),
+        LauncherKind::Agy => Err("expected codex, claude, or opencode; got agy".to_string()),
+    }
+}
+
+fn parse_member_launcher_args_at(
+    args: &[String],
+    launcher_idx: usize,
+) -> Result<MemberLauncherArgs, String> {
+    let mut repo = ".".to_string();
+    let mut team = ensemble::default_team_name(None);
+    let mut name = None;
+    let mut confirm_policy = ConfirmPolicy::Ask;
+    let mut print_config = false;
+    let mut i = 1;
+    while i < launcher_idx {
+        match args[i].as_str() {
+            "--repo" => {
+                repo = take_member_flag_value(args, &mut i, "--repo")?;
+            }
+            "--team" => {
+                let raw = take_member_flag_value(args, &mut i, "--team")?;
+                team = ensemble::default_team_name(Some(&raw));
+            }
+            "--name" => {
+                name = Some(take_member_flag_value(args, &mut i, "--name")?);
+            }
+            "--member" => {
+                name = Some(take_member_flag_value(args, &mut i, "--member")?);
+            }
+            "--confirm-policy" => {
+                let raw = take_member_flag_value(args, &mut i, "--confirm-policy")?;
+                confirm_policy = ConfirmPolicy::parse(&raw)?;
+            }
+            "--print-config" => {
+                print_config = true;
+                i += 1;
+            }
+            "--timeout" | "--prompt" | "--print-prompt" | "--json" => {
+                return Err(format!(
+                    "{} is only valid before `agy`, not before `{}`",
+                    args[i], args[launcher_idx]
+                ));
+            }
+            other if other.starts_with("--") => {
+                return Err(format!("unknown flag `{other}`"));
+            }
+            other => {
+                return Err(format!(
+                    "unexpected positional argument `{other}`; put vendor args after `--`"
+                ));
+            }
+        }
+    }
+    let vendor_args = args[launcher_idx + 1..].to_vec();
+    reject_old_member_tail(&args[launcher_idx], &vendor_args)?;
+
+    Ok(MemberLauncherArgs {
+        repo,
+        team,
+        name,
+        vendor_args,
+        confirm_policy,
+        print_config,
+    })
+}
+
+fn take_member_flag_value(args: &[String], i: &mut usize, flag: &str) -> Result<String, String> {
+    let value = args
+        .get(*i + 1)
+        .filter(|v| !v.starts_with("--"))
+        .cloned()
+        .ok_or_else(|| format!("{flag} requires a value"))?;
+    *i += 2;
+    Ok(value)
+}
+
+fn build_member_launch_plan(
+    client: ensemble::mcp_install::ClientKind,
+    parsed: MemberLauncherArgs,
+    env: &MemberLauncherEnv,
+) -> Result<MemberLaunchPlan, String> {
+    let repo = absolutize_from(std::path::PathBuf::from(parsed.repo), &env.cwd);
+    let exe = absolutize_from(env.exe.clone(), &env.cwd);
+    if !repo.is_absolute() {
+        return Err(format!(
+            "--repo did not resolve to an absolute path ({})",
+            repo.display()
+        ));
+    }
+    if !exe.is_absolute() {
+        return Err(format!(
+            "ensemble binary did not resolve to an absolute path ({})",
+            exe.display()
+        ));
+    }
+    let team = ensemble::default_team_name(Some(&parsed.team));
+    let member = parsed
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            ensemble::mcp_install::default_member_name(client, env.raw_host.as_deref())
+        });
+    let session = ensemble::resolve_team_session(
+        &repo,
+        Some(&team),
+        client.as_str(),
+        Some(&member),
+        env.raw_host.as_deref(),
+    );
+    let crew = repo.join("crew.toml");
+    let params = ensemble::mcp_install::InstallParams {
+        exe,
+        repo: repo.clone(),
+        team: team.clone(),
+        name: member.clone(),
+        crew: crew.clone(),
+    };
+    member_confirmation_args(client, parsed.confirm_policy)?;
+    let config_env = ensemble::mcp_install::Env {
+        home: env.home.clone(),
+        codex_home: env.codex_home.clone(),
+    };
+    let config_path = ensemble::mcp_install::config_path(client, &repo, &config_env);
+    if !config_path.is_absolute() {
+        return Err(format!(
+            "could not determine a config location for `{}`; pass a real home/CODEX_HOME to the process",
+            client.as_str()
+        ));
+    }
+
+    Ok(MemberLaunchPlan {
+        client,
+        repo,
+        team,
+        member,
+        crew,
+        config_path,
+        session,
+        params,
+        vendor_program: client.as_str().to_string(),
+        vendor_args: parsed.vendor_args,
+        confirm_policy: parsed.confirm_policy,
+        print_config: parsed.print_config,
+    })
+}
+
+fn member_launcher_cmd(client: ensemble::mcp_install::ClientKind, parsed: MemberLauncherArgs) {
+    let env = runtime_member_launcher_env().unwrap_or_else(|e| {
+        eprintln!("ensemble {}: {e}", client.as_str());
+        std::process::exit(2);
+    });
+    let plan = build_member_launch_plan(client, parsed, &env).unwrap_or_else(|e| {
+        eprintln!("ensemble {}: {e}", client.as_str());
+        std::process::exit(2);
+    });
+    let merged = render_member_mcp_config(&plan).unwrap_or_else(|e| {
+        eprintln!("ensemble {}: {e}", client.as_str());
+        std::process::exit(1);
+    });
+    if plan.print_config {
+        print!("{}", render_member_launch_preview(&plan, &merged));
+        return;
+    }
+    write_member_mcp_config(&plan, &merged).unwrap_or_else(|e| {
+        eprintln!("ensemble {}: {e}", client.as_str());
+        std::process::exit(1);
+    });
+    if let Err(e) = std::fs::create_dir_all(&plan.session.root) {
+        eprintln!(
+            "ensemble {}: create team root {}: {e}",
+            client.as_str(),
+            plan.session.root.display()
+        );
+        std::process::exit(1);
+    }
+    print_member_launch_banner(&plan);
+    let argv = build_member_vendor_argv(&plan);
+    let config = ensemble::ControlledPtyConfig::new(
+        plan.client.as_str(),
+        plan.repo.clone(),
+        plan.member.clone(),
+        plan.repo.clone(),
+        plan.vendor_program.clone(),
+        argv,
+    )
+    .env("ENSEMBLE_REPO", plan.repo.as_os_str())
+    .env("ENSEMBLE_TEAM", plan.team.as_str())
+    .env("ENSEMBLE_MEMBER", plan.member.as_str())
+    .env("ENSEMBLE_BOARD", plan.session.board.as_os_str());
+    let exit_code = ensemble::run_controlled_pty(config).unwrap_or_else(|e| {
+        eprintln!(
+            "ensemble {}: start `{}`: {e}",
+            client.as_str(),
+            plan.vendor_program
+        );
+        std::process::exit(127);
+    });
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
+}
+
+fn runtime_member_launcher_env() -> Result<MemberLauncherEnv, String> {
+    let cwd = std::env::current_dir().map_err(|e| format!("cannot read current directory: {e}"))?;
+    let exe = std::env::current_exe()
+        .map(|p| absolutize_from(p, &cwd))
+        .map_err(|e| format!("cannot determine this binary's path ({e})"))?;
+    Ok(MemberLauncherEnv {
+        cwd,
+        exe,
+        raw_host: raw_hostname(),
+        home: home_dir(),
+        codex_home: env_path("CODEX_HOME"),
+    })
+}
+
+fn render_member_mcp_config(plan: &MemberLaunchPlan) -> Result<String, String> {
+    let existing = match std::fs::read_to_string(&plan.config_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(format!("read {}: {e}", plan.config_path.display())),
+    };
+    ensemble::mcp_install::render_merged(plan.client, &existing, &plan.params)
+        .map_err(|e| format!("render MCP config {}: {e}", plan.config_path.display()))
+}
+
+fn write_member_mcp_config(plan: &MemberLaunchPlan, merged: &str) -> Result<(), String> {
+    let target = resolve_replace_target(&plan.config_path);
+    let dir = target
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    write_config(&dir, &target, merged.as_bytes())
+}
+
+fn render_member_launch_preview(plan: &MemberLaunchPlan, merged: &str) -> String {
+    let vendor_args =
+        serde_json::to_string(&build_member_vendor_argv(plan)).unwrap_or_else(|_| "[]".to_string());
+    let mcp_args =
+        serde_json::to_string(&plan.params.server_args()).unwrap_or_else(|_| "[]".to_string());
+    format!(
+        "client={}\nmember={}\nteam={}\nconfirm_policy={}\nrepo={}\ncrew={}\nboard={}\nconfig={}\nlaunch={} {}\nmcp_args={}\n\n# merged MCP config preview\n{}",
+        plan.client.as_str(),
+        plan.member,
+        plan.team,
+        plan.confirm_policy.as_str(),
+        plan.repo.display(),
+        plan.crew.display(),
+        plan.session.board.display(),
+        plan.config_path.display(),
+        plan.vendor_program,
+        vendor_args,
+        mcp_args,
+        merged
+    )
+}
+
+fn print_member_launch_banner(plan: &MemberLaunchPlan) {
+    println!(
+        "ensemble: launching controlled `{}` as `{}`",
+        plan.client.as_str(),
+        plan.member
+    );
+    println!("  repo: {}", plan.repo.display());
+    println!("  crew: {}", plan.crew.display());
+    println!("  team: {}", plan.team);
+    println!("  confirm-policy: {}", plan.confirm_policy.as_str());
+    println!("  board: {}", plan.session.board.display());
+    println!(
+        "  tools: ensemble team inbox --repo {} --team {}",
+        plan.repo.display(),
+        plan.team
+    );
+    println!(
+        "  steer: ensemble steer {} \"<prompt>\" --repo {}",
+        plan.member,
+        plan.repo.display()
+    );
+    println!(
+        "  abort: ensemble abort {} --repo {}",
+        plan.member,
+        plan.repo.display()
+    );
+    println!(
+        "  hard-abort: ensemble abort {} --hard --repo {}",
+        plan.member,
+        plan.repo.display()
+    );
+}
+
+fn build_member_vendor_argv(plan: &MemberLaunchPlan) -> Vec<String> {
+    let mut args = member_confirmation_args(plan.client, plan.confirm_policy).unwrap_or_default();
+    args.extend(plan.vendor_args.iter().cloned());
+    args
+}
+
+const DEFAULT_AGY_TIMEOUT_SECS: u64 = 180;
+const AGY_CONTEXT_LIMIT: usize = 20;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgyCliArgs {
+    repo: String,
+    team: String,
+    name: Option<String>,
+    timeout_secs: u64,
+    confirm_policy: ConfirmPolicy,
+    prompt: Option<String>,
+    vendor_args: Vec<String>,
+    print_prompt: bool,
+    json: bool,
+}
+
+#[derive(Debug, Clone)]
+struct AgyRunPlan {
+    session: ensemble::TeamSession,
+    timeout_secs: u64,
+    confirm_policy: ConfirmPolicy,
+    prompt: Option<String>,
+    vendor_args: Vec<String>,
+    print_prompt: bool,
+    json: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgyLaunchMode {
+    Interactive,
+    TeamTurn,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgyTurnReport {
+    ok: bool,
+    member: String,
+    team: String,
+    cursor: usize,
+    text: Option<String>,
+    error_kind: Option<String>,
+}
+
+#[cfg(test)]
+fn parse_agy_args(args: &[String]) -> Result<AgyCliArgs, String> {
+    let (launcher_idx, kind) = find_launcher_token(args)?
+        .ok_or_else(|| "expected agy after ensemble options".to_string())?;
+    match kind {
+        LauncherKind::Agy => parse_agy_args_at(args, launcher_idx),
+        LauncherKind::Member(client) => Err(format!("expected agy; got {}", client.as_str())),
+    }
+}
+
+fn parse_agy_args_at(args: &[String], launcher_idx: usize) -> Result<AgyCliArgs, String> {
+    let mut repo = ".".to_string();
+    let mut team = ensemble::default_team_name(None);
+    let mut name = None;
+    let mut timeout_secs = DEFAULT_AGY_TIMEOUT_SECS;
+    let mut confirm_policy = ConfirmPolicy::Ask;
+    let mut print_prompt = false;
+    let mut json = false;
+    let mut i = 1;
+    while i < launcher_idx {
+        match args[i].as_str() {
+            "--repo" => {
+                repo = take_member_flag_value(args, &mut i, "--repo")?;
+            }
+            "--team" => {
+                let raw = take_member_flag_value(args, &mut i, "--team")?;
+                team = ensemble::default_team_name(Some(&raw));
+            }
+            "--name" => {
+                name = Some(take_member_flag_value(args, &mut i, "--name")?);
+            }
+            "--member" => {
+                name = Some(take_member_flag_value(args, &mut i, "--member")?);
+            }
+            "--timeout" => {
+                let raw = take_member_flag_value(args, &mut i, "--timeout")?;
+                timeout_secs = raw.parse::<u64>().ok().filter(|n| *n > 0).ok_or_else(|| {
+                    "--timeout must be a positive integer number of seconds".to_string()
+                })?;
+            }
+            "--confirm-policy" => {
+                let raw = take_member_flag_value(args, &mut i, "--confirm-policy")?;
+                confirm_policy = ConfirmPolicy::parse(&raw)?;
+            }
+            "--prompt" => {
+                return Err(
+                    "put agy prompt flags after `agy`, for example: ensemble --repo . agy --prompt \"...\""
+                        .to_string(),
+                );
+            }
+            "--print-prompt" => {
+                print_prompt = true;
+                i += 1;
+            }
+            "--json" => {
+                json = true;
+                i += 1;
+            }
+            "--print-config" => {
+                return Err(
+                    "--print-config is only valid before codex, claude, or opencode".to_string(),
+                );
+            }
+            other if other.starts_with("--") => {
+                return Err(format!("unknown flag `{other}`"));
+            }
+            other => {
+                return Err(format!(
+                    "unexpected positional argument `{other}` before `agy`; put agy prompt/vendor args after `agy`"
+                ));
+            }
+        }
+    }
+    let (prompt, vendor_args) = split_agy_prompt_args(&args[launcher_idx + 1..])?;
+    reject_old_member_tail(&args[launcher_idx], &vendor_args)?;
+    Ok(AgyCliArgs {
+        repo,
+        team,
+        name,
+        timeout_secs,
+        confirm_policy,
+        prompt,
+        vendor_args,
+        print_prompt,
+        json,
+    })
+}
+
+fn split_agy_prompt_args(raw: &[String]) -> Result<(Option<String>, Vec<String>), String> {
+    let mut prompt = None;
+    let mut vendor_args = Vec::new();
+    let mut i = 0;
+    while i < raw.len() {
+        let arg = &raw[i];
+        let inline = arg
+            .strip_prefix("--prompt=")
+            .or_else(|| arg.strip_prefix("--print="));
+        if let Some(value) = inline {
+            set_single_agy_prompt(&mut prompt, value.to_string())?;
+            i += 1;
+            continue;
+        }
+        if matches!(arg.as_str(), "--prompt" | "--print" | "-p") {
+            let value = raw
+                .get(i + 1)
+                .cloned()
+                .ok_or_else(|| format!("{arg} requires a prompt value"))?;
+            set_single_agy_prompt(&mut prompt, value)?;
+            i += 2;
+            continue;
+        }
+        vendor_args.push(arg.clone());
+        i += 1;
+    }
+    Ok((prompt, vendor_args))
+}
+
+fn set_single_agy_prompt(slot: &mut Option<String>, value: String) -> Result<(), String> {
+    if slot.is_some() {
+        return Err("agy prompt was provided more than once".to_string());
+    }
+    *slot = Some(value);
+    Ok(())
+}
+
+fn build_agy_plan(parsed: AgyCliArgs, cwd: &std::path::Path, raw_host: Option<&str>) -> AgyRunPlan {
+    let repo = absolutize_from(std::path::PathBuf::from(parsed.repo), cwd);
+    let team = ensemble::default_team_name(Some(&parsed.team));
+    let member = parsed
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| ensemble::default_member_name("agy", raw_host));
+    AgyRunPlan {
+        session: ensemble::resolve_team_session(&repo, Some(&team), "agy", Some(&member), raw_host),
+        timeout_secs: parsed.timeout_secs,
+        confirm_policy: parsed.confirm_policy,
+        prompt: parsed.prompt,
+        vendor_args: parsed.vendor_args,
+        print_prompt: parsed.print_prompt,
+        json: parsed.json,
+    }
+}
+
+fn build_agy_team_prompt(
+    session: &ensemble::TeamSession,
+    messages: &[ensemble::Message],
+    requested: Option<&str>,
+    confirm_policy: ConfirmPolicy,
+) -> String {
+    let mut out = format!(
+        "You are `{}` participating in the local ensemble team `{}`.\n\
+         Repo: {}\n\n\
+         Recent team board, oldest to newest:\n",
+        session.member,
+        session.team,
+        session.repo.display()
+    );
+    let start = messages.len().saturating_sub(AGY_CONTEXT_LIMIT);
+    if messages[start..].is_empty() {
+        out.push_str("- (no messages yet)\n");
+    } else {
+        for m in &messages[start..] {
+            out.push_str(&format!("- {} [{}]: {}\n", m.from, m.kind, m.body));
+        }
+    }
+    let requested = requested
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Post a short hello/status update to the team board.");
+    out.push_str(&format!(
+        "\nRequested turn:\n{requested}\n\n\
+         Confirmation policy: {}.\n\
+         {}\n\
+         Reply with one concise team-board message.\n",
+        confirm_policy.as_str(),
+        agy_confirmation_instruction(confirm_policy),
+    ));
+    out
+}
+
+fn agy_launch_mode(plan: &AgyRunPlan) -> AgyLaunchMode {
+    if plan.prompt.is_none() && !plan.print_prompt && !plan.json {
+        AgyLaunchMode::Interactive
+    } else {
+        AgyLaunchMode::TeamTurn
+    }
+}
+
+fn build_agy_interactive_argv(plan: &AgyRunPlan) -> Vec<String> {
+    let mut args = Vec::new();
+    if plan.confirm_policy == ConfirmPolicy::Approve {
+        args.push("--dangerously-skip-permissions".to_string());
+    }
+    args.extend(plan.vendor_args.iter().cloned());
+    args
+}
+
+fn print_agy_interactive_banner(plan: &AgyRunPlan, argv: &[String]) {
+    let vendor_args = serde_json::to_string(argv).unwrap_or_else(|_| "[]".to_string());
+    println!(
+        "ensemble: launching controlled `agy` as `{}`",
+        plan.session.member
+    );
+    println!("  repo: {}", plan.session.repo.display());
+    println!("  team: {}", plan.session.team);
+    println!("  confirm-policy: {}", plan.confirm_policy.as_str());
+    println!("  board: {}", plan.session.board.display());
+    println!(
+        "  tools: ensemble team inbox --repo {} --team {}",
+        plan.session.repo.display(),
+        plan.session.team
+    );
+    println!(
+        "  steer: ensemble steer {} \"<prompt>\" --repo {}",
+        plan.session.member,
+        plan.session.repo.display()
+    );
+    println!(
+        "  abort: ensemble abort {} --repo {}",
+        plan.session.member,
+        plan.session.repo.display()
+    );
+    println!(
+        "  hard-abort: ensemble abort {} --hard --repo {}",
+        plan.session.member,
+        plan.session.repo.display()
+    );
+    println!("  launch: agy {vendor_args}");
+}
+
+fn run_agy_interactive(plan: &AgyRunPlan) -> i32 {
+    if let Err(e) = std::fs::create_dir_all(&plan.session.root) {
+        eprintln!(
+            "ensemble agy: create team root {}: {e}",
+            plan.session.root.display()
+        );
+        return 1;
+    }
+    let argv = build_agy_interactive_argv(plan);
+    print_agy_interactive_banner(plan, &argv);
+    let config = ensemble::ControlledPtyConfig::new(
+        "agy",
+        plan.session.repo.clone(),
+        plan.session.member.clone(),
+        plan.session.repo.clone(),
+        "agy",
+        argv,
+    )
+    .env("ENSEMBLE_REPO", &plan.session.repo)
+    .env("ENSEMBLE_TEAM", &plan.session.team)
+    .env("ENSEMBLE_MEMBER", &plan.session.member)
+    .env("ENSEMBLE_BOARD", &plan.session.board);
+    match ensemble::run_controlled_pty(config) {
+        Ok(code) => code,
+        Err(e) if e.to_string().contains("not found") => {
+            eprintln!("ensemble agy: `agy` not found on PATH");
+            127
+        }
+        Err(e) => {
+            eprintln!("ensemble agy: start `agy`: {e}");
+            1
+        }
+    }
+}
+
+fn agy_confirmation_instruction(policy: ConfirmPolicy) -> &'static str {
+    match policy {
+        ConfirmPolicy::Ask => {
+            "If the CLI shows any interactive option, selector, confirmation, or deny/approve \
+             choice that you cannot complete in this non-interactive turn, state the needed decision \
+             in text instead of waiting in a chooser."
+        }
+        ConfirmPolicy::Approve => {
+            "Approve tool/permission choices needed to complete this turn when the CLI supports \
+             non-interactive approval; if a selector cannot be operated, report the required choice \
+             instead of waiting."
+        }
+        ConfirmPolicy::Deny => {
+            "do not approve tool/permission choices. Decline or deny them when possible; if a selector \
+             cannot be operated, report the blocked choice instead of waiting."
+        }
+    }
+}
+
+fn run_agy_team_turn(
+    session: &ensemble::TeamSession,
+    adapter: &dyn Adapter,
+    prompt: &str,
+) -> Result<(AgyTurnReport, i32), String> {
+    match adapter.run(prompt, &session.repo) {
+        Ok(out) => {
+            let cursor = ensemble::post_team_message(session, &session.member, "result", &out.text)
+                .map_err(|e| format!("post agy result: {e}"))?;
+            Ok((
+                AgyTurnReport {
+                    ok: true,
+                    member: session.member.clone(),
+                    team: session.team.clone(),
+                    cursor,
+                    text: Some(out.text),
+                    error_kind: None,
+                },
+                0,
+            ))
+        }
+        Err(e) => {
+            let kind = adapter_error_kind(&e).to_string();
+            let body = format!("agy flaked: {e}");
+            let cursor = ensemble::post_team_message(session, &session.member, "flake", &body)
+                .map_err(|post| format!("post agy flake after {kind}: {post}"))?;
+            let exit = e.exit_code();
+            Ok((
+                AgyTurnReport {
+                    ok: false,
+                    member: session.member.clone(),
+                    team: session.team.clone(),
+                    cursor,
+                    text: None,
+                    error_kind: Some(kind),
+                },
+                exit,
+            ))
+        }
+    }
+}
+
+fn adapter_error_kind(e: &ensemble::AdapterError) -> &'static str {
+    match e {
+        ensemble::AdapterError::Flaked(_) => "Flaked",
+        ensemble::AdapterError::Empty => "Empty",
+        ensemble::AdapterError::RateLimited => "RateLimited",
+        ensemble::AdapterError::NotInstalled(_) => "NotInstalled",
+    }
+}
+
+fn agy_cmd(parsed: AgyCliArgs) {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let plan = build_agy_plan(parsed, &cwd, raw_hostname().as_deref());
+    if agy_launch_mode(&plan) == AgyLaunchMode::Interactive {
+        let exit_code = run_agy_interactive(&plan);
+        if exit_code != 0 {
+            std::process::exit(exit_code);
+        }
+        return;
+    }
+    let inbox = ensemble::read_team_inbox(&plan.session, 0).unwrap_or_else(|e| {
+        eprintln!("ensemble agy: read team inbox: {e}");
+        std::process::exit(1);
+    });
+    let prompt = build_agy_team_prompt(
+        &plan.session,
+        &inbox.messages,
+        plan.prompt.as_deref(),
+        plan.confirm_policy,
+    );
+    if plan.print_prompt {
+        print!("{prompt}");
+        return;
+    }
+    let adapter =
+        ensemble::AgyAdapter::with_timeout(std::time::Duration::from_secs(plan.timeout_secs))
+            .with_dangerously_skip_permissions(plan.confirm_policy == ConfirmPolicy::Approve)
+            .with_vendor_args(plan.vendor_args.clone());
+    let (report, exit_code) =
+        run_agy_team_turn(&plan.session, &adapter, &prompt).unwrap_or_else(|e| {
+            eprintln!("ensemble agy: {e}");
+            std::process::exit(1);
+        });
+    if plan.json {
+        println!("{}", serde_json::to_string(&report).unwrap_or_default());
+    } else if report.ok {
+        println!(
+            "agy posted team message as `{}` next={}",
+            report.member, report.cursor
+        );
+    } else {
+        eprintln!(
+            "agy flaked as `{}` kind={} next={}",
+            report.member,
+            report.error_kind.as_deref().unwrap_or("Unknown"),
+            report.cursor
+        );
+    }
+    if exit_code != 0 {
+        std::process::exit(exit_code);
     }
 }
 
@@ -305,7 +1691,12 @@ fn council_run_one(
             "claude" => Box::new(ExecAdapter::claude()),
             "opencode" => Box::new(ExecAdapter::opencode()),
             "agy" => Box::new(AgyAdapter::new()),
-            other => return (t.label.clone(), Err(format!("no local adapter for '{other}'"))),
+            other => {
+                return (
+                    t.label.clone(),
+                    Err(format!("no local adapter for '{other}'")),
+                )
+            }
         },
     };
     match adapter.run(prompt, cwd) {
@@ -342,7 +1733,8 @@ fn run_single(args: &[String]) {
         // so stale commands from a previous run are ignored. Daemon thread — ends when the process exits.
         let ctrl = std::sync::Arc::new(ensemble::ControlState::default());
         let ctrl_w = ctrl.clone();
-        let control_feed = ensemble::Feed::open(ensemble::member_control_path(Path::new(&repo), &name));
+        let control_feed =
+            ensemble::Feed::open(ensemble::member_control_path(Path::new(&repo), &name));
         std::thread::spawn(move || {
             let mut cursor = control_feed.len().unwrap_or(0);
             loop {
@@ -649,13 +2041,22 @@ fn adapters_for(crew: &CrewConfig, discover: bool) -> HashMap<String, Box<dyn Ad
         } else {
             match agent {
                 "codex" => {
-                    m.insert(agent.into(), Box::new(cfg_exec(ExecAdapter::codex(), crew, agent)));
+                    m.insert(
+                        agent.into(),
+                        Box::new(cfg_exec(ExecAdapter::codex(), crew, agent)),
+                    );
                 }
                 "claude" => {
-                    m.insert(agent.into(), Box::new(cfg_exec(ExecAdapter::claude(), crew, agent)));
+                    m.insert(
+                        agent.into(),
+                        Box::new(cfg_exec(ExecAdapter::claude(), crew, agent)),
+                    );
                 }
                 "opencode" => {
-                    m.insert(agent.into(), Box::new(cfg_exec(ExecAdapter::opencode(), crew, agent)));
+                    m.insert(
+                        agent.into(),
+                        Box::new(cfg_exec(ExecAdapter::opencode(), crew, agent)),
+                    );
                 }
                 "agy" => {
                     m.insert(agent.into(), Box::new(cfg_agy(crew, agent)));
@@ -839,7 +2240,9 @@ fn merge_cmd(args: &[String]) {
     match outcome {
         Ok(ensemble::MergeOutcome::Landed) => println!("merged {branch} into {into}"),
         Ok(ensemble::MergeOutcome::Conflict(paths)) => {
-            eprintln!("merge conflict: {branch} into {into} NOT landed (escalated). Conflicting paths:");
+            eprintln!(
+                "merge conflict: {branch} into {into} NOT landed (escalated). Conflicting paths:"
+            );
             for p in &paths {
                 eprintln!("  {p}");
             }
@@ -866,7 +2269,76 @@ impl ensemble::mcp::CrewRunner for ConductorRunner {
             Decision::Landed => (true, out.branch, String::new()),
             Decision::Escalated(why) => (false, None, why),
         };
-        ensemble::mcp::RunSummary { landed, rounds, branch, detail }
+        ensemble::mcp::RunSummary {
+            landed,
+            rounds,
+            branch,
+            detail,
+        }
+    }
+}
+
+struct McpSupervisorRunner;
+
+impl ensemble::mcp::SupervisorRunner for McpSupervisorRunner {
+    fn supervise(
+        &self,
+        req: ensemble::mcp::SuperviseRequest,
+        repo: &Path,
+        caller: &str,
+    ) -> Result<ensemble::mcp::SuperviseSummary, String> {
+        let evidence = ensemble::collect_supervisor_evidence(
+            repo,
+            req.team.as_deref(),
+            &req.name,
+            req.since,
+            50,
+        )
+        .map_err(|e| format!("collect evidence: {e}"))?;
+        let prompt = ensemble::build_supervisor_prompt(&evidence);
+        let (adapter, _label) = resolve_one(&req.agent, None, false)
+            .ok_or_else(|| format!("no local adapter for agent '{}'", req.agent))?;
+        let raw = adapter
+            .run(&prompt, repo)
+            .map_err(|e| format!("agent '{}': {e}", req.agent))?
+            .text;
+        let report = ensemble::parse_supervisor_report(&raw).unwrap_or_else(|e| {
+            ensemble::SupervisorReport {
+                recommendation: ensemble::SupervisorRecommendation::NeedsHuman,
+                reason: format!("unparseable supervisor output: {e}"),
+                steer: None,
+                critical: false,
+            }
+        });
+        let session =
+            ensemble::resolve_team_session(repo, Some(&evidence.team), "mcp", Some(caller), None);
+        let body = format!(
+            "supervise `{}` via `{}`: {:?} - {}",
+            req.name, req.agent, report.recommendation, report.reason
+        );
+        let board_next = ensemble::post_team_message(&session, caller, "supervise", &body)
+            .map_err(|e| format!("post board result: {e}"))?;
+        let apply = match (req.apply_steer, req.abort_on_critical) {
+            (true, true) => ensemble::SupervisorApply::ApplySteerAndAbortOnCritical,
+            (true, false) => ensemble::SupervisorApply::ApplySteer,
+            (false, true) => ensemble::SupervisorApply::AbortOnCritical,
+            (false, false) => ensemble::SupervisorApply::Advisory,
+        };
+        let control_next = ensemble::control_action_for_report(&report, apply, caller)
+            .as_ref()
+            .map(|cmd| append_control_direct(repo, &req.name, cmd))
+            .transpose()?;
+        Ok(ensemble::mcp::SuperviseSummary {
+            name: req.name,
+            team: evidence.team,
+            agent: req.agent,
+            recommendation: report.recommendation,
+            reason: report.reason,
+            steer: report.steer,
+            critical: report.critical,
+            board_next,
+            control_next,
+        })
     }
 }
 
@@ -876,7 +2348,10 @@ impl ensemble::mcp::CrewRunner for ConductorRunner {
 /// else `<repo>/crew.toml`. `adapters_for(.., false)` disables tailnet DISCOVERY (no probe at startup
 /// → fast launch); a crew.toml with an explicit `node = "..."` still resolves to that pinned peer's
 /// `RemoteAdapter`. Only AUTO-discovery of sub-run agents from the tailnet is the later refinement.
-fn mcp_runner(args: &[String], repo: &str) -> Option<std::sync::Arc<dyn ensemble::mcp::CrewRunner>> {
+fn mcp_runner(
+    args: &[String],
+    repo: &str,
+) -> Option<std::sync::Arc<dyn ensemble::mcp::CrewRunner>> {
     let path = parse_flag(args, "--crew")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| Path::new(repo).join("crew.toml"));
@@ -887,7 +2362,7 @@ fn mcp_runner(args: &[String], repo: &str) -> Option<std::sync::Arc<dyn ensemble
     }))
 }
 
-/// `ensemble mcp [--repo <path>] [--name <agent>] [--crew <crew.toml>]` — run a stdio MCP server that
+/// `ensemble mcp [--repo <path>] [--team <name>] [--name <agent>] [--crew <crew.toml>]` — run a stdio MCP server that
 /// exposes the crew-participation API (mesh + board + work-queue + worktree + merge + complete/fail +
 /// run), so a LIVE CLI launching it as an MCP server becomes a first-class crew member. Session = the
 /// repo; the shared board lives at `<repo>/.ensemble/board.jsonl`, the work-queue at
@@ -897,16 +2372,23 @@ fn mcp_cmd(args: &[String]) {
     if args.get(2).map(|s| s.as_str()) == Some("install") {
         return mcp_install_cmd(args);
     }
+    if args.get(2).map(|s| s.as_str()) == Some("uninstall") {
+        return mcp_uninstall_cmd(args);
+    }
     require_value_if_present(args, "--repo");
+    require_value_if_present(args, "--team");
     require_value_if_present(args, "--name");
     require_value_if_present(args, "--crew");
     let repo = parse_flag(args, "--repo").unwrap_or_else(|| ".".to_string());
+    let team = ensemble::default_team_name(parse_flag(args, "--team").as_deref());
     let name = parse_flag(args, "--name").unwrap_or_else(|| format!("mcp-{}", std::process::id()));
     let runner = mcp_runner(args, &repo);
     let ctx = ensemble::mcp::Ctx {
         repo: std::path::PathBuf::from(repo),
         name,
+        team,
         runner,
+        supervisor: Some(std::sync::Arc::new(McpSupervisorRunner)),
     };
     if let Err(e) = ensemble::mcp::serve_stdio(ctx) {
         eprintln!("ensemble mcp: {e}");
@@ -914,29 +2396,37 @@ fn mcp_cmd(args: &[String]) {
     }
 }
 
-/// `ensemble mcp install --client <claude|codex|opencode> [--repo <p>] [--name <id>] [--exe <p>]
+fn parse_mcp_client_or_exit(args: &[String], action: &str) -> ensemble::mcp_install::ClientKind {
+    let client_str = parse_flag(args, "--client").unwrap_or_else(|| {
+        eprintln!("ensemble mcp {action}: --client <claude|codex|opencode> is required");
+        std::process::exit(2);
+    });
+    ensemble::mcp_install::ClientKind::parse(&client_str).unwrap_or_else(|e| {
+        eprintln!("ensemble mcp {action}: {e}");
+        std::process::exit(2);
+    })
+}
+
+/// `ensemble mcp install --client <claude|codex|opencode> [--repo <p>] [--team <name>] [--name <id>] [--exe <p>]
 /// [--crew <p>] [--config <p>] [--print]` — write the chosen CLI's MCP-server config so it launches
 /// `ensemble mcp` and becomes a crew member (no hand-editing per-client formats). Everything
 /// environment-specific is DERIVED (exe = this binary, repo = cwd, home from env, `$CODEX_HOME`
 /// honored); only the per-client FORMAT lives in `mcp_install`, and `--config`/`--print` override the
 /// target/let you preview. The merge is idempotent and preserves the user's other servers + comments.
 fn mcp_install_cmd(args: &[String]) {
-    for flag in ["--client", "--repo", "--name", "--exe", "--crew", "--config"] {
+    for flag in [
+        "--client", "--repo", "--team", "--name", "--exe", "--crew", "--config",
+    ] {
         require_value_if_present(args, flag);
     }
-    let client_str = parse_flag(args, "--client").unwrap_or_else(|| {
-        eprintln!("ensemble mcp install: --client <claude|codex|opencode> is required");
-        std::process::exit(2);
-    });
-    let client = ensemble::mcp_install::ClientKind::parse(&client_str).unwrap_or_else(|e| {
-        eprintln!("ensemble mcp install: {e}");
-        std::process::exit(2);
-    });
+    let client = parse_mcp_client_or_exit(args, "install");
     // DERIVE every environment/user-specific value (never hardcoded); each is overridable by a flag.
     let repo = absolutize(
         parse_flag(args, "--repo")
             .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))),
+            .unwrap_or_else(|| {
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+            }),
     );
     // exe must be ABSOLUTE — the vendor CLI launches it from its OWN cwd. A current_exe() failure is
     // fatal (a relative fallback would point at nothing); an explicit relative --exe is absolutized.
@@ -950,8 +2440,10 @@ fn mcp_install_cmd(args: &[String]) {
     // Default the member name to `<client>@<host>` so members across the fleet don't collide with zero
     // coordination (and it's STABLE across restarts, which the ledger's claim-ownership relies on). An
     // explicit `--name` still wins. Pure derivation lives in `mcp_install`; we just supply the raw host.
-    let name = parse_flag(args, "--name")
-        .unwrap_or_else(|| ensemble::mcp_install::default_member_name(client, raw_hostname().as_deref()));
+    let name = parse_flag(args, "--name").unwrap_or_else(|| {
+        ensemble::mcp_install::default_member_name(client, raw_hostname().as_deref())
+    });
+    let team = ensemble::default_team_name(parse_flag(args, "--team").as_deref());
     // crew must be ABSOLUTE for the same reason (else `--crew crew.toml` resolves against the vendor
     // CLI's cwd at runtime and silently loses the crew runner).
     let crew = absolutize(
@@ -959,7 +2451,13 @@ fn mcp_install_cmd(args: &[String]) {
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| repo.join("crew.toml")),
     );
-    let params = ensemble::mcp_install::InstallParams { exe, repo: repo.clone(), name, crew };
+    let params = ensemble::mcp_install::InstallParams {
+        exe,
+        repo: repo.clone(),
+        team,
+        name,
+        crew,
+    };
     // The exe/repo/crew baked into the generated config MUST be absolute — the vendor CLI launches
     // `ensemble` from its OWN cwd, so a relative path would resolve against the wrong directory and write
     // a broken MCP entry (invalid output). `absolutize` joins the cwd to make a path absolute, but if
@@ -967,7 +2465,11 @@ fn mcp_install_cmd(args: &[String]) {
     // through — including the default `--repo` (`.`) and its derived `--crew` (`./crew.toml`). The codex
     // config-location guard below does NOT catch this (its path is absolute via `$HOME`), so validate
     // here and refuse rather than emit a config the CLI will later mis-resolve.
-    for (label, p) in [("--exe", &params.exe), ("--repo", &params.repo), ("--crew", &params.crew)] {
+    for (label, p) in [
+        ("--exe", &params.exe),
+        ("--repo", &params.repo),
+        ("--crew", &params.crew),
+    ] {
         if !p.is_absolute() {
             eprintln!(
                 "ensemble mcp install: `{label}` did not resolve to an absolute path ({}) — the current \
@@ -1009,10 +2511,11 @@ fn mcp_install_cmd(args: &[String]) {
             std::process::exit(1);
         }
     };
-    let merged = ensemble::mcp_install::render_merged(client, &existing, &params).unwrap_or_else(|e| {
-        eprintln!("ensemble mcp install: {} ({})", e, path.display());
-        std::process::exit(1);
-    });
+    let merged =
+        ensemble::mcp_install::render_merged(client, &existing, &params).unwrap_or_else(|e| {
+            eprintln!("ensemble mcp install: {} ({})", e, path.display());
+            std::process::exit(1);
+        });
     if has_flag(args, "--print") {
         println!("# {} config → {}", client.as_str(), path.display());
         print!("{merged}");
@@ -1050,7 +2553,103 @@ fn mcp_install_cmd(args: &[String]) {
         params.name,
         path.display()
     );
-    println!("  restart {} to pick it up; the crew's board/queue live under {}/.ensemble/", client.as_str(), params.repo.display());
+    println!(
+        "  restart {} to pick it up; the crew's board/queue live under {}/.ensemble/",
+        client.as_str(),
+        params.repo.display()
+    );
+}
+
+/// `ensemble mcp uninstall --client <claude|codex|opencode> [--repo <p>] [--config <p>] [--print]`
+/// removes only ensemble's MCP entry from the selected client config. Missing files or absent entries are
+/// successful no-ops; malformed existing config aborts rather than clobbering unrelated data.
+fn mcp_uninstall_cmd(args: &[String]) {
+    for flag in ["--client", "--repo", "--config"] {
+        require_value_if_present(args, flag);
+    }
+    let client = parse_mcp_client_or_exit(args, "uninstall");
+    let repo = absolutize(
+        parse_flag(args, "--repo")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+            }),
+    );
+    let env = ensemble::mcp_install::Env {
+        home: home_dir(),
+        codex_home: env_path("CODEX_HOME"),
+    };
+    let path = match parse_flag(args, "--config") {
+        Some(p) => std::path::PathBuf::from(p),
+        None => {
+            let p = ensemble::mcp_install::config_path(client, &repo, &env);
+            if !p.is_absolute() {
+                eprintln!(
+                    "ensemble mcp uninstall: could not determine a config location for `{}` (no home dir / \
+                     $CODEX_HOME?) — pass --config <path>",
+                    client.as_str()
+                );
+                std::process::exit(2);
+            }
+            p
+        }
+    };
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            println!(
+                "ensemble: no {} config found at {}; nothing to uninstall",
+                client.as_str(),
+                path.display()
+            );
+            return;
+        }
+        Err(e) => {
+            eprintln!("ensemble mcp uninstall: read {}: {e}", path.display());
+            std::process::exit(1);
+        }
+    };
+    let Some(updated) =
+        ensemble::mcp_install::render_removed(client, &existing).unwrap_or_else(|e| {
+            eprintln!("ensemble mcp uninstall: {} ({})", e, path.display());
+            std::process::exit(1);
+        })
+    else {
+        println!(
+            "ensemble: no ensemble MCP entry in {} config {}; nothing to uninstall",
+            client.as_str(),
+            path.display()
+        );
+        return;
+    };
+    if has_flag(args, "--print") {
+        println!(
+            "# {} config after removing ensemble → {}",
+            client.as_str(),
+            path.display()
+        );
+        print!("{updated}");
+        return;
+    }
+    let target = resolve_replace_target(&path);
+    let dir = target
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("ensemble mcp uninstall: create {}: {e}", dir.display());
+        std::process::exit(1);
+    }
+    if let Err(e) = write_config(&dir, &target, updated.as_bytes()) {
+        eprintln!("ensemble mcp uninstall: {e}");
+        std::process::exit(1);
+    }
+    println!(
+        "ensemble: removed MCP server entry for `{}` → {}",
+        client.as_str(),
+        path.display()
+    );
 }
 
 /// Atomically write `contents` to `target` via a RANDOMLY-named, O_EXCL temp in `dir` (the target's own
@@ -1111,14 +2710,16 @@ fn raw_hostname() -> Option<String> {
     fn nonempty(key: &str) -> Option<String> {
         std::env::var(key).ok().filter(|s| !s.trim().is_empty())
     }
-    nonempty("COMPUTERNAME").or_else(|| nonempty("HOSTNAME")).or_else(|| {
-        std::process::Command::new("hostname")
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .filter(|s| !s.trim().is_empty())
-    })
+    nonempty("COMPUTERNAME")
+        .or_else(|| nonempty("HOSTNAME"))
+        .or_else(|| {
+            std::process::Command::new("hostname")
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .filter(|s| !s.trim().is_empty())
+        })
 }
 
 /// The user's home directory, portably: `%USERPROFILE%` (Windows) or `$HOME` (Unix). Precedence is
@@ -1141,10 +2742,18 @@ fn home_dir() -> std::path::PathBuf {
 /// Windows `\\?\` prefix, works for a not-yet-created repo): an absolute path is kept; a relative one
 /// is joined onto the current dir.
 fn absolutize(p: std::path::PathBuf) -> std::path::PathBuf {
+    let cwd = match std::env::current_dir() {
+        Ok(cwd) => cwd,
+        Err(_) => return p,
+    };
+    absolutize_from(p, &cwd)
+}
+
+fn absolutize_from(p: std::path::PathBuf, cwd: &std::path::Path) -> std::path::PathBuf {
     if p.is_absolute() {
         p
     } else {
-        std::env::current_dir().map(|c| c.join(&p)).unwrap_or(p)
+        cwd.join(p)
     }
 }
 
@@ -1287,7 +2896,11 @@ mod tests {
         );
         assert_eq!(
             positional_tasks(&argv(&[
-                "ensemble", "merge", "--resolver", "claude", "ensemble/x",
+                "ensemble",
+                "merge",
+                "--resolver",
+                "claude",
+                "ensemble/x",
             ])),
             vec!["ensemble/x".to_string()]
         );
@@ -1301,15 +2914,547 @@ mod tests {
     }
 
     #[test]
+    fn team_say_parser_defaults_to_operator() {
+        let parsed = parse_team_cmd_args(&argv(&[
+            "ensemble", "team", "say", "hello", "--repo", "r", "--team", "ops",
+        ]))
+        .unwrap();
+
+        assert_eq!(parsed.repo, "r");
+        assert_eq!(parsed.team.as_deref(), Some("ops"));
+        assert_eq!(
+            parsed.action,
+            TeamCliAction::Say {
+                from: "operator".to_string(),
+                message: "hello".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn team_inbox_parser_accepts_since_and_json() {
+        let parsed = parse_team_cmd_args(&argv(&[
+            "ensemble", "team", "inbox", "--since", "7", "--json",
+        ]))
+        .unwrap();
+
+        assert!(parsed.json);
+        assert_eq!(parsed.action, TeamCliAction::Inbox { since: 7 });
+    }
+
+    #[test]
+    fn team_parser_rejects_missing_flag_values() {
+        let err = parse_team_cmd_args(&argv(&["ensemble", "team", "say", "--from"])).unwrap_err();
+        assert!(err.contains("--from requires a value"));
+    }
+
+    #[test]
+    fn team_parser_rejects_bad_since_before_io() {
+        let err = parse_team_cmd_args(&argv(&["ensemble", "team", "inbox", "--since", "later"]))
+            .unwrap_err();
+        assert!(err.contains("--since must be a non-negative integer"));
+    }
+
+    #[test]
+    fn supervise_parser_accepts_agent_since_team_and_mutation_flags() {
+        let parsed = parse_supervise_args(&argv(&[
+            "ensemble",
+            "supervise",
+            "team-phase1",
+            "--repo",
+            "work",
+            "--team",
+            "ops",
+            "--agent",
+            "codex",
+            "--since",
+            "7",
+            "--json",
+            "--apply-steer",
+            "--abort-on-critical",
+        ]))
+        .unwrap();
+
+        assert_eq!(parsed.name, "team-phase1");
+        assert_eq!(parsed.repo, "work");
+        assert_eq!(parsed.team.as_deref(), Some("ops"));
+        assert_eq!(parsed.agent, "codex");
+        assert_eq!(parsed.since, 7);
+        assert!(parsed.json);
+        assert!(parsed.apply_steer);
+        assert!(parsed.abort_on_critical);
+        assert_eq!(
+            supervise_apply_mode(&parsed),
+            ensemble::SupervisorApply::ApplySteerAndAbortOnCritical
+        );
+    }
+
+    #[test]
+    fn supervise_parser_rejects_missing_name_and_bad_since() {
+        let missing = parse_supervise_args(&argv(&["ensemble", "supervise"])).unwrap_err();
+        assert!(missing.contains("needs <name>"));
+
+        let bad_since =
+            parse_supervise_args(&argv(&["ensemble", "supervise", "run", "--since", "later"]))
+                .unwrap_err();
+        assert!(bad_since.contains("--since must be a non-negative integer"));
+    }
+
+    #[test]
+    fn launcher_parser_handles_global_options_before_member_and_vendor_args_after() {
+        let parsed = match parse_launcher_invocation(&argv(&[
+            "ensemble",
+            "--repo",
+            "work",
+            "--team",
+            "ops",
+            "--member",
+            "lead@z13",
+            "--print-config",
+            "codex",
+            "--model",
+            "gpt-5",
+            "--repo",
+            "vendor-owned",
+        ]))
+        .unwrap()
+        .unwrap()
+        {
+            LauncherInvocation::Member { client, args } => {
+                assert_eq!(client, ensemble::mcp_install::ClientKind::Codex);
+                args
+            }
+            other => panic!("expected member launcher, got {other:?}"),
+        };
+
+        assert_eq!(parsed.repo, "work");
+        assert_eq!(parsed.team, "ops");
+        assert_eq!(parsed.name.as_deref(), Some("lead@z13"));
+        assert!(parsed.print_config);
+        assert_eq!(
+            parsed.vendor_args,
+            vec![
+                "--model".to_string(),
+                "gpt-5".to_string(),
+                "--repo".to_string(),
+                "vendor-owned".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn launcher_parser_accepts_confirmation_policy_before_member() {
+        let parsed = match parse_launcher_invocation(&argv(&[
+            "ensemble",
+            "--confirm-policy",
+            "approve",
+            "claude",
+            "--model",
+            "sonnet",
+        ]))
+        .unwrap()
+        .unwrap()
+        {
+            LauncherInvocation::Member { client, args } => {
+                assert_eq!(client, ensemble::mcp_install::ClientKind::Claude);
+                args
+            }
+            other => panic!("expected member launcher, got {other:?}"),
+        };
+
+        assert_eq!(parsed.confirm_policy, ConfirmPolicy::Approve);
+        assert_eq!(
+            parsed.vendor_args,
+            vec!["--model".to_string(), "sonnet".to_string()]
+        );
+    }
+
+    #[test]
+    fn launcher_parser_rejects_missing_values_unknown_flags_and_old_separator() {
+        let missing =
+            parse_launcher_invocation(&argv(&["ensemble", "--repo", "codex"])).unwrap_err();
+        assert!(missing.contains("--repo requires a value"));
+
+        let unknown =
+            parse_launcher_invocation(&argv(&["ensemble", "--dangerous", "codex"])).unwrap_err();
+        assert!(unknown.contains("unknown flag `--dangerous`"));
+
+        let old_separator =
+            parse_launcher_invocation(&argv(&["ensemble", "codex", "--", "--model", "gpt-5"]))
+                .unwrap_err();
+        assert!(old_separator.contains("old `--` separator"));
+
+        let bad_policy =
+            parse_launcher_invocation(&argv(&["ensemble", "--confirm-policy", "maybe", "codex"]))
+                .unwrap_err();
+        assert!(bad_policy.contains("--confirm-policy must be one of"));
+    }
+
+    #[test]
+    fn member_launcher_plan_resolves_defaults_and_team_scoped_mcp_args() {
+        let cwd = test_abs("cwd");
+        let env = MemberLauncherEnv {
+            cwd: cwd.clone(),
+            exe: test_abs("bin").join("ensemble"),
+            raw_host: Some("Z13.local".to_string()),
+            home: test_abs("home"),
+            codex_home: None,
+        };
+        let parsed = parse_member_launcher_args(&argv(&[
+            "ensemble", "--repo", "work", "--team", "ops", "codex", "--model", "gpt-5",
+        ]))
+        .unwrap();
+
+        let plan = build_member_launch_plan(ensemble::mcp_install::ClientKind::Codex, parsed, &env)
+            .unwrap();
+
+        assert_eq!(plan.repo, cwd.join("work"));
+        assert_eq!(plan.team, "ops");
+        assert_eq!(plan.member, "codex@z13");
+        assert_eq!(plan.crew, cwd.join("work").join("crew.toml"));
+        assert_eq!(plan.vendor_program, "codex");
+        assert_eq!(
+            plan.vendor_args,
+            vec!["--model".to_string(), "gpt-5".to_string()]
+        );
+        assert_eq!(plan.confirm_policy, ConfirmPolicy::Ask);
+        let rendered = ensemble::mcp_install::render_merged(plan.client, "", &plan.params).unwrap();
+        let toml: toml::Value = toml::from_str(&rendered).unwrap();
+        let args: Vec<&str> = toml["mcp_servers"]["ensemble"]["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_str().unwrap())
+            .collect();
+        assert!(
+            args.windows(2).any(|w| w == ["--team", "ops"]),
+            "MCP args must preserve the launcher team: {args:?}"
+        );
+    }
+
+    #[test]
+    fn member_launcher_blank_name_falls_back_consistently() {
+        let cwd = test_abs("cwd");
+        let env = MemberLauncherEnv {
+            cwd: cwd.clone(),
+            exe: test_abs("bin").join("ensemble"),
+            raw_host: Some("Z13".to_string()),
+            home: test_abs("home"),
+            codex_home: None,
+        };
+        let parsed = parse_member_launcher_args(&argv(&[
+            "ensemble", "--repo", "work", "--member", "   ", "claude",
+        ]))
+        .unwrap();
+
+        let plan =
+            build_member_launch_plan(ensemble::mcp_install::ClientKind::Claude, parsed, &env)
+                .unwrap();
+
+        assert_eq!(plan.member, "claude@z13");
+        assert_eq!(plan.session.member, "claude@z13");
+        assert_eq!(plan.params.name, "claude@z13");
+    }
+
+    #[test]
+    fn member_launcher_confirm_policy_adds_vendor_args_for_supported_clients() {
+        let cwd = test_abs("cwd");
+        let env = MemberLauncherEnv {
+            cwd: cwd.clone(),
+            exe: test_abs("bin").join("ensemble"),
+            raw_host: Some("Z13".to_string()),
+            home: test_abs("home"),
+            codex_home: None,
+        };
+        let parsed = parse_member_launcher_args(&argv(&[
+            "ensemble",
+            "--repo",
+            "work",
+            "--confirm-policy",
+            "approve",
+            "codex",
+            "--model",
+            "gpt-5",
+        ]))
+        .unwrap();
+
+        let plan = build_member_launch_plan(ensemble::mcp_install::ClientKind::Codex, parsed, &env)
+            .unwrap();
+
+        assert_eq!(
+            build_member_vendor_argv(&plan),
+            vec![
+                "--dangerously-bypass-approvals-and-sandbox".to_string(),
+                "--model".to_string(),
+                "gpt-5".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn member_confirmation_policy_maps_supported_vendor_modes() {
+        assert!(member_confirmation_args(
+            ensemble::mcp_install::ClientKind::Opencode,
+            ConfirmPolicy::Ask
+        )
+        .unwrap()
+        .is_empty());
+        assert_eq!(
+            member_confirmation_args(
+                ensemble::mcp_install::ClientKind::Codex,
+                ConfirmPolicy::Deny,
+            )
+            .unwrap(),
+            vec![
+                "--sandbox".to_string(),
+                "read-only".to_string(),
+                "--ask-for-approval".to_string(),
+                "never".to_string()
+            ]
+        );
+        assert_eq!(
+            member_confirmation_args(
+                ensemble::mcp_install::ClientKind::Claude,
+                ConfirmPolicy::Approve,
+            )
+            .unwrap(),
+            vec!["--dangerously-skip-permissions".to_string()]
+        );
+        assert_eq!(
+            member_confirmation_args(
+                ensemble::mcp_install::ClientKind::Claude,
+                ConfirmPolicy::Deny,
+            )
+            .unwrap(),
+            vec!["--permission-mode".to_string(), "dontAsk".to_string()]
+        );
+    }
+
+    #[test]
+    fn member_launcher_confirm_policy_rejects_unsupported_clients() {
+        let cwd = test_abs("cwd");
+        let env = MemberLauncherEnv {
+            cwd,
+            exe: test_abs("bin").join("ensemble"),
+            raw_host: Some("Z13".to_string()),
+            home: test_abs("home"),
+            codex_home: None,
+        };
+        let parsed = parse_member_launcher_args(&argv(&[
+            "ensemble",
+            "--confirm-policy",
+            "approve",
+            "opencode",
+        ]))
+        .unwrap();
+
+        let err =
+            build_member_launch_plan(ensemble::mcp_install::ClientKind::Opencode, parsed, &env)
+                .unwrap_err();
+
+        assert!(err.contains("opencode"));
+        assert!(err.contains("--confirm-policy approve"));
+    }
+
+    #[test]
+    fn agy_parser_accepts_timeout_prompt_and_team_flags() {
+        let parsed = parse_agy_args(&argv(&[
+            "ensemble",
+            "--repo",
+            "work",
+            "--team",
+            "ops",
+            "--member",
+            "agy@z13",
+            "--timeout",
+            "30",
+            "--confirm-policy",
+            "deny",
+            "--json",
+            "agy",
+            "--prompt",
+            "summarize board",
+            "--continue",
+        ]))
+        .unwrap();
+
+        assert_eq!(parsed.repo, "work");
+        assert_eq!(parsed.team, "ops");
+        assert_eq!(parsed.name.as_deref(), Some("agy@z13"));
+        assert_eq!(parsed.timeout_secs, 30);
+        assert_eq!(parsed.confirm_policy, ConfirmPolicy::Deny);
+        assert_eq!(parsed.prompt.as_deref(), Some("summarize board"));
+        assert_eq!(parsed.vendor_args, vec!["--continue".to_string()]);
+        assert!(parsed.json);
+    }
+
+    #[test]
+    fn agy_parser_requires_prompt_after_agy_launcher() {
+        let err =
+            parse_agy_args(&argv(&["ensemble", "--prompt", "summarize board", "agy"])).unwrap_err();
+        assert!(err.contains("put agy prompt flags after `agy`"));
+    }
+
+    #[test]
+    fn agy_parser_rejects_bad_timeout_before_io() {
+        let err = parse_agy_args(&argv(&["ensemble", "--timeout", "0", "agy"])).unwrap_err();
+        assert!(err.contains("--timeout must be a positive integer"));
+    }
+
+    #[test]
+    fn agy_launch_mode_is_interactive_without_prompt_json_or_print_prompt() {
+        let cwd = test_abs("cwd");
+        let parsed = parse_agy_args(&argv(&[
+            "ensemble",
+            "--repo",
+            "work",
+            "--team",
+            "ops",
+            "--member",
+            "agy@z13",
+            "--confirm-policy",
+            "approve",
+            "agy",
+            "--continue",
+        ]))
+        .unwrap();
+        let plan = build_agy_plan(parsed, &cwd, Some("Z13.local"));
+
+        assert_eq!(agy_launch_mode(&plan), AgyLaunchMode::Interactive);
+        assert_eq!(
+            build_agy_interactive_argv(&plan),
+            vec![
+                "--dangerously-skip-permissions".to_string(),
+                "--continue".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn agy_launch_mode_uses_team_turn_for_prompt_json_or_print_prompt() {
+        let cwd = test_abs("cwd");
+        let with_prompt = build_agy_plan(
+            parse_agy_args(&argv(&["ensemble", "agy", "--prompt", "read board"])).unwrap(),
+            &cwd,
+            Some("Z13.local"),
+        );
+        assert_eq!(agy_launch_mode(&with_prompt), AgyLaunchMode::TeamTurn);
+
+        let with_json = build_agy_plan(
+            parse_agy_args(&argv(&["ensemble", "--json", "agy"])).unwrap(),
+            &cwd,
+            Some("Z13.local"),
+        );
+        assert_eq!(agy_launch_mode(&with_json), AgyLaunchMode::TeamTurn);
+
+        let with_print_prompt = build_agy_plan(
+            parse_agy_args(&argv(&["ensemble", "--print-prompt", "agy"])).unwrap(),
+            &cwd,
+            Some("Z13.local"),
+        );
+        assert_eq!(agy_launch_mode(&with_print_prompt), AgyLaunchMode::TeamTurn);
+    }
+
+    #[test]
+    fn agy_prompt_includes_recent_team_board_and_noninteractive_instruction() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session =
+            ensemble::resolve_team_session(tmp.path(), Some("ops"), "agy", Some("agy@host"), None);
+        let messages = vec![
+            ensemble::Message {
+                from: "operator".to_string(),
+                kind: "note".to_string(),
+                body: "stay focused".to_string(),
+            },
+            ensemble::Message {
+                from: "codex@host".to_string(),
+                kind: "result".to_string(),
+                body: "implemented launcher".to_string(),
+            },
+        ];
+
+        let prompt = build_agy_team_prompt(
+            &session,
+            &messages,
+            Some("review current state"),
+            ConfirmPolicy::Deny,
+        );
+
+        assert!(prompt.contains("agy@host"));
+        assert!(prompt.contains("ops"));
+        assert!(prompt.contains("operator [note]: stay focused"));
+        assert!(prompt.contains("codex@host [result]: implemented launcher"));
+        assert!(prompt.contains("review current state"));
+        assert!(prompt.contains("Confirmation policy: deny"));
+        assert!(prompt.contains("do not approve"));
+    }
+
+    #[test]
+    fn agy_team_turn_posts_success_to_the_board() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session =
+            ensemble::resolve_team_session(tmp.path(), None, "agy", Some("agy@host"), None);
+        let adapter = ensemble::MockAdapter::new("agy", vec![Ok("hello from agy".to_string())]);
+
+        let (report, exit_code) = run_agy_team_turn(&session, &adapter, "prompt").unwrap();
+
+        assert_eq!(exit_code, 0);
+        assert!(report.ok);
+        assert_eq!(report.cursor, 1);
+        let inbox = ensemble::read_team_inbox(&session, 0).unwrap();
+        assert_eq!(inbox.messages[0].from, "agy@host");
+        assert_eq!(inbox.messages[0].kind, "result");
+        assert_eq!(inbox.messages[0].body, "hello from agy");
+    }
+
+    #[test]
+    fn agy_team_turn_posts_a_visible_flake_on_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session =
+            ensemble::resolve_team_session(tmp.path(), None, "agy", Some("agy@host"), None);
+        let adapter = ensemble::MockAdapter::new("agy", vec![Err(ensemble::AdapterError::Empty)]);
+
+        let (report, exit_code) = run_agy_team_turn(&session, &adapter, "prompt").unwrap();
+
+        assert_eq!(exit_code, ensemble::AdapterError::Empty.exit_code());
+        assert!(!report.ok);
+        assert_eq!(report.error_kind.as_deref(), Some("Empty"));
+        let inbox = ensemble::read_team_inbox(&session, 0).unwrap();
+        assert_eq!(inbox.messages[0].from, "agy@host");
+        assert_eq!(inbox.messages[0].kind, "flake");
+        assert!(inbox.messages[0].body.contains("agy flaked"));
+    }
+
+    fn test_abs(name: &str) -> std::path::PathBuf {
+        #[cfg(windows)]
+        {
+            std::path::PathBuf::from(format!(r"C:\ensemble-test\{name}"))
+        }
+        #[cfg(not(windows))]
+        {
+            std::path::PathBuf::from(format!("/ensemble-test/{name}"))
+        }
+    }
+
+    #[test]
     fn resolver_prompt_lists_paths_and_forbids_committing() {
         let p = build_resolver_prompt(
             "ensemble/z",
             "main",
             &["src/a.rs".to_string(), "src/b.rs".to_string()],
         );
-        assert!(p.contains("ensemble/z") && p.contains("main"), "names the branch + target");
-        assert!(p.contains("src/a.rs") && p.contains("src/b.rs"), "lists every conflicting path");
-        assert!(p.contains("REMOVE every conflict marker"), "asks to remove markers");
+        assert!(
+            p.contains("ensemble/z") && p.contains("main"),
+            "names the branch + target"
+        );
+        assert!(
+            p.contains("src/a.rs") && p.contains("src/b.rs"),
+            "lists every conflicting path"
+        );
+        assert!(
+            p.contains("REMOVE every conflict marker"),
+            "asks to remove markers"
+        );
         assert!(
             p.contains("Do NOT run `git add`") && p.contains("git commit"),
             "forbids staging/committing (resolver is edit-only)"

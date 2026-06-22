@@ -12,6 +12,8 @@ use std::time::{Duration, Instant};
 /// Flaked (never hung). Mirrors the proven agy_pty.py approach.
 pub struct AgyAdapter {
     timeout: Duration,
+    dangerously_skip_permissions: bool,
+    vendor_args: Vec<String>,
     /// S1b: optional hard-abort flag (set via `set_abort`); flipped mid-run ⇒ kill agy now and Flake.
     abort: Mutex<Option<Arc<AtomicBool>>>,
 }
@@ -20,14 +22,28 @@ impl AgyAdapter {
     pub fn new() -> Self {
         Self {
             timeout: Duration::from_secs(180),
+            dangerously_skip_permissions: false,
+            vendor_args: Vec::new(),
             abort: Mutex::new(None),
         }
     }
     pub fn with_timeout(timeout: Duration) -> Self {
         Self {
             timeout,
+            dangerously_skip_permissions: false,
+            vendor_args: Vec::new(),
             abort: Mutex::new(None),
         }
+    }
+
+    pub fn with_dangerously_skip_permissions(mut self, enabled: bool) -> Self {
+        self.dangerously_skip_permissions = enabled;
+        self
+    }
+
+    pub fn with_vendor_args(mut self, args: Vec<String>) -> Self {
+        self.vendor_args = args;
+        self
     }
 }
 
@@ -60,7 +76,12 @@ impl Adapter for AgyAdapter {
             .map_err(|e| AdapterError::Flaked(format!("openpty: {e}")))?;
 
         let mut cmd = CommandBuilder::new("agy");
-        for a in agy_argv(prompt, self.timeout) {
+        for a in agy_argv_with_permissions(
+            prompt,
+            self.timeout,
+            self.dangerously_skip_permissions,
+            &self.vendor_args,
+        ) {
             cmd.arg(a);
         }
         cmd.cwd(cwd);
@@ -152,7 +173,9 @@ impl Adapter for AgyAdapter {
             return Err(AdapterError::Flaked(reason));
         }
         let raw = buf.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        let text = strip_ansi(&String::from_utf8_lossy(&raw)).trim().to_string();
+        let text = strip_ansi(&String::from_utf8_lossy(&raw))
+            .trim()
+            .to_string();
         if text.is_empty() {
             return Err(AdapterError::Empty);
         }
@@ -168,19 +191,35 @@ impl Adapter for AgyAdapter {
 /// MCP-init / cold-auth code path and STALL forever (antigravity-cli#76), tripping our wall-clock
 /// kill as a flake. `N` = our timeout minus ~15s (min 10s) so agy self-terminates its model call
 /// just before we would hard-kill it.
+#[cfg(test)]
 fn agy_argv(prompt: &str, timeout: Duration) -> Vec<String> {
+    agy_argv_with_permissions(prompt, timeout, false, &[])
+}
+
+fn agy_argv_with_permissions(
+    prompt: &str,
+    timeout: Duration,
+    dangerously_skip_permissions: bool,
+    vendor_args: &[String],
+) -> Vec<String> {
     let t = timeout.as_secs();
     // print-timeout must stay STRICTLY BELOW our wall-clock kill so agy self-terminates its model
     // call first; `.min(t-2)` enforces that and `.max(1)` avoids "0s" (which some CLIs read as
     // *infinite*). The invariant holds for any realistic timeout (t >= 3; AgyAdapter uses 180s) — a
     // degenerate t <= 2 just lets the wall-clock kill do the bounding.
     let print_to = t.saturating_sub(15).max(10).min(t.saturating_sub(2)).max(1);
-    vec![
+    let mut args = Vec::new();
+    if dangerously_skip_permissions {
+        args.push("--dangerously-skip-permissions".into());
+    }
+    args.extend(vendor_args.iter().cloned());
+    args.extend([
         "--print-timeout".into(),
         format!("{print_to}s"),
         "-p".into(),
         prompt.into(),
-    ]
+    ]);
+    args
 }
 
 /// Strip ANSI/OSC escape sequences and bare control chars (keep \n \t) — agy's PTY output is a
@@ -256,5 +295,34 @@ mod tests {
             let pt: u64 = argv[1].trim_end_matches('s').parse().unwrap();
             assert!(pt < secs, "print_to {pt}s must be < wall-clock {secs}s");
         }
+    }
+
+    #[test]
+    fn agy_argv_can_enable_noninteractive_permission_approval() {
+        let argv = agy_argv_with_permissions("say PONG", Duration::from_secs(180), true, &[]);
+        assert_eq!(
+            argv,
+            vec![
+                "--dangerously-skip-permissions",
+                "--print-timeout",
+                "165s",
+                "-p",
+                "say PONG"
+            ]
+        );
+    }
+
+    #[test]
+    fn agy_argv_places_vendor_args_before_print_prompt() {
+        let argv = agy_argv_with_permissions(
+            "say PONG",
+            Duration::from_secs(30),
+            false,
+            &["--continue".to_string()],
+        );
+        assert_eq!(
+            argv,
+            vec!["--continue", "--print-timeout", "15s", "-p", "say PONG"]
+        );
     }
 }

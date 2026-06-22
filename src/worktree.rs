@@ -148,7 +148,11 @@ pub struct KeptWorktree {
 /// so concurrent same-slug requests can't double-create or race the checks. If the target path exists
 /// but is NOT a registered worktree (a stale dir left by a manual delete), this errors rather than
 /// guessing — the operator clears it (`git worktree prune`).
-pub fn ensure_kept_worktree(repo: &Path, member: &str, task: &str) -> std::io::Result<KeptWorktree> {
+pub fn ensure_kept_worktree(
+    repo: &Path,
+    member: &str,
+    task: &str,
+) -> std::io::Result<KeptWorktree> {
     let member = sanitize(member);
     let task = sanitize(task);
 
@@ -261,7 +265,12 @@ fn ensure_locked(repo: &Path, member: &str, task: &str) -> std::io::Result<KeptW
     let branch_exists = Command::new("git")
         .arg("-C")
         .arg(repo)
-        .args(["show-ref", "--verify", "--quiet", &format!("refs/heads/{canonical_branch}")])
+        .args([
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{canonical_branch}"),
+        ])
         .output()?
         .status
         .success();
@@ -279,7 +288,11 @@ fn ensure_locked(repo: &Path, member: &str, task: &str) -> std::io::Result<KeptW
             String::from_utf8_lossy(&out.stderr)
         )));
     }
-    Ok(KeptWorktree { path: abs, branch: canonical_branch, slug })
+    Ok(KeptWorktree {
+        path: abs,
+        branch: canonical_branch,
+        slug,
+    })
 }
 
 /// One entry from `git worktree list --porcelain`: its absolute path, the branch it has checked out
@@ -312,7 +325,11 @@ fn parse_worktrees(porcelain: &str) -> Vec<WtEntry> {
     let mut entries: Vec<WtEntry> = Vec::new();
     for line in porcelain.lines() {
         if let Some(p) = line.strip_prefix("worktree ") {
-            entries.push(WtEntry { path: p.trim().to_string(), branch: None, prunable: false });
+            entries.push(WtEntry {
+                path: p.trim().to_string(),
+                branch: None,
+                prunable: false,
+            });
         } else if let Some(b) = line.strip_prefix("branch ") {
             if let Some(e) = entries.last_mut() {
                 e.branch = Some(b.trim().to_string());
@@ -467,12 +484,18 @@ mod tests {
 
         let w1 = ensure_kept_worktree(repo, "codex", "feature-x").unwrap();
         assert!(w1.path.exists(), "the kept worktree dir exists");
-        assert_eq!(w1.branch, "ensemble/codex/feature-x", "branch carries the member as a component");
+        assert_eq!(
+            w1.branch, "ensemble/codex/feature-x",
+            "branch carries the member as a component"
+        );
         assert_eq!(w1.slug, "codex/feature-x");
         // a KeptWorktree has NO Drop removal: the dir is STILL there after the handle is dropped.
         let p1 = w1.path.clone();
         drop(w1);
-        assert!(p1.exists(), "a persistent worktree must NOT be removed on drop");
+        assert!(
+            p1.exists(),
+            "a persistent worktree must NOT be removed on drop"
+        );
 
         // idempotent re-attach: same member+task → same path/branch, exactly one worktree registered.
         let w2 = ensure_kept_worktree(repo, "codex", "feature-x").unwrap();
@@ -497,10 +520,17 @@ mod tests {
         let repo = tmp.path();
         init_repo(repo);
         // a plain (non-worktree) directory squatting the target path
-        let squat = repo.join(".ensemble").join("worktrees").join("codex").join("work");
+        let squat = repo
+            .join(".ensemble")
+            .join("worktrees")
+            .join("codex")
+            .join("work");
         std::fs::create_dir_all(&squat).unwrap();
         let err = ensure_kept_worktree(repo, "codex", "work").unwrap_err();
-        assert!(err.to_string().contains("not a registered git worktree"), "got: {err}");
+        assert!(
+            err.to_string().contains("not a registered git worktree"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -515,9 +545,17 @@ mod tests {
         std::fs::create_dir_all(&repo).unwrap();
         init_repo(&repo);
         let w = ensure_kept_worktree(&repo, "alice", "work").unwrap();
-        assert!(w.path.exists(), "must create a REAL worktree, not false-positive on the main one");
         assert!(
-            w.path.ends_with(Path::new(".ensemble").join("worktrees").join("alice").join("work")),
+            w.path.exists(),
+            "must create a REAL worktree, not false-positive on the main one"
+        );
+        assert!(
+            w.path.ends_with(
+                Path::new(".ensemble")
+                    .join("worktrees")
+                    .join("alice")
+                    .join("work")
+            ),
             "lands under .ensemble/worktrees/alice/work, got {:?}",
             w.path
         );
@@ -536,7 +574,10 @@ mod tests {
         // the member switches the worktree to a different branch
         git(&w.path, &["switch", "-c", "spike"]);
         let again = ensure_kept_worktree(repo, "codex", "feat").unwrap();
-        assert_eq!(again.branch, "spike", "re-attach reflects the real checked-out branch");
+        assert_eq!(
+            again.branch, "spike",
+            "re-attach reflects the real checked-out branch"
+        );
     }
 
     #[test]
@@ -589,7 +630,10 @@ mod tests {
         // recreate must SUCCEED by reusing the surviving branch, restoring the committed work
         let again = ensure_kept_worktree(repo, "codex", "redo").unwrap();
         assert_eq!(again.branch, "ensemble/codex/redo");
-        assert!(again.path.join("work.txt").exists(), "the surviving branch's work is restored");
+        assert!(
+            again.path.join("work.txt").exists(),
+            "the surviving branch's work is restored"
+        );
     }
 
     #[test]
@@ -603,7 +647,10 @@ mod tests {
         let w = ensure_kept_worktree(repo, "codex", "shared").unwrap();
         let from_main = std::fs::canonicalize(git_common_dir(repo).unwrap()).unwrap();
         let from_linked = std::fs::canonicalize(git_common_dir(&w.path).unwrap()).unwrap();
-        assert_eq!(from_main, from_linked, "every worktree shares one lock anchor (the common .git)");
+        assert_eq!(
+            from_main, from_linked,
+            "every worktree shares one lock anchor (the common .git)"
+        );
     }
 
     #[test]
@@ -620,7 +667,10 @@ mod tests {
         std::fs::create_dir_all(&parent).unwrap();
         std::os::unix::fs::symlink(repo, parent.join("evil")).unwrap(); // target → main worktree
         let err = ensure_kept_worktree(repo, "codex", "evil").unwrap_err();
-        assert!(err.to_string().contains("not a registered git worktree"), "got: {err}");
+        assert!(
+            err.to_string().contains("not a registered git worktree"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -642,9 +692,15 @@ mod tests {
             }
         });
         let paths = results.into_inner().unwrap_or_else(|e| e.into_inner());
-        assert!(paths.iter().all(|r| r.is_ok()), "no concurrent call errors: {paths:?}");
+        assert!(
+            paths.iter().all(|r| r.is_ok()),
+            "no concurrent call errors: {paths:?}"
+        );
         let first = paths[0].as_ref().unwrap().clone();
-        assert!(paths.iter().all(|r| r.as_ref().unwrap() == &first), "all re-attach to one path");
+        assert!(
+            paths.iter().all(|r| r.as_ref().unwrap() == &first),
+            "all re-attach to one path"
+        );
         // git worktree list shows the main worktree + EXACTLY one kept worktree (no double-create).
         let list = Command::new("git")
             .arg("-C")

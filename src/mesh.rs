@@ -46,7 +46,10 @@ mod tests {
             out.contains("ensemble up — serving on 100.87.70.65:7878"),
             "got:\n{out}"
         );
-        assert!(out.contains("\n  local CLIs : codex"), "indented; got:\n{out}");
+        assert!(
+            out.contains("\n  local CLIs : codex"),
+            "indented; got:\n{out}"
+        );
         assert!(out.contains("(serving"), "footer; got:\n{out}");
     }
 
