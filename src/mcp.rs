@@ -9,6 +9,7 @@
 //! `tools/call`) + the read-only tools `ensemble_mesh` and `ensemble_board_read`.
 
 use crate::board::FileBoard;
+use crate::control_plane::ControlPlane;
 use fs2::FileExt;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -673,9 +674,8 @@ fn tool_watch(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
     let name = feed_target(args)?;
     let since = optional_usize(args, "since", 0)?;
     let limit = mcp_limit(args)?;
-    let feed = crate::Feed::open(crate::member_stream_path(&ctx.repo, name));
-    let lines = feed
-        .read_since(since)
+    let lines = crate::LocalControlPlane::new()
+        .read_stream(&ctx.repo, name, since)
         .map_err(|e| RpcError::internal(format!("watch: {e}")))?;
     let messages: Vec<Value> = lines
         .into_iter()
@@ -697,10 +697,8 @@ fn tool_watch(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
 }
 
 fn append_control(ctx: &Ctx, name: &str, cmd: &crate::ControlCmd) -> Result<usize, RpcError> {
-    let feed = crate::Feed::open(crate::member_control_path(&ctx.repo, name));
-    let line = serde_json::to_string(cmd)
-        .map_err(|e| RpcError::internal(format!("control encode: {e}")))?;
-    feed.append(&line)
+    crate::LocalControlPlane::new()
+        .append_control(&ctx.repo, name, cmd)
         .map_err(|e| RpcError::internal(format!("control append: {e}")))
 }
 

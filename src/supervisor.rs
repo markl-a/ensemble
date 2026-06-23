@@ -1,4 +1,5 @@
 use crate::blackboard::Message;
+use crate::control_plane::ControlPlane;
 use crate::supervise::ControlCmd;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -186,8 +187,7 @@ pub fn collect_supervisor_evidence(
     limit: usize,
 ) -> std::io::Result<SupervisorEvidence> {
     let limit = limit.min(200);
-    let stream_lines =
-        crate::Feed::open(crate::member_stream_path(repo, name)).read_since(since)?;
+    let stream_lines = crate::LocalControlPlane::new().read_stream(repo, name, since)?;
     let stream: Vec<EvidenceLine> = stream_lines
         .iter()
         .take(limit)

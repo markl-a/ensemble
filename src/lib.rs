@@ -6,6 +6,7 @@ pub mod agy_adapter;
 pub mod blackboard;
 pub mod board;
 pub mod conductor;
+pub mod control_plane;
 pub mod controlled;
 pub mod council;
 pub mod crew;
@@ -36,6 +37,7 @@ pub use agy_adapter::AgyAdapter;
 pub use blackboard::{Blackboard, Message};
 pub use board::FileBoard;
 pub use conductor::{Conductor, Decision, RunOutcome};
+pub use control_plane::{ControlPlane, LocalControlPlane};
 pub use controlled::{
     control_script, pty_program_for_vendor, run_controlled_pty, ControlledPtyConfig,
 };

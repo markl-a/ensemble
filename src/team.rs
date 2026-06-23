@@ -1,6 +1,6 @@
 use crate::blackboard::Message;
-use crate::board::FileBoard;
-use crate::ledger::{Counts, Ledger};
+use crate::control_plane::{ControlPlane, LocalControlPlane};
+use crate::ledger::Counts;
 use serde::Serialize;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -134,40 +134,15 @@ pub fn post_team_message(
     kind: &str,
     body: &str,
 ) -> io::Result<usize> {
-    FileBoard::open_at(&session.root).post(from, kind, body)
+    LocalControlPlane::new().post_team_message(session, from, kind, body)
 }
 
 pub fn read_team_inbox(session: &TeamSession, since: usize) -> io::Result<TeamInbox> {
-    let messages = FileBoard::open_at(&session.root).read_since(since)?;
-    Ok(TeamInbox {
-        next: since + messages.len(),
-        messages,
-    })
+    LocalControlPlane::new().read_team_inbox(session, since)
 }
 
 pub fn team_status(session: &TeamSession) -> io::Result<TeamStatus> {
-    let board = FileBoard::open_at(&session.root);
-    let board_len = board.len()?;
-    let ledger_counts = if session.ledger.exists() {
-        Ledger::open(&session.ledger)
-            .map_err(|e| io::Error::other(e.to_string()))?
-            .counts()
-            .map_err(|e| io::Error::other(e.to_string()))?
-            .into()
-    } else {
-        TeamLedgerCounts::default()
-    };
-    Ok(TeamStatus {
-        repo: session.repo.clone(),
-        team: session.team.clone(),
-        root: session.root.clone(),
-        board: session.board.clone(),
-        board_len,
-        ledger: session.ledger.clone(),
-        ledger_counts,
-        streams: list_feed_stems(&session.root.join("stream"))?,
-        controls: list_feed_stems(&session.root.join("control"))?,
-    })
+    LocalControlPlane::new().team_status(session)
 }
 
 pub fn render_team_inbox(inbox: &TeamInbox) -> String {
@@ -195,30 +170,6 @@ pub fn render_team_status(status: &TeamStatus) -> String {
         status.streams.len(),
         status.controls.len()
     )
-}
-
-fn list_feed_stems(dir: &Path) -> io::Result<Vec<String>> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e),
-    };
-    let mut names = Vec::new();
-    for entry in entries {
-        let entry = entry?;
-        if !entry.file_type()?.is_file() {
-            continue;
-        }
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("ndjson") {
-            continue;
-        }
-        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-            names.push(stem.to_string());
-        }
-    }
-    names.sort();
-    Ok(names)
 }
 
 fn tame_client(client: &str) -> String {

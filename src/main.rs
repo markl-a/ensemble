@@ -167,7 +167,8 @@ fn watch_cmd(args: &[String]) {
     let repo = w.repo.map(std::path::PathBuf::from).unwrap_or_else(|| {
         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
     });
-    let feed = ensemble::Feed::open(ensemble::member_stream_path(&repo, &member));
+    let plane = ensemble::LocalControlPlane::new();
+    let stream_path = ensemble::member_stream_path(&repo, &member);
 
     // Read everything from `cursor` onward, render it, and advance the cursor PAST each line only after
     // it is actually written — so a failed write never silently drops an event by counting it as done. A
@@ -175,7 +176,7 @@ fn watch_cmd(args: &[String]) {
     // block-buffered when piped/redirected, so without an explicit flush the tailed lines wouldn't appear
     // promptly. Propagates the io::Error (feed read OR stdout write) for the caller to classify.
     let drain = |cursor: &mut usize| -> std::io::Result<()> {
-        let lines = feed.read_since(*cursor)?;
+        let lines = plane.read_stream(&repo, &member, *cursor)?;
         use std::io::Write as _;
         let mut out = std::io::stdout().lock();
         for l in &lines {
@@ -198,7 +199,7 @@ fn watch_cmd(args: &[String]) {
             if closed {
                 std::process::exit(0);
             }
-            eprintln!("ensemble watch: {}: {e}", feed.path().display());
+            eprintln!("ensemble watch: {}: {e}", stream_path.display());
             std::process::exit(1);
         }
     };
@@ -487,10 +488,10 @@ fn append_control_direct(
     name: &str,
     cmd: &ensemble::ControlCmd,
 ) -> Result<usize, String> {
-    let feed = ensemble::Feed::open(ensemble::member_control_path(repo, name));
-    let line = serde_json::to_string(cmd).map_err(|e| format!("encode control command: {e}"))?;
-    feed.append(&line)
-        .map_err(|e| format!("write control feed {}: {e}", feed.path().display()))
+    let path = ensemble::member_control_path(repo, name);
+    ensemble::LocalControlPlane::new()
+        .append_control(repo, name, cmd)
+        .map_err(|e| format!("write control feed {}: {e}", path.display()))
 }
 
 /// `ensemble all "<prompt>" [--repo <p>] [--no-discover] [--json]` — COUNCIL broadcast: fan the SAME
