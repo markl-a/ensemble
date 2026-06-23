@@ -10,8 +10,10 @@ use crate::ledger::Ledger;
 use crate::ndjson::Feed;
 use crate::supervise::{member_control_path, member_stream_path, ControlCmd};
 use crate::team::{TeamInbox, TeamLedgerCounts, TeamSession, TeamStatus};
+use crate::wire::{ControlPlaneRequest, ControlPlaneResponse};
 use std::io;
 use std::path::Path;
+use std::time::Duration;
 
 /// The operations a member/operator needs to observe and steer a team.
 pub trait ControlPlane {
@@ -91,6 +93,124 @@ impl ControlPlane for LocalControlPlane {
         let line = serde_json::to_string(cmd).map_err(io::Error::other)?;
         feed.append(&line)
     }
+}
+
+/// HTTP-backed control plane for a remote `ensemble serve` node.
+#[derive(Debug, Clone)]
+pub struct RemoteControlPlane {
+    base_url: String,
+    timeout: Duration,
+}
+
+impl RemoteControlPlane {
+    pub fn new(base_url: &str) -> Self {
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            timeout: Duration::from_secs(30),
+        }
+    }
+
+    pub fn with_timeout(base_url: &str, timeout: Duration) -> Self {
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            timeout,
+        }
+    }
+
+    fn call(&self, req: ControlPlaneRequest) -> io::Result<ControlPlaneResponse> {
+        let body = serde_json::to_string(&req).map_err(io::Error::other)?;
+        let url = format!("{}/control", self.base_url);
+        let resp = ureq::post(&url)
+            .timeout(self.timeout)
+            .set("content-type", "application/json")
+            .send_string(&body);
+        let text = match resp {
+            Ok(r) => r
+                .into_string()
+                .map_err(|e| io::Error::other(format!("read remote control response: {e}")))?,
+            Err(ureq::Error::Status(code, r)) => {
+                let body = r.into_string().unwrap_or_default();
+                return Err(io::Error::other(format!(
+                    "remote control returned HTTP {code}: {body}"
+                )));
+            }
+            Err(e) => return Err(io::Error::other(format!("remote control: {e}"))),
+        };
+        let resp: ControlPlaneResponse = serde_json::from_str(&text)
+            .map_err(|e| io::Error::other(format!("decode remote control response: {e}")))?;
+        if resp.ok {
+            Ok(resp)
+        } else {
+            Err(io::Error::other(format!(
+                "remote control {}: {}",
+                resp.error_kind.as_deref().unwrap_or("Error"),
+                resp.error.as_deref().unwrap_or("request failed")
+            )))
+        }
+    }
+}
+
+impl ControlPlane for RemoteControlPlane {
+    fn team_status(&self, session: &TeamSession) -> io::Result<TeamStatus> {
+        self.call(ControlPlaneRequest::TeamStatus {
+            repo: repo_wire(&session.repo),
+            team: session.team.clone(),
+        })?
+        .status
+        .ok_or_else(|| io::Error::other("remote control response missing status"))
+    }
+
+    fn post_team_message(
+        &self,
+        session: &TeamSession,
+        from: &str,
+        kind: &str,
+        body: &str,
+    ) -> io::Result<usize> {
+        self.call(ControlPlaneRequest::TeamSay {
+            repo: repo_wire(&session.repo),
+            team: session.team.clone(),
+            from: from.to_string(),
+            kind: kind.to_string(),
+            body: body.to_string(),
+        })?
+        .next
+        .ok_or_else(|| io::Error::other("remote control response missing next cursor"))
+    }
+
+    fn read_team_inbox(&self, session: &TeamSession, since: usize) -> io::Result<TeamInbox> {
+        self.call(ControlPlaneRequest::TeamInbox {
+            repo: repo_wire(&session.repo),
+            team: session.team.clone(),
+            since,
+        })?
+        .inbox
+        .ok_or_else(|| io::Error::other("remote control response missing inbox"))
+    }
+
+    fn read_stream(&self, repo: &Path, name: &str, since: usize) -> io::Result<Vec<String>> {
+        self.call(ControlPlaneRequest::Watch {
+            repo: repo_wire(repo),
+            name: name.to_string(),
+            since,
+        })?
+        .stream
+        .ok_or_else(|| io::Error::other("remote control response missing stream"))
+    }
+
+    fn append_control(&self, repo: &Path, name: &str, cmd: &ControlCmd) -> io::Result<usize> {
+        self.call(ControlPlaneRequest::AppendControl {
+            repo: repo_wire(repo),
+            name: name.to_string(),
+            cmd: cmd.clone(),
+        })?
+        .next
+        .ok_or_else(|| io::Error::other("remote control response missing next cursor"))
+    }
+}
+
+fn repo_wire(repo: &Path) -> String {
+    repo.to_string_lossy().to_string()
 }
 
 fn list_feed_stems(dir: &Path) -> io::Result<Vec<String>> {

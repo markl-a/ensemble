@@ -37,7 +37,7 @@ pub use agy_adapter::AgyAdapter;
 pub use blackboard::{Blackboard, Message};
 pub use board::FileBoard;
 pub use conductor::{Conductor, Decision, RunOutcome};
-pub use control_plane::{ControlPlane, LocalControlPlane};
+pub use control_plane::{ControlPlane, LocalControlPlane, RemoteControlPlane};
 pub use controlled::{
     control_script, pty_program_for_vendor, run_controlled_pty, ControlledPtyConfig,
 };

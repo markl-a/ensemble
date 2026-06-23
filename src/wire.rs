@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+use crate::supervise::ControlCmd;
+use crate::team::{TeamInbox, TeamStatus};
+
 /// Orchestrator → node: run `agent` on `prompt`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunRequest {
@@ -46,6 +49,119 @@ pub struct RunResponse {
     /// Absent on a Phase-3a run or any error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repo_result: Option<RepoResult>,
+}
+
+/// Orchestrator → node: one control-plane operation against repo-local team state on that node.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum ControlPlaneRequest {
+    TeamStatus {
+        repo: String,
+        team: String,
+    },
+    TeamSay {
+        repo: String,
+        team: String,
+        from: String,
+        kind: String,
+        body: String,
+    },
+    TeamInbox {
+        repo: String,
+        team: String,
+        since: usize,
+    },
+    Watch {
+        repo: String,
+        name: String,
+        since: usize,
+    },
+    AppendControl {
+        repo: String,
+        name: String,
+        cmd: ControlCmd,
+    },
+}
+
+/// Node → orchestrator: result for a `/control` request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlPlaneResponse {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<TeamStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbox: Option<TeamInbox>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl ControlPlaneResponse {
+    pub fn ok_status(status: TeamStatus) -> Self {
+        Self {
+            ok: true,
+            status: Some(status),
+            inbox: None,
+            stream: None,
+            next: None,
+            error_kind: None,
+            error: None,
+        }
+    }
+
+    pub fn ok_inbox(inbox: TeamInbox) -> Self {
+        Self {
+            ok: true,
+            status: None,
+            inbox: Some(inbox),
+            stream: None,
+            next: None,
+            error_kind: None,
+            error: None,
+        }
+    }
+
+    pub fn ok_stream(stream: Vec<String>) -> Self {
+        Self {
+            ok: true,
+            status: None,
+            inbox: None,
+            stream: Some(stream),
+            next: None,
+            error_kind: None,
+            error: None,
+        }
+    }
+
+    pub fn ok_next(next: usize) -> Self {
+        Self {
+            ok: true,
+            status: None,
+            inbox: None,
+            stream: None,
+            next: Some(next),
+            error_kind: None,
+            error: None,
+        }
+    }
+
+    pub fn err(kind: &str, msg: &str) -> Self {
+        Self {
+            ok: false,
+            status: None,
+            inbox: None,
+            stream: None,
+            next: None,
+            error_kind: Some(kind.into()),
+            error: Some(msg.into()),
+        }
+    }
 }
 
 impl RunResponse {
@@ -136,5 +252,44 @@ mod tests {
         let r = RunResponse::ok_with_repo("codex", "done", "BBB".into(), "dispatch/codex-0".into());
         let back: RunResponse = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
         assert_eq!(back.repo_result.unwrap().branch, "dispatch/codex-0");
+    }
+
+    #[test]
+    fn control_plane_request_response_round_trip_json() {
+        let req = ControlPlaneRequest::AppendControl {
+            repo: "/repo".into(),
+            name: "claude@node".into(),
+            cmd: ControlCmd::Steer {
+                from: "operator".into(),
+                prompt: "focus".into(),
+            },
+        };
+        let s = serde_json::to_string(&req).unwrap();
+        assert!(s.contains(r#""op":"append_control""#), "got {s}");
+        let back: ControlPlaneRequest = serde_json::from_str(&s).unwrap();
+        match back {
+            ControlPlaneRequest::AppendControl { name, cmd, .. } => {
+                assert_eq!(name, "claude@node");
+                assert_eq!(
+                    cmd,
+                    ControlCmd::Steer {
+                        from: "operator".into(),
+                        prompt: "focus".into()
+                    }
+                );
+            }
+            other => panic!("expected append_control, got {other:?}"),
+        }
+
+        let ok = ControlPlaneResponse::ok_next(7);
+        let back: ControlPlaneResponse =
+            serde_json::from_str(&serde_json::to_string(&ok).unwrap()).unwrap();
+        assert!(back.ok);
+        assert_eq!(back.next, Some(7));
+        assert!(back.error.is_none());
+
+        let err = ControlPlaneResponse::err("BadRequest", "bad repo");
+        assert!(!err.ok);
+        assert_eq!(err.error_kind.as_deref(), Some("BadRequest"));
     }
 }

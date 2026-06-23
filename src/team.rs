@@ -1,7 +1,7 @@
 use crate::blackboard::Message;
 use crate::control_plane::{ControlPlane, LocalControlPlane};
 use crate::ledger::Counts;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -19,7 +19,7 @@ pub struct TeamSession {
     pub control: PathBuf,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamLedgerCounts {
     pub queued: usize,
     pub claimed: usize,
@@ -38,14 +38,14 @@ impl From<Counts> for TeamLedgerCounts {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TeamInbox {
     pub messages: Vec<Message>,
     pub next: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TeamStatus {
     pub repo: PathBuf,

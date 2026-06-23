@@ -1,7 +1,8 @@
 use crate::adapter::Adapter;
-use crate::wire::{RunRequest, RunResponse};
+use crate::control_plane::{ControlPlane, LocalControlPlane};
+use crate::wire::{ControlPlaneRequest, ControlPlaneResponse, RunRequest, RunResponse};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 type Local = HashMap<String, Box<dyn Adapter>>;
 
@@ -70,6 +71,13 @@ fn serve_loop(server: tiny_http::Server, local: Local, limit: Option<usize>) {
             let _ = req.respond(json_response(
                 serde_json::to_string(&resp).unwrap_or_default(),
             ));
+        } else if method == tiny_http::Method::Post && url == "/control" {
+            let mut body = String::new();
+            let _ = req.as_reader().read_to_string(&mut body);
+            let resp = handle_control(&body);
+            let _ = req.respond(json_response(
+                serde_json::to_string(&resp).unwrap_or_default(),
+            ));
         } else {
             let _ =
                 req.respond(tiny_http::Response::from_string("not found").with_status_code(404));
@@ -81,6 +89,143 @@ fn serve_loop(server: tiny_http::Server, local: Local, limit: Option<usize>) {
             }
         }
     }
+}
+
+fn handle_control(body: &str) -> ControlPlaneResponse {
+    let req: ControlPlaneRequest = match serde_json::from_str(body) {
+        Ok(r) => r,
+        Err(e) => return ControlPlaneResponse::err("BadRequest", &format!("bad request: {e}")),
+    };
+    let plane = LocalControlPlane::new();
+    match req {
+        ControlPlaneRequest::TeamStatus { repo, team } => {
+            let repo = match resolve_control_repo(&repo) {
+                Ok(repo) => repo,
+                Err(e) => return ControlPlaneResponse::err("BadRequest", &e),
+            };
+            let session = crate::team::resolve_team_session(
+                &repo,
+                Some(&team),
+                "remote",
+                Some("remote"),
+                None,
+            );
+            match plane.team_status(&session) {
+                Ok(status) => ControlPlaneResponse::ok_status(status),
+                Err(e) => ControlPlaneResponse::err("Io", &e.to_string()),
+            }
+        }
+        ControlPlaneRequest::TeamSay {
+            repo,
+            team,
+            from,
+            kind,
+            body,
+        } => {
+            let repo = match resolve_control_repo(&repo) {
+                Ok(repo) => repo,
+                Err(e) => return ControlPlaneResponse::err("BadRequest", &e),
+            };
+            let session = crate::team::resolve_team_session(
+                &repo,
+                Some(&team),
+                "remote",
+                Some("remote"),
+                None,
+            );
+            match plane.post_team_message(&session, &from, &kind, &body) {
+                Ok(next) => ControlPlaneResponse::ok_next(next),
+                Err(e) => ControlPlaneResponse::err("Io", &e.to_string()),
+            }
+        }
+        ControlPlaneRequest::TeamInbox { repo, team, since } => {
+            let repo = match resolve_control_repo(&repo) {
+                Ok(repo) => repo,
+                Err(e) => return ControlPlaneResponse::err("BadRequest", &e),
+            };
+            let session = crate::team::resolve_team_session(
+                &repo,
+                Some(&team),
+                "remote",
+                Some("remote"),
+                None,
+            );
+            match plane.read_team_inbox(&session, since) {
+                Ok(inbox) => ControlPlaneResponse::ok_inbox(inbox),
+                Err(e) => ControlPlaneResponse::err("Io", &e.to_string()),
+            }
+        }
+        ControlPlaneRequest::Watch { repo, name, since } => {
+            let repo = match resolve_control_repo(&repo) {
+                Ok(repo) => repo,
+                Err(e) => return ControlPlaneResponse::err("BadRequest", &e),
+            };
+            let name = match validate_feed_target(&name) {
+                Ok(name) => name,
+                Err(e) => return ControlPlaneResponse::err("BadRequest", &e),
+            };
+            match plane.read_stream(&repo, &name, since) {
+                Ok(stream) => ControlPlaneResponse::ok_stream(stream),
+                Err(e) => ControlPlaneResponse::err("Io", &e.to_string()),
+            }
+        }
+        ControlPlaneRequest::AppendControl { repo, name, cmd } => {
+            let repo = match resolve_control_repo(&repo) {
+                Ok(repo) => repo,
+                Err(e) => return ControlPlaneResponse::err("BadRequest", &e),
+            };
+            let name = match validate_feed_target(&name) {
+                Ok(name) => name,
+                Err(e) => return ControlPlaneResponse::err("BadRequest", &e),
+            };
+            match plane.append_control(&repo, &name, &cmd) {
+                Ok(next) => ControlPlaneResponse::ok_next(next),
+                Err(e) => ControlPlaneResponse::err("Io", &e.to_string()),
+            }
+        }
+    }
+}
+
+fn resolve_control_repo(repo: &str) -> Result<PathBuf, String> {
+    let repo = repo.trim();
+    if repo.is_empty() {
+        return Err("repo must not be blank".to_string());
+    }
+    if repo.chars().any(|c| c == '\0' || c.is_control()) {
+        return Err("repo must not contain control characters".to_string());
+    }
+    let path = PathBuf::from(repo);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .map_err(|e| format!("resolve current dir: {e}"))?
+            .join(path)
+    };
+    let canonical = path
+        .canonicalize()
+        .map_err(|e| format!("repo `{repo}` is not accessible: {e}"))?;
+    if !canonical.is_dir() {
+        return Err(format!("repo `{repo}` is not a directory"));
+    }
+    Ok(canonical)
+}
+
+fn validate_feed_target(name: &str) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("name must not be blank".to_string());
+    }
+    if name
+        .chars()
+        .any(|c| c == '/' || c == '\\' || c.is_control())
+    {
+        return Err("name must not contain path separators or control characters".to_string());
+    }
+    if name.chars().all(|c| c == '.') {
+        return Err("name must not be dot-only".to_string());
+    }
+    Ok(name.to_string())
 }
 
 fn handle_run(local: &Local, body: &str) -> RunResponse {
@@ -178,6 +323,7 @@ fn json_response(body: String) -> tiny_http::Response<std::io::Cursor<Vec<u8>>> 
 mod tests {
     use super::*;
     use crate::adapter::{Adapter, MockAdapter};
+    use crate::control_plane::ControlPlane;
     use std::collections::HashMap;
 
     #[test]
@@ -331,5 +477,80 @@ mod tests {
         let out = a.run("do it", cwd.path()).unwrap();
         assert_eq!(out.text, "REMOTE-OK");
         h.join().unwrap();
+    }
+
+    #[test]
+    fn serve_control_plane_round_trips_team_watch_and_control() {
+        let repo = tempfile::tempdir().unwrap();
+        let session =
+            crate::team::resolve_team_session(repo.path(), None, "remote", Some("remote"), None);
+        let local: HashMap<String, Box<dyn Adapter>> = HashMap::new();
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", server.server_addr());
+        let h = std::thread::spawn(move || serve_until_n(server, local, 5));
+
+        let remote = crate::RemoteControlPlane::new(&url);
+        let next = remote
+            .post_team_message(&session, "operator", "note", "hello remote")
+            .unwrap();
+        assert_eq!(next, 1);
+
+        let inbox = remote.read_team_inbox(&session, 0).unwrap();
+        assert_eq!(inbox.next, 1);
+        assert_eq!(inbox.messages[0].body, "hello remote");
+
+        crate::Feed::open(crate::member_stream_path(repo.path(), "run-1"))
+            .append(r#"{"from":"codex","kind":"result","body":"done"}"#)
+            .unwrap();
+        let stream = remote.read_stream(repo.path(), "run-1", 0).unwrap();
+        assert_eq!(stream.len(), 1);
+        assert!(stream[0].contains("done"));
+
+        let control_next = remote
+            .append_control(
+                repo.path(),
+                "run-1",
+                &crate::ControlCmd::Steer {
+                    from: "operator".into(),
+                    prompt: "focus".into(),
+                },
+            )
+            .unwrap();
+        assert_eq!(control_next, 1);
+        let control = crate::Feed::open(crate::member_control_path(repo.path(), "run-1"))
+            .read_since(0)
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<crate::ControlCmd>(&control[0]).unwrap(),
+            crate::ControlCmd::Steer {
+                from: "operator".into(),
+                prompt: "focus".into()
+            }
+        );
+
+        let status = remote.team_status(&session).unwrap();
+        assert_eq!(status.board_len, 1);
+        assert_eq!(status.streams, vec!["run-1".to_string()]);
+        assert_eq!(status.controls, vec!["run-1".to_string()]);
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn control_route_rejects_unsafe_feed_targets() {
+        let repo = tempfile::tempdir().unwrap();
+        let req = crate::wire::ControlPlaneRequest::Watch {
+            repo: repo.path().to_string_lossy().to_string(),
+            name: "../run".into(),
+            since: 0,
+        };
+        let resp = handle_control(&serde_json::to_string(&req).unwrap());
+
+        assert!(!resp.ok);
+        assert_eq!(resp.error_kind.as_deref(), Some("BadRequest"));
+        assert!(resp
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("path separators"));
     }
 }

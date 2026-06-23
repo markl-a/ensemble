@@ -57,8 +57,20 @@ or control feeds.
 - The controlled PTY receiver still reads its local control feed because it is the local transport
   endpoint that drives a child process on that machine.
 
+## Phase 2 Slice 1
+Expose the same control-plane contract through `ensemble serve`:
+
+- `POST /control`
+- request variants: `team_status`, `team_say`, `team_inbox`, `watch`, `append_control`
+- response shape: `{ ok, status?, inbox?, stream?, next?, errorKind?, error? }`
+
+The first remote transport is deliberately node-local: it reads and mutates the target node's
+repo-local `.ensemble/` state. A later coordinator can implement the same contract for shared
+multi-machine state.
+
+Every Phase 2 slice must keep the Phase 1 focused regression gate green for the local single-machine
+workflow: team board, MCP tools, controlled launcher parsing, watch, steer, and abort.
+
 ## Next Steps
-- Add `RemoteControlPlane` or coordinator routes for `team_status`, `team_say`, `team_inbox`,
-  `watch`, `steer`, and `abort`.
 - Add `--node` or team-member routing where an operation targets another machine.
 - Add authentication and network boundary checks before accepting remote control mutations.
