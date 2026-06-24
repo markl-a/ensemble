@@ -115,6 +115,61 @@ impl Conductor {
         a.run(prompt, cwd)
     }
 
+    /// Run `role`'s agent, and if it comes back RATE-LIMITED, automatically substitute the agent's
+    /// configured backup (a DIFFERENT vendor) once. A quota exhaustion is not a transient flake:
+    /// retrying the same CLI before its reset time is futile, and excluding it would weaken the
+    /// quorum — so substitution is the correct automatic remediation, applied REGARDLESS of the
+    /// `on_flake` policy (which still governs ordinary flakes). The quota reason + reset time are
+    /// logged either way. Returns the (possibly substituted) result and the effective agent name.
+    fn run_role_with_quota_fallback(
+        &self,
+        bb: &mut Blackboard,
+        role: &str,
+        agent_name: &str,
+        prompt: &str,
+        cwd: &Path,
+    ) -> (
+        Option<Result<crate::adapter::AgentOutput, crate::adapter::AdapterError>>,
+        String,
+    ) {
+        let mut effective = agent_name.to_string();
+        let mut result = self
+            .adapter_for_role(role)
+            .map(|a| self.run_adapter(a, prompt, cwd));
+
+        // Snapshot the quota detail (Display carries reason + "retry after <when>") before mutating.
+        let detail = match &result {
+            Some(Err(crate::adapter::AdapterError::RateLimited(info))) => Some(info.to_string()),
+            _ => None,
+        };
+        if let Some(detail) = detail {
+            match self.crew.backup_for(agent_name) {
+                Some(backup) if self.adapters.contains_key(backup) => {
+                    self.note(
+                        bb,
+                        role,
+                        "finding",
+                        &format!(
+                            "'{agent_name}' rate-limited{detail} — auto-substituting backup '{backup}'"
+                        ),
+                    );
+                    effective = backup.to_string();
+                    let b = self.adapters.get(backup).expect("presence checked above");
+                    result = Some(self.run_adapter(b.as_ref(), prompt, cwd));
+                }
+                _ => {
+                    self.note(
+                        bb,
+                        role,
+                        "finding",
+                        &format!("'{agent_name}' rate-limited{detail} — no backup configured"),
+                    );
+                }
+            }
+        }
+        (result, effective)
+    }
+
     /// Run the role pipeline on `task` until the gate lands it, escalates, or rounds run out.
     pub fn run(&self, task: &str, cwd: &Path) -> RunOutcome {
         let mut bb = Blackboard::new();
@@ -161,14 +216,20 @@ impl Conductor {
                 };
             }
 
-            // 1) implementer
+            // 1) implementer — quota-aware: a rate-limited implementer is auto-substituted to its
+            // backup (a different vendor) rather than escalating the whole run on a transient quota.
             let impl_role = self.crew.implementer_role();
+            let impl_agent = self
+                .crew
+                .roles
+                .get(impl_role)
+                .map(|r| r.agent.clone())
+                .unwrap_or_default();
             let impl_prompt = build_prompt(task, &bb, &feedback, impl_role, false);
             let impl_text;
-            match self
-                .adapter_for_role(impl_role)
-                .map(|a| self.run_adapter(a, &impl_prompt, cwd))
-            {
+            let (impl_result, _impl_effective) =
+                self.run_role_with_quota_fallback(&mut bb, impl_role, &impl_agent, &impl_prompt, cwd);
+            match impl_result {
                 Some(Ok(out)) => {
                     impl_text = out.text.clone();
                     self.note(&mut bb, &out.agent, "result", &out.text);
@@ -275,12 +336,15 @@ impl Conductor {
                     .get(role)
                     .map(|r| r.agent.clone())
                     .unwrap_or_default();
-                let mut result = self
-                    .adapter_for_role(role)
-                    .map(|a| self.run_adapter(a, &prompt, cwd));
-                let mut effective_agent = agent_name.clone();
+                // Quota-aware first: a rate-limited reviewer is auto-substituted to its backup
+                // (preserves the quorum) regardless of on_flake. Ordinary (non-quota) flakes then
+                // fall to the configured on_flake policy below.
+                let (mut result, mut effective_agent) =
+                    self.run_role_with_quota_fallback(&mut bb, role, &agent_name, &prompt, cwd);
 
-                if matches!(result, Some(Err(_))) {
+                let was_quota =
+                    matches!(result, Some(Err(crate::adapter::AdapterError::RateLimited(_))));
+                if matches!(result, Some(Err(_))) && !was_quota {
                     match self.crew.gate.on_flake {
                         OnFlake::Exclude => {}
                         OnFlake::Retry => {
@@ -644,6 +708,166 @@ mod tests {
             seen.iter()
                 .any(|(f, k)| f == "conductor" && k == "decision"),
             "terminal decision streamed: {seen:?}"
+        );
+    }
+
+    // ---- feature 3: quota-aware auto-remediation ----
+
+    #[test]
+    fn rate_limited_implementer_is_auto_substituted_to_backup_and_lands() {
+        use super::*;
+        use crate::adapter::{Adapter, AdapterError, MockAdapter, RateLimitInfo};
+        use crate::crew::{AgentConfig, CrewConfig, GatePolicy, OnFlake, RoleConfig};
+        use std::collections::HashMap;
+
+        // implement=codex (rate-limited, backup=opencode), review=claude (approves).
+        let crew = CrewConfig {
+            gate: GatePolicy {
+                min_approvals: 1,
+                max_rounds: 1,
+                on_flake: OnFlake::Exclude,
+                stall_limit: 0,
+                max_task_secs: 0,
+            },
+            pipeline: vec!["implement".to_string(), "review".to_string()],
+            roles: HashMap::from([
+                (
+                    "implement".to_string(),
+                    RoleConfig {
+                        agent: "codex".to_string(),
+                        blind: false,
+                    },
+                ),
+                (
+                    "review".to_string(),
+                    RoleConfig {
+                        agent: "claude".to_string(),
+                        blind: false,
+                    },
+                ),
+            ]),
+            agents: HashMap::from([(
+                "codex".to_string(),
+                AgentConfig {
+                    backup: Some("opencode".to_string()),
+                    node: None,
+                    args: None,
+                    timeout: None,
+                },
+            )]),
+            test: None,
+        };
+        let mut adapters: HashMap<String, Box<dyn Adapter>> = HashMap::new();
+        adapters.insert(
+            "codex".to_string(),
+            Box::new(MockAdapter::new(
+                "codex",
+                vec![Err(AdapterError::RateLimited(RateLimitInfo {
+                    reason: "You've hit your usage limit".to_string(),
+                    retry_at: Some("Jun 25th, 2026 5:33 AM".to_string()),
+                }))],
+            )),
+        );
+        adapters.insert(
+            "opencode".to_string(),
+            Box::new(MockAdapter::new("opencode", vec![Ok("implemented it".to_string())])),
+        );
+        adapters.insert(
+            "claude".to_string(),
+            Box::new(MockAdapter::new("claude", vec![Ok("VERDICT: LGTM".to_string())])),
+        );
+
+        let out = Conductor::new(crew, adapters).run("task", std::path::Path::new("."));
+        // Before feature 3 this escalated ("implementer 'implement' failed"); now it substitutes.
+        assert!(
+            matches!(out.decision, Decision::Landed),
+            "a rate-limited implementer must fall back to its backup and land: {:?}",
+            out.decision
+        );
+        let msgs = out.blackboard.read_since(0);
+        assert!(
+            msgs.iter().any(|m| m.from == "opencode" && m.kind == "result"),
+            "backup 'opencode' should have produced the implementation: {msgs:?}"
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| m.kind == "finding" && m.body.contains("retry after Jun 25th, 2026 5:33 AM")),
+            "the quota reason + reset time must be logged: {msgs:?}"
+        );
+    }
+
+    #[test]
+    fn rate_limited_reviewer_is_substituted_even_when_on_flake_is_exclude() {
+        use super::*;
+        use crate::adapter::{Adapter, AdapterError, MockAdapter, RateLimitInfo};
+        use crate::crew::{AgentConfig, CrewConfig, GatePolicy, OnFlake, RoleConfig};
+        use std::collections::HashMap;
+
+        // on_flake=Exclude would normally DROP a flaked reviewer (losing the quorum). A quota is
+        // different: the reviewer must be substituted so the single required approval still arrives.
+        let crew = CrewConfig {
+            gate: GatePolicy {
+                min_approvals: 1,
+                max_rounds: 1,
+                on_flake: OnFlake::Exclude,
+                stall_limit: 0,
+                max_task_secs: 0,
+            },
+            pipeline: vec!["implement".to_string(), "review".to_string()],
+            roles: HashMap::from([
+                (
+                    "implement".to_string(),
+                    RoleConfig {
+                        agent: "codex".to_string(),
+                        blind: false,
+                    },
+                ),
+                (
+                    "review".to_string(),
+                    RoleConfig {
+                        agent: "claude".to_string(),
+                        blind: false,
+                    },
+                ),
+            ]),
+            agents: HashMap::from([(
+                "claude".to_string(),
+                AgentConfig {
+                    backup: Some("opencode".to_string()),
+                    node: None,
+                    args: None,
+                    timeout: None,
+                },
+            )]),
+            test: None,
+        };
+        let mut adapters: HashMap<String, Box<dyn Adapter>> = HashMap::new();
+        adapters.insert(
+            "codex".to_string(),
+            Box::new(MockAdapter::new("codex", vec![Ok("implemented it".to_string())])),
+        );
+        adapters.insert(
+            "claude".to_string(),
+            Box::new(MockAdapter::new(
+                "claude",
+                vec![Err(AdapterError::RateLimited(RateLimitInfo::default()))],
+            )),
+        );
+        adapters.insert(
+            "opencode".to_string(),
+            Box::new(MockAdapter::new("opencode", vec![Ok("VERDICT: LGTM".to_string())])),
+        );
+
+        let out = Conductor::new(crew, adapters).run("task", std::path::Path::new("."));
+        assert!(
+            matches!(out.decision, Decision::Landed),
+            "a rate-limited reviewer must be substituted (not excluded) so the quorum is met: {:?}",
+            out.decision
+        );
+        let msgs = out.blackboard.read_since(0);
+        assert!(
+            msgs.iter().any(|m| m.from == "opencode" && m.kind == "verdict"),
+            "backup 'opencode' should have cast the approving verdict: {msgs:?}"
         );
     }
 
