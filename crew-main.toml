@@ -1,4 +1,7 @@
-pipeline = ["implement", "review"]
+# min_approvals = 2 requires TWO reviewer roles, so the gate can actually reach quorum
+# with two DISTINCT vendors (claude + agy). codex implements; opencode is excluded from
+# automated roles because its headless mode hangs.
+pipeline = ["implement", "review", "audit"]
 
 [gate]
 min_approvals = 2
@@ -16,6 +19,10 @@ agent = "codex"
 
 [roles.review]
 agent = "claude"
+blind = true
+
+[roles.audit]
+agent = "agy"
 blind = true
 
 # Quota resilience: if a vendor returns a rate-limit/quota error, the conductor
