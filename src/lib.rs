@@ -59,7 +59,7 @@ pub use repo_sync::{
     apply_result, bundle_rev, gc_node_scratch, head_sha, is_git_worktree, merge_branch,
     merge_with_resolver, orphan_scratch, MergeOutcome,
 };
-pub use serve::{resolve_bind, serve, BindAddr};
+pub use serve::{resolve_bind, serve, serve_with_token, BindAddr};
 pub use supervise::{
     drain_control, member_control_path, member_stream_path, parse_watch_args, render_event,
     render_line, ControlCmd, ControlState, FeedObserver, RunObserver, StreamEvent, WatchArgs,

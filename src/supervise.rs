@@ -260,6 +260,7 @@ pub fn drain_control(feed: &crate::ndjson::Feed, cursor: &mut usize, st: &Contro
 pub struct WatchArgs {
     pub member: Option<String>,
     pub repo: Option<String>,
+    pub node: Option<String>,
     pub since: usize,
     pub follow: bool,
 }
@@ -271,6 +272,7 @@ pub fn parse_watch_args(args: &[String]) -> WatchArgs {
     let mut out = WatchArgs {
         member: None,
         repo: None,
+        node: None,
         since: 0,
         follow: false,
     };
@@ -279,6 +281,13 @@ pub fn parse_watch_args(args: &[String]) -> WatchArgs {
         match args[i].as_str() {
             "--repo" => {
                 out.repo = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--node" => {
+                out.node = args.get(i + 1).cloned();
+                i += 2;
+            }
+            "--token" => {
                 i += 2;
             }
             "--since" => {
@@ -522,6 +531,7 @@ mod tests {
         assert_eq!(w.since, 0);
         assert!(!w.follow);
         assert_eq!(w.repo, None);
+        assert_eq!(w.node, None);
     }
 
     #[test]
@@ -535,11 +545,27 @@ mod tests {
             "--follow",
             "--repo",
             "/r",
+            "--node",
+            "macbook",
         ]));
         assert_eq!(w.member.as_deref(), Some("claude@z13"));
         assert_eq!(w.since, 5);
         assert!(w.follow);
         assert_eq!(w.repo.as_deref(), Some("/r"));
+        assert_eq!(w.node.as_deref(), Some("macbook"));
+    }
+
+    #[test]
+    fn parse_watch_args_node_value_is_not_a_member() {
+        let w = parse_watch_args(&argv(&["ensemble", "watch", "--node", "macbook"]));
+        assert_eq!(w.member, None);
+        assert_eq!(w.node.as_deref(), Some("macbook"));
+    }
+
+    #[test]
+    fn parse_watch_args_token_value_is_not_a_member() {
+        let w = parse_watch_args(&argv(&["ensemble", "watch", "--token", "secret", "run-1"]));
+        assert_eq!(w.member.as_deref(), Some("run-1"));
     }
 
     #[test]

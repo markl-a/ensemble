@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 type Local = HashMap<String, Box<dyn Adapter>>;
+const CONTROL_TOKEN_HEADER: &str = "x-ensemble-token";
 
 /// Where `serve` will bind. `Explicit` = user `--bind`; `Tailnet` = the node's 100.x address
 /// (reachable only over the tailnet); `Loopback` = no tailnet IP, so local-only (never 0.0.0.0).
@@ -38,6 +39,11 @@ pub fn resolve_bind(self_ips: &[String], explicit: Option<&str>, port: u16) -> B
 
 /// Run the agent-host forever on `bind` (e.g. "0.0.0.0:7878"), dispatching `/run` to `local`.
 pub fn serve(bind: &str, local: Local) -> std::io::Result<()> {
+    serve_with_token(bind, local, control_token_from_env())
+}
+
+/// Run the agent-host forever with an optional control-plane token.
+pub fn serve_with_token(bind: &str, local: Local, token: Option<String>) -> std::io::Result<()> {
     let server = tiny_http::Server::http(bind)
         .map_err(|e| std::io::Error::other(format!("bind {bind}: {e}")))?;
     // Reclaim node-scratch dirs whose owning serve is gone — only AFTER we hold the port, so a
@@ -46,7 +52,7 @@ pub fn serve(bind: &str, local: Local) -> std::io::Result<()> {
     if swept > 0 {
         println!("ensemble: swept {swept} stale node-scratch dir(s)");
     }
-    serve_loop(server, local, None);
+    serve_loop_with_token(server, local, None, token);
     Ok(())
 }
 
@@ -55,7 +61,26 @@ pub fn serve_until_n(server: tiny_http::Server, local: Local, n: usize) {
     serve_loop(server, local, Some(n));
 }
 
+/// Serve exactly `n` requests with a control-plane token requirement (for tests).
+pub fn serve_until_n_with_token(
+    server: tiny_http::Server,
+    local: Local,
+    n: usize,
+    token: Option<&str>,
+) {
+    serve_loop_with_token(server, local, Some(n), token.map(str::to_string));
+}
+
 fn serve_loop(server: tiny_http::Server, local: Local, limit: Option<usize>) {
+    serve_loop_with_token(server, local, limit, None);
+}
+
+fn serve_loop_with_token(
+    server: tiny_http::Server,
+    local: Local,
+    limit: Option<usize>,
+    token: Option<String>,
+) {
     let mut served = 0usize;
     for mut req in server.incoming_requests() {
         let url = req.url().to_string();
@@ -74,7 +99,8 @@ fn serve_loop(server: tiny_http::Server, local: Local, limit: Option<usize>) {
         } else if method == tiny_http::Method::Post && url == "/control" {
             let mut body = String::new();
             let _ = req.as_reader().read_to_string(&mut body);
-            let resp = handle_control(&body);
+            let supplied = request_header(&req, CONTROL_TOKEN_HEADER);
+            let resp = handle_control(&body, token.as_deref(), supplied.as_deref());
             let _ = req.respond(json_response(
                 serde_json::to_string(&resp).unwrap_or_default(),
             ));
@@ -91,11 +117,18 @@ fn serve_loop(server: tiny_http::Server, local: Local, limit: Option<usize>) {
     }
 }
 
-fn handle_control(body: &str) -> ControlPlaneResponse {
+fn handle_control(
+    body: &str,
+    required_token: Option<&str>,
+    supplied_token: Option<&str>,
+) -> ControlPlaneResponse {
     let req: ControlPlaneRequest = match serde_json::from_str(body) {
         Ok(r) => r,
         Err(e) => return ControlPlaneResponse::err("BadRequest", &format!("bad request: {e}")),
     };
+    if control_requires_auth(&req) && !control_authorized(required_token, supplied_token) {
+        return ControlPlaneResponse::err("Unauthorized", "control mutation requires token");
+    }
     let plane = LocalControlPlane::new();
     match req {
         ControlPlaneRequest::TeamStatus { repo, team } => {
@@ -183,6 +216,35 @@ fn handle_control(body: &str) -> ControlPlaneResponse {
                 Err(e) => ControlPlaneResponse::err("Io", &e.to_string()),
             }
         }
+    }
+}
+
+fn control_token_from_env() -> Option<String> {
+    std::env::var("ENSEMBLE_TOKEN")
+        .ok()
+        .filter(|t| !t.chars().any(char::is_control))
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+}
+
+fn request_header(req: &tiny_http::Request, name: &str) -> Option<String> {
+    req.headers()
+        .iter()
+        .find(|h| h.field.to_string().eq_ignore_ascii_case(name))
+        .map(|h| h.value.as_str().to_string())
+}
+
+fn control_requires_auth(req: &ControlPlaneRequest) -> bool {
+    matches!(
+        req,
+        ControlPlaneRequest::TeamSay { .. } | ControlPlaneRequest::AppendControl { .. }
+    )
+}
+
+fn control_authorized(required: Option<&str>, supplied: Option<&str>) -> bool {
+    match required {
+        Some(required) => supplied == Some(required),
+        None => true,
     }
 }
 
@@ -536,6 +598,64 @@ mod tests {
     }
 
     #[test]
+    fn control_route_requires_token_for_mutations_when_configured() {
+        let repo = tempfile::tempdir().unwrap();
+        let local: HashMap<String, Box<dyn Adapter>> = HashMap::new();
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", server.server_addr());
+        let h =
+            std::thread::spawn(move || serve_until_n_with_token(server, local, 2, Some("secret")));
+
+        let remote_without_token = crate::RemoteControlPlane::new(&url);
+        let err = remote_without_token
+            .append_control(
+                repo.path(),
+                "run-1",
+                &crate::ControlCmd::Abort {
+                    from: "operator".into(),
+                    hard: true,
+                },
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("Unauthorized"));
+
+        let remote_with_token = crate::RemoteControlPlane::with_token(&url, "secret");
+        let next = remote_with_token
+            .append_control(
+                repo.path(),
+                "run-1",
+                &crate::ControlCmd::Abort {
+                    from: "operator".into(),
+                    hard: true,
+                },
+            )
+            .unwrap();
+        assert_eq!(next, 1);
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn control_route_allows_read_only_without_token_when_configured() {
+        let repo = tempfile::tempdir().unwrap();
+        crate::Feed::open(crate::member_stream_path(repo.path(), "run-1"))
+            .append(r#"{"from":"codex","kind":"result","body":"done"}"#)
+            .unwrap();
+        let local: HashMap<String, Box<dyn Adapter>> = HashMap::new();
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", server.server_addr());
+        let h =
+            std::thread::spawn(move || serve_until_n_with_token(server, local, 1, Some("secret")));
+
+        let remote_without_token = crate::RemoteControlPlane::new(&url);
+        let stream = remote_without_token
+            .read_stream(repo.path(), "run-1", 0)
+            .unwrap();
+        assert_eq!(stream.len(), 1);
+        assert!(stream[0].contains("done"));
+        h.join().unwrap();
+    }
+
+    #[test]
     fn control_route_rejects_unsafe_feed_targets() {
         let repo = tempfile::tempdir().unwrap();
         let req = crate::wire::ControlPlaneRequest::Watch {
@@ -543,7 +663,7 @@ mod tests {
             name: "../run".into(),
             since: 0,
         };
-        let resp = handle_control(&serde_json::to_string(&req).unwrap());
+        let resp = handle_control(&serde_json::to_string(&req).unwrap(), None, None);
 
         assert!(!resp.ok);
         assert_eq!(resp.error_kind.as_deref(), Some("BadRequest"));

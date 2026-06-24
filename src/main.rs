@@ -25,16 +25,16 @@ const USAGE: &str = "usage:\n  \
     ensemble [--repo <path>] [--team <name>] [--member <member>] [--confirm-policy ask|approve|deny] [--print-config] <codex|claude|opencode> [vendor args...]\n  \
     ensemble [--repo <path>] [--team <name>] [--member <member>] [--timeout <secs>] [--confirm-policy ask|approve|deny] [--print-prompt] [--json] agy [vendor args...]   (no prompt: interactive; --prompt/-p: bounded team turn)\n  \
     ensemble merge <branch> [--into <target>] [--repo <path>] [--resolver <agent>]   (land a kept branch; conflict → escalate, or --resolver runs ONE AI round)\n  \
-    ensemble serve [--bind <addr>]   (default: this node's tailnet IP:7878; loopback if no tailnet)\n  \
-    ensemble up [--bind <addr>]   (quick start: show the mesh, then serve in the foreground)\n  \
+    ensemble serve [--bind <addr>] [--token <token>]   (default: this node's tailnet IP:7878; loopback if no tailnet)\n  \
+    ensemble up [--bind <addr>] [--token <token>]   (quick start: show the mesh, then serve in the foreground)\n  \
     ensemble mcp [--repo <path>] [--team <name>] [--name <agent>] [--crew <crew.toml>]   (stdio MCP server: make a LIVE CLI a crew member — mesh + board + queue + worktree + merge + run)\n  \
     ensemble mcp install --client <claude|codex|opencode> [--repo <p>] [--team <name>] [--name <id>] [--exe <p>] [--crew <p>] [--config <p>] [--print]   (one-click: register `ensemble mcp` into that CLI's config)\n  \
     ensemble mcp uninstall --client <claude|codex|opencode> [--repo <p>] [--config <p>] [--print]   (remove ensemble's MCP entry from that CLI's config)\n  \
-    ensemble team <status|say|inbox> [--repo <path>] [--team <name>] [--json]   (inspect and post to the repo-local team board)\n  \
-    ensemble watch <member> [--repo <path>] [--since <n>] [--follow]   (tail a live member's stream feed)\n  \
+    ensemble team <status|say|inbox> [--repo <path>] [--team <name>] [--node <host|url>] [--token <token>] [--json]   (inspect and post to the team board)\n  \
+    ensemble watch <member[@node]> [--repo <path>] [--node <host|url>] [--token <token>] [--since <n>] [--follow]   (tail a live member's stream feed)\n  \
     ensemble supervise <name> [--repo <path>] [--team <name>] [--agent claude] [--since <n>] [--json] [--apply-steer] [--abort-on-critical]   (ask an AI to inspect recent team/run evidence)\n  \
-    ensemble steer <name> \"<prompt>\" [--repo <path>]   (inject a redirect into a live --watch run's next round)\n  \
-    ensemble abort <name> [--hard] [--repo <path>]   (stop a live --watch run; --hard kills the running CLI now)\n  \
+    ensemble steer <name[@node]> \"<prompt>\" [--repo <path>] [--node <host|url>] [--token <token>]   (inject a redirect into a live --watch run's next round)\n  \
+    ensemble abort <name[@node]> [--hard] [--repo <path>] [--node <host|url>] [--token <token>]   (stop a live --watch run; --hard kills the running CLI now)\n  \
     ensemble all \"<prompt>\" [--repo <path>] [--no-discover] [--json]   (COUNCIL: fan one prompt to EVERY reachable CLI, side-by-side replies)\n\n\
     run/run-many/dispatch auto-discover tailnet `serve` hosts for any agent without an explicit\n  \
     [agents.<n>] node = ... in crew.toml; pass --no-discover to stay local.";
@@ -98,7 +98,9 @@ fn main() {
 /// (the 4-adapter registry) over `/health` + `/run`. A `RemoteAdapter` on another machine drives
 /// them. Plain HTTP over the tailnet (WireGuard encrypts). Blocks forever.
 fn serve_cmd(args: &[String]) {
+    require_value_if_present(args, "--token");
     let explicit = parse_flag(args, "--bind");
+    let token = control_token(args);
     // Default to the tailnet interface so serve is reachable only over the tailnet, not the LAN.
     let self_ips = ensemble::discovery::self_tailscale_ips();
     let bind = ensemble::resolve_bind(&self_ips, explicit.as_deref(), 7878);
@@ -110,7 +112,7 @@ fn serve_cmd(args: &[String]) {
     }
     let addr = bind.addr().to_string();
     println!("ensemble serve on {addr}");
-    if let Err(e) = ensemble::serve(&addr, adapters()) {
+    if let Err(e) = ensemble::serve_with_token(&addr, adapters(), token) {
         eprintln!("serve: {e}");
         std::process::exit(1);
     }
@@ -128,7 +130,9 @@ fn mesh_cmd(_args: &[String]) {
 /// print the mesh (local CLIs + tailnet hosts), then serve in the FOREGROUND until Ctrl-C. The
 /// permanent/boot-started path is `serve --install-service` (tick C), not `up`.
 fn up_cmd(args: &[String]) {
+    require_value_if_present(args, "--token");
     let explicit = parse_flag(args, "--bind");
+    let token = control_token(args);
     let self_ips = ensemble::discovery::self_tailscale_ips();
     let bind = ensemble::resolve_bind(&self_ips, explicit.as_deref(), 7878);
     if let ensemble::BindAddr::Loopback(_) = bind {
@@ -146,29 +150,40 @@ fn up_cmd(args: &[String]) {
     // ordering explicit at a blocking boundary.
     use std::io::Write;
     let _ = std::io::stdout().flush();
-    if let Err(e) = ensemble::serve(&addr, adapters()) {
+    if let Err(e) = ensemble::serve_with_token(&addr, adapters(), token) {
         eprintln!("serve: {e}");
         std::process::exit(1);
     }
 }
 
-/// `ensemble watch <member> [--repo <p>] [--since <n>] [--follow]` — tail a member's stream feed
+/// `ensemble watch <member[@node]> [--repo <p>] [--node <host|url>] [--since <n>] [--follow]` — tail a member's stream feed
 /// (.ensemble/stream/<member>.ndjson), rendering each event. Read-only. `--follow` polls for new events
-/// until Ctrl-C. (S0 of live supervision: local tail; remote `--node` tail arrives in S1.)
+/// until Ctrl-C.
 fn watch_cmd(args: &[String]) {
+    require_value_if_present(args, "--repo");
+    require_value_if_present(args, "--node");
+    require_value_if_present(args, "--token");
+    require_value_if_present(args, "--since");
     let w = ensemble::parse_watch_args(args);
     let member = match w.member {
         Some(m) => m,
         None => {
-            eprintln!("usage: ensemble watch <member> [--repo <p>] [--since <n>] [--follow]");
+            eprintln!(
+                "usage: ensemble watch <member> [--repo <p>] [--node <host|url>] [--since <n>] [--follow]"
+            );
             std::process::exit(2);
         }
     };
+    let routed = route_control_member_discovering(&member, w.node.as_deref());
     let repo = w.repo.map(std::path::PathBuf::from).unwrap_or_else(|| {
         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
     });
-    let plane = ensemble::LocalControlPlane::new();
-    let stream_path = ensemble::member_stream_path(&repo, &member);
+    let token = control_token(args);
+    let plane = control_plane(routed.node.as_deref(), token.as_deref()).unwrap_or_else(|e| {
+        eprintln!("ensemble watch: {e}");
+        std::process::exit(2);
+    });
+    let stream_target = control_stream_target(&repo, &routed.member, routed.node.as_deref());
 
     // Read everything from `cursor` onward, render it, and advance the cursor PAST each line only after
     // it is actually written — so a failed write never silently drops an event by counting it as done. A
@@ -176,7 +191,7 @@ fn watch_cmd(args: &[String]) {
     // block-buffered when piped/redirected, so without an explicit flush the tailed lines wouldn't appear
     // promptly. Propagates the io::Error (feed read OR stdout write) for the caller to classify.
     let drain = |cursor: &mut usize| -> std::io::Result<()> {
-        let lines = plane.read_stream(&repo, &member, *cursor)?;
+        let lines = plane.read_stream(&repo, &routed.member, *cursor)?;
         use std::io::Write as _;
         let mut out = std::io::stdout().lock();
         for l in &lines {
@@ -199,7 +214,7 @@ fn watch_cmd(args: &[String]) {
             if closed {
                 std::process::exit(0);
             }
-            eprintln!("ensemble watch: {}: {e}", stream_path.display());
+            eprintln!("ensemble watch: {stream_target}: {e}");
             std::process::exit(1);
         }
     };
@@ -402,7 +417,7 @@ fn supervise_cmd(args: &[String]) {
         ensemble::control_action_for_report(&report, supervise_apply_mode(&parsed), "supervisor");
     let control_next = action
         .as_ref()
-        .map(|cmd| append_control_direct(&repo, &parsed.name, cmd))
+        .map(|cmd| append_control_direct(&repo, None, None, &parsed.name, cmd))
         .transpose()
         .unwrap_or_else(|e| {
             eprintln!("ensemble supervise: {e}");
@@ -438,16 +453,20 @@ fn supervise_cmd(args: &[String]) {
     }
 }
 
-/// `ensemble steer <name> "<prompt>" [--repo <p>] [--from <id>]` — inject an operator redirect into the
+/// `ensemble steer <name[@node]> "<prompt>" [--repo <p>] [--node <host|url>] [--from <id>]` — inject an operator redirect into the
 /// NEXT round of the live run started with `--watch <name>` (keeps a drifting CLI on track). Appends a
 /// Steer to that run's control feed; the run's watcher picks it up at the next round boundary.
 fn steer_cmd(args: &[String]) {
     require_value_if_present(args, "--repo");
+    require_value_if_present(args, "--node");
+    require_value_if_present(args, "--token");
     require_value_if_present(args, "--from");
     let (name, prompt) = match positional_tasks(args).as_slice() {
         [name, prompt] => (name.clone(), prompt.clone()),
         _ => {
-            eprintln!("usage: ensemble steer <name> \"<prompt>\" [--repo <p>] [--from <id>]");
+            eprintln!(
+                "usage: ensemble steer <name> \"<prompt>\" [--repo <p>] [--node <host|url>] [--from <id>]"
+            );
             std::process::exit(2);
         }
     };
@@ -456,15 +475,19 @@ fn steer_cmd(args: &[String]) {
     println!("steered `{name}`");
 }
 
-/// `ensemble abort <name> [--hard] [--repo <p>] [--from <id>]` — stop the live run started with
+/// `ensemble abort <name[@node]> [--hard] [--repo <p>] [--node <host|url>] [--from <id>]` — stop the live run started with
 /// `--watch <name>`: cleanly at the next round boundary, or `--hard` to kill the running CLI now.
 fn abort_cmd(args: &[String]) {
     require_value_if_present(args, "--repo");
+    require_value_if_present(args, "--node");
+    require_value_if_present(args, "--token");
     require_value_if_present(args, "--from");
     let name = match positional_tasks(args).first() {
         Some(n) => n.clone(),
         None => {
-            eprintln!("usage: ensemble abort <name> [--hard] [--repo <p>] [--from <id>]");
+            eprintln!(
+                "usage: ensemble abort <name> [--hard] [--repo <p>] [--node <host|url>] [--from <id>]"
+            );
             std::process::exit(2);
         }
     };
@@ -477,21 +500,233 @@ fn abort_cmd(args: &[String]) {
 /// Append a control command to `<repo>/.ensemble/control/<name>.ndjson` (`--repo` defaults to cwd).
 fn append_control(args: &[String], name: &str, cmd: &ensemble::ControlCmd) {
     let repo = parse_flag(args, "--repo").unwrap_or_else(|| ".".to_string());
-    if let Err(e) = append_control_direct(Path::new(&repo), name, cmd) {
+    let explicit_node = parse_flag(args, "--node");
+    let routed = route_control_member_discovering(name, explicit_node.as_deref());
+    let token = control_token(args);
+    if let Err(e) = append_control_direct(
+        Path::new(&repo),
+        routed.node.as_deref(),
+        token.as_deref(),
+        &routed.member,
+        cmd,
+    ) {
         eprintln!("ensemble: {e}");
         std::process::exit(1);
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RoutedControlMember {
+    member: String,
+    node: Option<String>,
+}
+
+fn route_control_member(
+    member: &str,
+    explicit_node: Option<&str>,
+    raw_host: Option<&str>,
+    mesh: &[(String, Vec<String>)],
+) -> RoutedControlMember {
+    let member = member.to_string();
+    let node = match explicit_node {
+        Some(node) => explicit_control_node(node),
+        None => inferred_member_node(&member, raw_host)
+            .map(|node| discovered_control_node(&node, mesh).unwrap_or(node)),
+    };
+    RoutedControlMember { member, node }
+}
+
+fn route_control_member_discovering(
+    member: &str,
+    explicit_node: Option<&str>,
+) -> RoutedControlMember {
+    let raw_host = raw_hostname();
+    let mesh =
+        if explicit_node.is_none() && inferred_member_node(member, raw_host.as_deref()).is_some() {
+            ensemble::discover_mesh(7878)
+        } else {
+            Vec::new()
+        };
+    route_control_member(member, explicit_node, raw_host.as_deref(), &mesh)
+}
+
+fn inferred_member_node(member: &str, raw_host: Option<&str>) -> Option<String> {
+    let (prefix, node) = member.rsplit_once('@')?;
+    let node = node.trim();
+    if prefix.trim().is_empty() || node.is_empty() || is_local_member_node(node, raw_host) {
+        None
+    } else {
+        Some(node.to_string())
+    }
+}
+
+fn explicit_control_node(node: &str) -> Option<String> {
+    let node = node.trim();
+    if is_local_control_escape(node) {
+        None
+    } else {
+        Some(node.to_string())
+    }
+}
+
+fn discovered_control_node(node: &str, mesh: &[(String, Vec<String>)]) -> Option<String> {
+    let wanted = normalized_control_host(node)?;
+    mesh.iter().find_map(|(url, _agents)| {
+        let host = ensemble::short_host(url);
+        (normalized_control_host(&host).as_deref() == Some(wanted.as_str())).then(|| url.clone())
+    })
+}
+
+fn is_local_member_node(node: &str, raw_host: Option<&str>) -> bool {
+    let Some(node) = normalized_control_host(node) else {
+        return false;
+    };
+    if matches!(
+        node.as_str(),
+        "local" | "localhost" | "127.0.0.1" | "::1" | "[::1]"
+    ) {
+        return true;
+    }
+    normalized_control_host(raw_host.unwrap_or(""))
+        .map(|host| host == node)
+        .unwrap_or(false)
+}
+
+fn normalized_control_host(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let lower = raw.to_ascii_lowercase();
+    if matches!(lower.as_str(), "local" | "localhost") {
+        return Some(lower);
+    }
+    if matches!(raw, "127.0.0.1" | "::1" | "[::1]") {
+        return Some(raw.to_string());
+    }
+    let host = ensemble::short_host(raw);
+    let is_ipv4 = host.contains('.')
+        && host
+            .split('.')
+            .all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_digit()));
+    if is_ipv4 || host.starts_with('[') {
+        return Some(host.to_ascii_lowercase());
+    }
+    let short = ensemble::default_member_name("probe", Some(&host));
+    short.strip_prefix("probe@").map(str::to_string)
+}
+
 fn append_control_direct(
     repo: &Path,
+    node: Option<&str>,
+    token: Option<&str>,
     name: &str,
     cmd: &ensemble::ControlCmd,
 ) -> Result<usize, String> {
-    let path = ensemble::member_control_path(repo, name);
-    ensemble::LocalControlPlane::new()
+    let plane = control_plane(node, token)?;
+    let target = control_control_target(repo, name, node);
+    plane
         .append_control(repo, name, cmd)
-        .map_err(|e| format!("write control feed {}: {e}", path.display()))
+        .map_err(|e| format!("write control feed {target}: {e}"))
+}
+
+fn control_plane(
+    node: Option<&str>,
+    token: Option<&str>,
+) -> Result<Box<dyn ensemble::ControlPlane>, String> {
+    match node {
+        Some(node) if is_local_control_escape(node) => {
+            Ok(Box::new(ensemble::LocalControlPlane::new()))
+        }
+        Some(node) => {
+            let url = control_node_url(node)?;
+            if let Some(token) = token {
+                Ok(Box::new(ensemble::RemoteControlPlane::with_token(
+                    &url, token,
+                )))
+            } else {
+                Ok(Box::new(ensemble::RemoteControlPlane::new(&url)))
+            }
+        }
+        None => Ok(Box::new(ensemble::LocalControlPlane::new())),
+    }
+}
+
+fn control_token(args: &[String]) -> Option<String> {
+    control_token_from_sources(parse_flag(args, "--token"), control_token_env())
+}
+
+fn control_token_from_sources(explicit: Option<String>, env: Option<String>) -> Option<String> {
+    explicit
+        .and_then(normalize_control_token)
+        .or_else(|| env.and_then(normalize_control_token))
+}
+
+fn control_token_env() -> Option<String> {
+    std::env::var("ENSEMBLE_TOKEN").ok()
+}
+
+fn normalize_control_token(token: String) -> Option<String> {
+    if token.chars().any(char::is_control) {
+        return None;
+    }
+    let token = token.trim().to_string();
+    if token.is_empty() {
+        None
+    } else {
+        Some(token)
+    }
+}
+
+fn control_node_url(raw: &str) -> Result<String, String> {
+    let node = raw.trim();
+    if node.is_empty() {
+        return Err("--node requires a non-empty value".to_string());
+    }
+    if node.eq_ignore_ascii_case("auto") {
+        return Err(
+            "--node auto is not supported for control commands yet; use a host or URL".to_string(),
+        );
+    }
+    if node.chars().any(char::is_control) {
+        return Err("--node must not contain control characters".to_string());
+    }
+    let node = node.trim_end_matches('/');
+    if node.starts_with("http://") || node.starts_with("https://") {
+        Ok(node.to_string())
+    } else if node.contains(':') && !node.starts_with('[') {
+        Ok(format!("http://[{node}]:7878"))
+    } else {
+        Ok(format!("http://{node}:7878"))
+    }
+}
+
+fn is_local_control_escape(node: &str) -> bool {
+    node.trim().eq_ignore_ascii_case("local")
+}
+
+fn control_stream_target(repo: &Path, name: &str, node: Option<&str>) -> String {
+    match node {
+        Some(node) => format!(
+            "remote `{node}` stream `{name}` for repo {}",
+            repo.display()
+        ),
+        None => ensemble::member_stream_path(repo, name)
+            .display()
+            .to_string(),
+    }
+}
+
+fn control_control_target(repo: &Path, name: &str, node: Option<&str>) -> String {
+    match node {
+        Some(node) => format!(
+            "remote `{node}` control `{name}` for repo {}",
+            repo.display()
+        ),
+        None => ensemble::member_control_path(repo, name)
+            .display()
+            .to_string(),
+    }
 }
 
 /// `ensemble all "<prompt>" [--repo <p>] [--no-discover] [--json]` — COUNCIL broadcast: fan the SAME
@@ -554,7 +789,7 @@ fn all_cmd(args: &[String]) {
 fn team_cmd(args: &[String]) {
     let parsed = parse_team_cmd_args(args).unwrap_or_else(|e| {
         eprintln!(
-            "ensemble team: {e}\nusage: ensemble team <status|say|inbox> [--repo <p>] [--team <name>] [--json]"
+            "ensemble team: {e}\nusage: ensemble team <status|say|inbox> [--repo <p>] [--team <name>] [--node <host|url>] [--token <token>] [--json]"
         );
         std::process::exit(2);
     });
@@ -566,10 +801,15 @@ fn team_cmd(args: &[String]) {
         Some("operator"),
         None,
     );
+    let token = control_token_from_sources(parsed.token.clone(), control_token_env());
+    let plane = control_plane(parsed.node.as_deref(), token.as_deref()).unwrap_or_else(|e| {
+        eprintln!("ensemble team: {e}");
+        std::process::exit(2);
+    });
 
     match parsed.action {
         TeamCliAction::Status => {
-            let status = ensemble::team_status(&session).unwrap_or_else(|e| {
+            let status = plane.team_status(&session).unwrap_or_else(|e| {
                 eprintln!("ensemble team status: {e}");
                 std::process::exit(1);
             });
@@ -580,7 +820,8 @@ fn team_cmd(args: &[String]) {
             }
         }
         TeamCliAction::Say { from, message } => {
-            let cursor = ensemble::post_team_message(&session, &from, "note", &message)
+            let cursor = plane
+                .post_team_message(&session, &from, "note", &message)
                 .unwrap_or_else(|e| {
                     eprintln!("ensemble team say: {e}");
                     std::process::exit(1);
@@ -588,7 +829,7 @@ fn team_cmd(args: &[String]) {
             println!("posted team message next={cursor}");
         }
         TeamCliAction::Inbox { since } => {
-            let inbox = ensemble::read_team_inbox(&session, since).unwrap_or_else(|e| {
+            let inbox = plane.read_team_inbox(&session, since).unwrap_or_else(|e| {
                 eprintln!("ensemble team inbox: {e}");
                 std::process::exit(1);
             });
@@ -606,6 +847,8 @@ struct TeamCliArgs {
     action: TeamCliAction,
     repo: String,
     team: Option<String>,
+    node: Option<String>,
+    token: Option<String>,
     json: bool,
 }
 
@@ -623,6 +866,8 @@ fn parse_team_cmd_args(args: &[String]) -> Result<TeamCliArgs, String> {
         .ok_or_else(|| "missing subcommand (expected status | say | inbox)".to_string())?;
     let mut repo = ".".to_string();
     let mut team = None;
+    let mut node = None;
+    let mut token = None;
     let mut from = None;
     let mut since = None;
     let mut json = false;
@@ -635,6 +880,12 @@ fn parse_team_cmd_args(args: &[String]) -> Result<TeamCliArgs, String> {
             }
             "--team" => {
                 team = Some(take_team_flag_value(args, &mut i, "--team")?);
+            }
+            "--node" => {
+                node = Some(take_team_flag_value(args, &mut i, "--node")?);
+            }
+            "--token" => {
+                token = Some(take_team_flag_value(args, &mut i, "--token")?);
             }
             "--from" => {
                 from = Some(take_team_flag_value(args, &mut i, "--from")?);
@@ -710,6 +961,8 @@ fn parse_team_cmd_args(args: &[String]) -> Result<TeamCliArgs, String> {
         action,
         repo,
         team,
+        node,
+        token,
         json,
     })
 }
@@ -2327,7 +2580,7 @@ impl ensemble::mcp::SupervisorRunner for McpSupervisorRunner {
         };
         let control_next = ensemble::control_action_for_report(&report, apply, caller)
             .as_ref()
-            .map(|cmd| append_control_direct(repo, &req.name, cmd))
+            .map(|cmd| append_control_direct(repo, None, None, &req.name, cmd))
             .transpose()?;
         Ok(ensemble::mcp::SuperviseSummary {
             name: req.name,
@@ -2923,6 +3176,7 @@ mod tests {
 
         assert_eq!(parsed.repo, "r");
         assert_eq!(parsed.team.as_deref(), Some("ops"));
+        assert_eq!(parsed.node, None);
         assert_eq!(
             parsed.action,
             TeamCliAction::Say {
@@ -2944,6 +3198,29 @@ mod tests {
     }
 
     #[test]
+    fn team_parser_accepts_node_for_remote_control_plane() {
+        let parsed = parse_team_cmd_args(&argv(&[
+            "ensemble", "team", "status", "--team", "ops", "--repo", "/r", "--node", "macbook",
+        ]))
+        .unwrap();
+
+        assert_eq!(parsed.repo, "/r");
+        assert_eq!(parsed.team.as_deref(), Some("ops"));
+        assert_eq!(parsed.node.as_deref(), Some("macbook"));
+    }
+
+    #[test]
+    fn team_parser_accepts_token_for_remote_control_plane() {
+        let parsed = parse_team_cmd_args(&argv(&[
+            "ensemble", "team", "say", "hello", "--node", "macbook", "--token", "secret",
+        ]))
+        .unwrap();
+
+        assert_eq!(parsed.node.as_deref(), Some("macbook"));
+        assert_eq!(parsed.token.as_deref(), Some("secret"));
+    }
+
+    #[test]
     fn team_parser_rejects_missing_flag_values() {
         let err = parse_team_cmd_args(&argv(&["ensemble", "team", "say", "--from"])).unwrap_err();
         assert!(err.contains("--from requires a value"));
@@ -2954,6 +3231,32 @@ mod tests {
         let err = parse_team_cmd_args(&argv(&["ensemble", "team", "inbox", "--since", "later"]))
             .unwrap_err();
         assert!(err.contains("--since must be a non-negative integer"));
+    }
+
+    #[test]
+    fn positional_tasks_skips_node_value_for_control_commands() {
+        assert_eq!(
+            positional_tasks(&argv(&[
+                "ensemble",
+                "steer",
+                "codex@mac",
+                "focus",
+                "--node",
+                "macbook",
+            ])),
+            vec!["codex@mac".to_string(), "focus".to_string()]
+        );
+        assert_eq!(
+            positional_tasks(&argv(&[
+                "ensemble",
+                "abort",
+                "codex@mac",
+                "--hard",
+                "--node",
+                "macbook",
+            ])),
+            vec!["codex@mac".to_string()]
+        );
     }
 
     #[test]
@@ -3497,5 +3800,252 @@ mod tests {
             assert_eq!(a.name(), n);
             assert_eq!(label, "local");
         }
+    }
+
+    #[test]
+    fn control_node_url_bare_host_maps_to_default_port() {
+        assert_eq!(control_node_url("macbook").unwrap(), "http://macbook:7878");
+    }
+
+    #[test]
+    fn control_node_url_explicit_url_is_used_without_trailing_slash() {
+        assert_eq!(
+            control_node_url("https://node.example:9000/").unwrap(),
+            "https://node.example:9000"
+        );
+    }
+
+    #[test]
+    fn control_node_url_rejects_auto_until_discovery_routing_exists() {
+        let err = control_node_url("auto").unwrap_err();
+        assert!(err.contains("--node auto is not supported"));
+    }
+
+    #[test]
+    fn explicit_node_local_is_the_only_file_backed_escape_hatch() {
+        assert_eq!(explicit_control_node("local"), None);
+        assert_eq!(explicit_control_node("LOCAL"), None);
+        assert_eq!(
+            explicit_control_node("localhost").as_deref(),
+            Some("localhost")
+        );
+        assert_eq!(
+            explicit_control_node("127.0.0.1").as_deref(),
+            Some("127.0.0.1")
+        );
+        assert_eq!(explicit_control_node("::1").as_deref(), Some("::1"));
+        assert_eq!(explicit_control_node("[::1]").as_deref(), Some("[::1]"));
+    }
+
+    #[test]
+    fn control_node_url_loopback_hosts_still_use_remote_http() {
+        assert_eq!(
+            control_node_url("localhost").unwrap(),
+            "http://localhost:7878"
+        );
+        assert_eq!(
+            control_node_url("127.0.0.1").unwrap(),
+            "http://127.0.0.1:7878"
+        );
+        assert_eq!(control_node_url("::1").unwrap(), "http://[::1]:7878");
+        assert_eq!(control_node_url("[::1]").unwrap(), "http://[::1]:7878");
+    }
+
+    #[test]
+    fn normalize_control_token_rejects_blank_and_control_chars() {
+        assert_eq!(
+            normalize_control_token(" secret ".to_string()).as_deref(),
+            Some("secret")
+        );
+        assert_eq!(normalize_control_token("   ".to_string()), None);
+        assert_eq!(normalize_control_token("bad\n".to_string()), None);
+    }
+
+    #[test]
+    fn control_token_prefers_valid_explicit_but_falls_back_from_invalid_explicit_to_env() {
+        assert_eq!(
+            control_token_from_sources(Some(" cli-secret ".to_string()), Some("env-secret".into()))
+                .as_deref(),
+            Some("cli-secret")
+        );
+        assert_eq!(
+            control_token_from_sources(Some("   ".to_string()), Some(" env-secret ".into()))
+                .as_deref(),
+            Some("env-secret")
+        );
+        assert_eq!(
+            control_token_from_sources(Some("bad\n".to_string()), Some("env-secret".into()))
+                .as_deref(),
+            Some("env-secret")
+        );
+    }
+
+    #[test]
+    fn member_node_routing_uses_member_suffix_without_explicit_node() {
+        let routed = route_control_member("claude@macbook", None, Some("z13"), &[]);
+
+        assert_eq!(routed.member, "claude@macbook");
+        assert_eq!(routed.node.as_deref(), Some("macbook"));
+    }
+
+    #[test]
+    fn member_node_routing_keeps_explicit_node_precedence() {
+        let mesh = vec![(
+            "http://macbook.tail.ts.net:7878".to_string(),
+            vec!["claude".to_string()],
+        )];
+        let routed = route_control_member("claude@macbook", Some("ayaneo"), Some("z13"), &mesh);
+
+        assert_eq!(routed.member, "claude@macbook");
+        assert_eq!(routed.node.as_deref(), Some("ayaneo"));
+    }
+
+    #[test]
+    fn member_node_routing_accepts_node_local_as_a_local_escape_hatch() {
+        let mesh = vec![(
+            "http://work.tail.ts.net:7878".to_string(),
+            vec!["reviewer".to_string()],
+        )];
+        let routed = route_control_member("reviewer@work", Some("local"), Some("z13"), &mesh);
+
+        assert_eq!(routed.member, "reviewer@work");
+        assert_eq!(routed.node, None);
+    }
+
+    #[test]
+    fn member_node_routing_keeps_local_suffix_on_local_plane() {
+        let routed = route_control_member("codex@z13", None, Some("Z13.local"), &[]);
+
+        assert_eq!(routed.member, "codex@z13");
+        assert_eq!(routed.node, None);
+
+        let explicit_local = route_control_member("claude@local", None, Some("anything"), &[]);
+        assert_eq!(explicit_local.node, None);
+    }
+
+    #[test]
+    fn member_node_routing_prefers_discovered_url_for_member_suffix() {
+        let mesh = vec![
+            (
+                "http://other.tail.ts.net:7878".to_string(),
+                vec!["codex".to_string()],
+            ),
+            (
+                "http://macbook.tail.ts.net:7878".to_string(),
+                vec!["claude".to_string()],
+            ),
+        ];
+
+        let routed = route_control_member("claude@macbook", None, Some("z13"), &mesh);
+
+        assert_eq!(routed.member, "claude@macbook");
+        assert_eq!(
+            routed.node.as_deref(),
+            Some("http://macbook.tail.ts.net:7878")
+        );
+    }
+
+    #[test]
+    fn append_control_node_local_writes_the_local_feed_for_at_member_names() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let next = append_control_direct(
+            tmp.path(),
+            Some("local"),
+            None,
+            "reviewer@work",
+            &ensemble::ControlCmd::Abort {
+                from: "operator".into(),
+                hard: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(next, 1);
+        let path = ensemble::member_control_path(tmp.path(), "reviewer@work");
+        let lines = ensemble::Feed::open(path).read_since(0).unwrap();
+        assert_eq!(lines.len(), 1);
+    }
+
+    #[test]
+    fn control_plane_with_node_posts_append_control_to_remote() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", server.server_addr());
+        let h = std::thread::spawn(move || {
+            let mut req = server.recv().unwrap();
+            assert_eq!(req.method(), &tiny_http::Method::Post);
+            assert_eq!(req.url(), "/control");
+            let mut body = String::new();
+            req.as_reader().read_to_string(&mut body).unwrap();
+            let parsed: ensemble::wire::ControlPlaneRequest = serde_json::from_str(&body).unwrap();
+            match parsed {
+                ensemble::wire::ControlPlaneRequest::AppendControl { repo, name, cmd } => {
+                    assert_eq!(repo, "remote-repo");
+                    assert_eq!(name, "codex@mac");
+                    assert_eq!(
+                        cmd,
+                        ensemble::ControlCmd::Abort {
+                            from: "operator".into(),
+                            hard: true
+                        }
+                    );
+                }
+                other => panic!("expected append_control request, got {other:?}"),
+            }
+            let resp =
+                serde_json::to_string(&ensemble::wire::ControlPlaneResponse::ok_next(42)).unwrap();
+            req.respond(tiny_http::Response::from_string(resp)).unwrap();
+        });
+
+        let cp = control_plane(Some(&url), Some("secret")).unwrap();
+        let next = cp
+            .append_control(
+                Path::new("remote-repo"),
+                "codex@mac",
+                &ensemble::ControlCmd::Abort {
+                    from: "operator".into(),
+                    hard: true,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(next, 42);
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn control_plane_with_token_sends_the_control_header() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", server.server_addr());
+        let h = std::thread::spawn(move || {
+            let mut req = server.recv().unwrap();
+            let token = req
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("x-ensemble-token"))
+                .map(|h| h.value.as_str().to_string());
+            assert_eq!(token.as_deref(), Some("secret"));
+            let mut body = String::new();
+            req.as_reader().read_to_string(&mut body).unwrap();
+            let _parsed: ensemble::wire::ControlPlaneRequest = serde_json::from_str(&body).unwrap();
+            let resp =
+                serde_json::to_string(&ensemble::wire::ControlPlaneResponse::ok_next(7)).unwrap();
+            req.respond(tiny_http::Response::from_string(resp)).unwrap();
+        });
+
+        let cp = control_plane(Some(&url), Some("secret")).unwrap();
+        let next = cp
+            .append_control(
+                Path::new("remote-repo"),
+                "codex@mac",
+                &ensemble::ControlCmd::Abort {
+                    from: "operator".into(),
+                    hard: true,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(next, 7);
+        h.join().unwrap();
     }
 }

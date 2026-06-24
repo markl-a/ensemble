@@ -100,6 +100,7 @@ impl ControlPlane for LocalControlPlane {
 pub struct RemoteControlPlane {
     base_url: String,
     timeout: Duration,
+    token: Option<String>,
 }
 
 impl RemoteControlPlane {
@@ -107,6 +108,7 @@ impl RemoteControlPlane {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             timeout: Duration::from_secs(30),
+            token: None,
         }
     }
 
@@ -114,16 +116,28 @@ impl RemoteControlPlane {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             timeout,
+            token: None,
+        }
+    }
+
+    pub fn with_token(base_url: &str, token: &str) -> Self {
+        Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            timeout: Duration::from_secs(30),
+            token: Some(token.to_string()),
         }
     }
 
     fn call(&self, req: ControlPlaneRequest) -> io::Result<ControlPlaneResponse> {
         let body = serde_json::to_string(&req).map_err(io::Error::other)?;
         let url = format!("{}/control", self.base_url);
-        let resp = ureq::post(&url)
+        let mut request = ureq::post(&url)
             .timeout(self.timeout)
-            .set("content-type", "application/json")
-            .send_string(&body);
+            .set("content-type", "application/json");
+        if let Some(token) = &self.token {
+            request = request.set("x-ensemble-token", token);
+        }
+        let resp = request.send_string(&body);
         let text = match resp {
             Ok(r) => r
                 .into_string()
