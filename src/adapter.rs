@@ -18,10 +18,99 @@ pub enum AdapterError {
     Flaked(String),
     #[error("agent produced empty output")]
     Empty,
-    #[error("agent rate-limited / quota exhausted")]
-    RateLimited,
+    #[error("agent rate-limited / quota exhausted{0}")]
+    RateLimited(RateLimitInfo),
     #[error("agent CLI not installed: {0}")]
     NotInstalled(String),
+}
+
+/// What we could recover about a rate-limit / quota-exhaustion so the operator (or a scheduler)
+/// learns *why* an agent degraded and *when* it can be retried — instead of a bare "empty output".
+/// Both fields are best-effort: `reason` is the offending CLI line, `retry_at` the vendor's stated
+/// reset time (verbatim, e.g. "Jun 25th, 2026 5:33 AM") when the message carried one.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RateLimitInfo {
+    pub reason: String,
+    pub retry_at: Option<String>,
+}
+
+impl std::fmt::Display for RateLimitInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if !self.reason.is_empty() {
+            write!(f, " — {}", self.reason)?;
+        }
+        if let Some(when) = &self.retry_at {
+            write!(f, " (retry after {when})")?;
+        }
+        Ok(())
+    }
+}
+
+/// ASCII-case-insensitive substring search returning a byte index valid in `haystack`. Vendor CLI
+/// quota messages are ASCII, so this avoids the `to_lowercase()` byte-offset drift that would break
+/// slicing when the message also contains multi-byte characters.
+fn find_ci(haystack: &str, needle: &str) -> Option<usize> {
+    let (h, n) = (haystack.as_bytes(), needle.as_bytes());
+    if n.is_empty() || h.len() < n.len() {
+        return None;
+    }
+    (0..=h.len() - n.len()).find(|&i| h[i..i + n.len()].iter().zip(n).all(|(a, b)| a.eq_ignore_ascii_case(b)))
+}
+
+/// Markers that identify a rate-limit / quota-exhaustion across vendors (codex, claude, opencode,
+/// agy). Kept broad on purpose — "usage limit" (codex), "429"/"too many requests" (HTTP), and the
+/// generic "quota"/"rate limit" cover the cases observed so far.
+const QUOTA_MARKERS: &[&str] = &[
+    "usage limit",
+    "rate limit",
+    "rate-limit",
+    "ratelimit",
+    "quota",
+    "too many requests",
+    "429",
+    "insufficient_quota",
+    "exceeded your",
+    "over your",
+];
+
+/// Detect a rate-limit / quota signal in a CLI's output. Returns the offending line as `reason` and,
+/// if the vendor stated one, the reset time as `retry_at`. `None` when no marker is present — so a
+/// normal answer that never mentions quota is never misclassified.
+pub fn detect_rate_limit(haystack: &str) -> Option<RateLimitInfo> {
+    if !QUOTA_MARKERS.iter().any(|m| find_ci(haystack, m).is_some()) {
+        return None;
+    }
+    let reason = haystack
+        .lines()
+        .find(|l| QUOTA_MARKERS.iter().any(|m| find_ci(l, m).is_some()))
+        .map(|l| l.trim().to_string())
+        .unwrap_or_else(|| haystack.trim().to_string());
+    Some(RateLimitInfo {
+        reason,
+        retry_at: extract_retry_at(haystack),
+    })
+}
+
+/// Pull the reset time out of a "try again at <when>" / "retry after <when>" / "resets at <when>"
+/// phrase. Returns the verbatim remainder of that line (trailing period stripped), or `None`.
+fn extract_retry_at(haystack: &str) -> Option<String> {
+    const CUES: &[&str] = &[
+        "try again at ",
+        "retry after ",
+        "resets at ",
+        "available again at ",
+    ];
+    for cue in CUES {
+        if let Some(pos) = find_ci(haystack, cue) {
+            let rest = &haystack[pos + cue.len()..];
+            let line_end = rest.find('\n').unwrap_or(rest.len());
+            let val = rest[..line_end].trim().trim_end_matches('.').trim();
+            if !val.is_empty() {
+                return Some(val.to_string());
+            }
+        }
+    }
+    None
 }
 
 impl AdapterError {
@@ -32,7 +121,7 @@ impl AdapterError {
         match self {
             AdapterError::Flaked(_) => 3,
             AdapterError::Empty => 4,
-            AdapterError::RateLimited => 5,
+            AdapterError::RateLimited(_) => 5,
             AdapterError::NotInstalled(_) => 6,
         }
     }
@@ -118,13 +207,49 @@ mod tests {
     }
 
     #[test]
+    fn detect_rate_limit_parses_codex_usage_limit_and_reset_time() {
+        // The exact line codex prints on quota exhaustion (observed 2026-06-24, M5 native run).
+        let s = "ERROR: You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage \
+                 to purchase more credits or try again at Jun 25th, 2026 5:33 AM.";
+        let info = detect_rate_limit(s).expect("usage-limit line must be detected");
+        assert!(info.reason.to_lowercase().contains("usage limit"));
+        assert_eq!(info.retry_at.as_deref(), Some("Jun 25th, 2026 5:33 AM"));
+        // and it surfaces in Display (which flows into the transcript + wire error message).
+        let shown = AdapterError::RateLimited(info).to_string();
+        assert!(shown.contains("retry after Jun 25th, 2026 5:33 AM"), "got {shown}");
+    }
+
+    #[test]
+    fn detect_rate_limit_handles_http_and_generic_phrasings() {
+        assert!(detect_rate_limit("Error: 429 Too Many Requests").is_some());
+        assert!(detect_rate_limit("rate limit exceeded, retry after 30s").is_some());
+        let q = detect_rate_limit("You have exceeded your quota.").unwrap();
+        assert_eq!(q.retry_at, None); // no reset cue present
+    }
+
+    #[test]
+    fn detect_rate_limit_ignores_a_normal_answer() {
+        // A real answer that never mentions quota must NOT be misread as rate-limited.
+        assert!(detect_rate_limit("I implemented the change and all tests pass.").is_none());
+        assert!(detect_rate_limit("").is_none());
+    }
+
+    #[test]
+    fn detect_rate_limit_is_byte_safe_with_multibyte_text() {
+        // Multi-byte chars before the cue must not break the byte-indexed extraction.
+        let s = "額度已用完 usage limit reached — try again at 明天 5:33 AM";
+        let info = detect_rate_limit(s).expect("should detect across multibyte text");
+        assert_eq!(info.retry_at.as_deref(), Some("明天 5:33 AM"));
+    }
+
+    #[test]
     fn exit_code_is_total_and_distinct() {
         // Every AdapterError variant maps to a DISTINCT non-zero code so a conductor's shell can
         // branch on the failure kind. (0 = ok is owned by main.rs, not an error variant.)
         let codes = [
             AdapterError::Flaked("x".into()).exit_code(),
             AdapterError::Empty.exit_code(),
-            AdapterError::RateLimited.exit_code(),
+            AdapterError::RateLimited(RateLimitInfo::default()).exit_code(),
             AdapterError::NotInstalled("x".into()).exit_code(),
         ];
         assert_eq!(codes, [3, 4, 5, 6]);

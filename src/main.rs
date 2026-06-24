@@ -1872,7 +1872,7 @@ fn adapter_error_kind(e: &ensemble::AdapterError) -> &'static str {
     match e {
         ensemble::AdapterError::Flaked(_) => "Flaked",
         ensemble::AdapterError::Empty => "Empty",
-        ensemble::AdapterError::RateLimited => "RateLimited",
+        ensemble::AdapterError::RateLimited(_) => "RateLimited",
         ensemble::AdapterError::NotInstalled(_) => "NotInstalled",
     }
 }
@@ -2433,7 +2433,7 @@ fn agent_cmd(args: &[String]) {
             let kind = match &e {
                 AdapterError::Flaked(_) => "Flaked",
                 AdapterError::Empty => "Empty",
-                AdapterError::RateLimited => "RateLimited",
+                AdapterError::RateLimited(_) => "RateLimited",
                 AdapterError::NotInstalled(_) => "NotInstalled",
             };
             if json {

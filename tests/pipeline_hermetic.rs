@@ -70,7 +70,10 @@ fn flaked_reviewer_is_excluded_and_escalates_not_fakes() {
         )),
         Box::new(MockAdapter::new(
             "claude",
-            vec![Err(AdapterError::RateLimited), Err(AdapterError::Empty)],
+            vec![
+                Err(AdapterError::RateLimited(RateLimitInfo::default())),
+                Err(AdapterError::Empty),
+            ],
         )),
     ]);
     let out = c.run("task", std::path::Path::new("."));
@@ -261,7 +264,12 @@ fn on_flake_retry_recovers_after_one_transient_flake() {
         "claude".into(),
         Box::new(MockAdapter::new(
             "claude",
-            vec![Err(AdapterError::RateLimited), Ok("VERDICT: LGTM".into())],
+            vec![
+                // a genuine TRANSIENT flake (not a quota): on_flake=retry re-runs the same agent.
+                // (A RateLimited error is handled separately by quota-aware substitution, not retry.)
+                Err(AdapterError::Flaked("transient network blip".into())),
+                Ok("VERDICT: LGTM".into()),
+            ],
         )),
     );
     let out = Conductor::new(crew, map).run("t", std::path::Path::new("."));

@@ -1,4 +1,4 @@
-use crate::adapter::{Adapter, AdapterError, AgentOutput};
+use crate::adapter::{detect_rate_limit, Adapter, AdapterError, AgentOutput};
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -239,8 +239,12 @@ impl Adapter for ExecAdapter {
             if err_low.contains("not recognized") || err_low.contains("cannot find") {
                 return Err(AdapterError::NotInstalled(self.program.clone()));
             }
-            if err_low.contains("rate") || err.contains("429") {
-                return Err(AdapterError::RateLimited);
+            // Quota/rate-limit: vendors print this to EITHER stream and may exit 0 (codex prints
+            // "You've hit your usage limit … try again at <when>" with an empty answer), so scan the
+            // combined output and preserve the reason + reset time instead of a bare `Empty`.
+            let combined = format!("{}\n{}", String::from_utf8_lossy(&stdout_buf), err);
+            if let Some(info) = detect_rate_limit(&combined) {
+                return Err(AdapterError::RateLimited(info));
             }
             return Err(AdapterError::Empty);
         }
@@ -324,6 +328,22 @@ mod tests {
             "captured {:?}",
             r.text
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn quota_on_stderr_with_empty_stdout_classifies_as_rate_limited() {
+        // The real failure mode: codex exits 0 with an EMPTY answer and prints the usage-limit line
+        // to stderr. That must degrade as RateLimited (with the reset time), not a bare Empty.
+        let script = "echo \"ERROR: You've hit your usage limit. Visit x or try again at \
+                      Jun 25th, 2026 5:33 AM.\" 1>&2";
+        let a = ExecAdapter::raw("codex", "sh", &["-c", script], Duration::from_secs(10));
+        match a.run("ignored", Path::new(".")) {
+            Err(AdapterError::RateLimited(info)) => {
+                assert_eq!(info.retry_at.as_deref(), Some("Jun 25th, 2026 5:33 AM"));
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
     }
 
     #[test]

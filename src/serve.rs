@@ -368,7 +368,7 @@ fn kind_of(e: &crate::adapter::AdapterError) -> &'static str {
     match e {
         Flaked(_) => "Flaked",
         Empty => "Empty",
-        RateLimited => "RateLimited",
+        RateLimited(_) => "RateLimited",
         NotInstalled(_) => "NotInstalled",
     }
 }

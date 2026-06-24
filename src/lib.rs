@@ -32,7 +32,9 @@ pub mod verdict;
 pub mod wire;
 pub mod worktree;
 
-pub use adapter::{Adapter, AdapterError, AgentOutput, MockAdapter};
+pub use adapter::{
+    detect_rate_limit, Adapter, AdapterError, AgentOutput, MockAdapter, RateLimitInfo,
+};
 pub use agy_adapter::AgyAdapter;
 pub use blackboard::{Blackboard, Message};
 pub use board::FileBoard;
