@@ -631,6 +631,10 @@ mod tests {
         git(repo, &["init", "-q"]);
         git(repo, &["config", "user.email", "t@t"]);
         git(repo, &["config", "user.name", "t"]);
+        // Keep line endings deterministic so byte-exact restore assertions hold on
+        // hosts whose global git config sets core.autocrlf=true (e.g. Git for Windows).
+        git(repo, &["config", "core.autocrlf", "false"]);
+        git(repo, &["config", "core.eol", "lf"]);
         std::fs::write(repo.join("seed"), "base").unwrap();
         git(repo, &["add", "."]);
         git(repo, &["commit", "-q", "-m", "init"]);

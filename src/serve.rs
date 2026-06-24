@@ -635,6 +635,36 @@ mod tests {
     }
 
     #[test]
+    fn control_route_requires_token_for_team_say_when_configured() {
+        let repo = tempfile::tempdir().unwrap();
+        let session = crate::team::resolve_team_session(
+            repo.path(),
+            Some("ops"),
+            "remote",
+            Some("remote"),
+            None,
+        );
+        let local: HashMap<String, Box<dyn Adapter>> = HashMap::new();
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", server.server_addr());
+        let h =
+            std::thread::spawn(move || serve_until_n_with_token(server, local, 2, Some("secret")));
+
+        let remote_without_token = crate::RemoteControlPlane::new(&url);
+        let err = remote_without_token
+            .post_team_message(&session, "operator", "note", "no token")
+            .unwrap_err();
+        assert!(err.to_string().contains("Unauthorized"));
+
+        let remote_with_token = crate::RemoteControlPlane::with_token(&url, "secret");
+        let next = remote_with_token
+            .post_team_message(&session, "operator", "note", "with token")
+            .unwrap();
+        assert_eq!(next, 1);
+        h.join().unwrap();
+    }
+
+    #[test]
     fn control_route_allows_read_only_without_token_when_configured() {
         let repo = tempfile::tempdir().unwrap();
         crate::Feed::open(crate::member_stream_path(repo.path(), "run-1"))
