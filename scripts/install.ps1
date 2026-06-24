@@ -79,6 +79,36 @@ function Add-UserPathDir([string]$Dir) {
     }
 }
 
+function Stop-EnsembleProcesses([string]$InstallDir) {
+    $dir = Normalize-PathForCompare $InstallDir
+    if (Test-Path -LiteralPath $dir -PathType Container) {
+        $candidates = Get-CimInstance Win32_Process -Filter "Name = 'ensemble.exe'" -ErrorAction SilentlyContinue
+        $pids = @()
+        foreach ($candidate in $candidates) {
+            $exe = $candidate.ExecutablePath
+            if (-not $exe) { continue }
+            try {
+                if ((Normalize-PathForCompare $exe).StartsWith($dir, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $pids += $candidate.ProcessId
+                }
+            } catch {
+                continue
+            }
+        }
+        if ($pids.Count -gt 0) {
+            Write-Host "stopping running ensemble process(es) from ${InstallDir}: $($pids -join ', ')" -ForegroundColor Yellow
+            foreach ($procId in $pids) {
+                try {
+                    Stop-Process -Id $procId -Force -ErrorAction Stop
+                } catch {
+                    Write-Host "could not stop pid $procId ($($_.Exception.Message))" -ForegroundColor DarkYellow
+                }
+            }
+            Start-Sleep -Milliseconds 500
+        }
+    }
+}
+
 $repo = Split-Path -Parent $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($InstallDir)) {
     $InstallDir = Default-InstallDir
@@ -121,6 +151,7 @@ $targetExe = Join-Path $InstallDir "ensemble.exe"
 $tmpExe = Join-Path $InstallDir ".ensemble.exe.installing"
 Copy-Item -LiteralPath $SourceExe -Destination $tmpExe -Force
 if (Test-Path -LiteralPath $targetExe -PathType Leaf) {
+    Stop-EnsembleProcesses $InstallDir
     try {
         Remove-Item -LiteralPath $targetExe -Force
     } catch {

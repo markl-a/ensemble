@@ -76,6 +76,34 @@ function Remove-UserPathDir([string]$Dir) {
     $env:Path = $processKept -join ';'
 }
 
+function Stop-EnsembleProcesses([string]$InstallDir) {
+    $dir = Normalize-PathForCompare $InstallDir
+    $candidates = Get-CimInstance Win32_Process -Filter "Name = 'ensemble.exe'" -ErrorAction SilentlyContinue
+    $pids = @()
+    foreach ($candidate in $candidates) {
+        $exe = $candidate.ExecutablePath
+        if (-not $exe) { continue }
+        try {
+            if ((Normalize-PathForCompare $exe).StartsWith($dir, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $pids += $candidate.ProcessId
+            }
+        } catch {
+            continue
+        }
+    }
+    if ($pids.Count -gt 0) {
+        Write-Host "stopping running ensemble process(es) from ${InstallDir}: $($pids -join ', ')" -ForegroundColor Yellow
+        foreach ($procId in $pids) {
+            try {
+                Stop-Process -Id $procId -Force -ErrorAction Stop
+            } catch {
+                Write-Host "could not stop pid $procId ($($_.Exception.Message))" -ForegroundColor DarkYellow
+            }
+        }
+        Start-Sleep -Milliseconds 500
+    }
+}
+
 function Normalize-Clients([string[]]$Values) {
     $allowed = @("codex", "claude", "opencode")
     $out = New-Object System.Collections.Generic.List[string]
@@ -136,6 +164,7 @@ if (-not $NoPath) {
 }
 
 if (Test-Path -LiteralPath $InstallDir) {
+    Stop-EnsembleProcesses $InstallDir
     $full = Normalize-PathForCompare $InstallDir
     if ($full.Length -lt 12 -or [System.IO.Path]::GetPathRoot($full).TrimEnd('\') -ieq $full) {
         Fail "refusing to remove suspicious install directory: $full"
