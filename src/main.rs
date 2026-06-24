@@ -1169,6 +1169,25 @@ struct MemberLauncherEnv {
     raw_host: Option<String>,
     home: std::path::PathBuf,
     codex_home: Option<std::path::PathBuf>,
+    /// Explicit vendor-binary override (from `ENSEMBLE_<CLIENT>_BIN`). When set, the
+    /// controlled launcher spawns this exact program instead of resolving the bare
+    /// client name through PATH. Needed when a real same-named CLI is installed but a
+    /// run (or the hermetic acceptance test) must drive a specific or fake binary.
+    vendor_bin: Option<String>,
+}
+
+/// Environment variable an operator can set to pin the vendor binary the controlled
+/// launcher spawns for `client`, e.g. `ENSEMBLE_CODEX_BIN`.
+fn vendor_bin_env_key(client: ensemble::mcp_install::ClientKind) -> String {
+    format!("ENSEMBLE_{}_BIN", client.as_str().to_uppercase())
+}
+
+/// Read the per-client vendor-binary override from this process's environment.
+fn vendor_bin_override(client: ensemble::mcp_install::ClientKind) -> Option<String> {
+    std::env::var(vendor_bin_env_key(client))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 #[derive(Debug, Clone)]
@@ -1336,7 +1355,10 @@ fn build_member_launch_plan(
         config_path,
         session,
         params,
-        vendor_program: client.as_str().to_string(),
+        vendor_program: env
+            .vendor_bin
+            .clone()
+            .unwrap_or_else(|| client.as_str().to_string()),
         vendor_args: parsed.vendor_args,
         confirm_policy: parsed.confirm_policy,
         print_config: parsed.print_config,
@@ -1344,10 +1366,11 @@ fn build_member_launch_plan(
 }
 
 fn member_launcher_cmd(client: ensemble::mcp_install::ClientKind, parsed: MemberLauncherArgs) {
-    let env = runtime_member_launcher_env().unwrap_or_else(|e| {
+    let mut env = runtime_member_launcher_env().unwrap_or_else(|e| {
         eprintln!("ensemble {}: {e}", client.as_str());
         std::process::exit(2);
     });
+    env.vendor_bin = vendor_bin_override(client);
     let plan = build_member_launch_plan(client, parsed, &env).unwrap_or_else(|e| {
         eprintln!("ensemble {}: {e}", client.as_str());
         std::process::exit(2);
@@ -1410,6 +1433,7 @@ fn runtime_member_launcher_env() -> Result<MemberLauncherEnv, String> {
         raw_host: raw_hostname(),
         home: home_dir(),
         codex_home: env_path("CODEX_HOME"),
+        vendor_bin: None,
     })
 }
 
@@ -3403,6 +3427,7 @@ mod tests {
             raw_host: Some("Z13.local".to_string()),
             home: test_abs("home"),
             codex_home: None,
+            vendor_bin: None,
         };
         let parsed = parse_member_launcher_args(&argv(&[
             "ensemble", "--repo", "work", "--team", "ops", "codex", "--model", "gpt-5",
@@ -3437,6 +3462,44 @@ mod tests {
     }
 
     #[test]
+    fn vendor_bin_env_key_is_per_client_uppercase() {
+        assert_eq!(
+            vendor_bin_env_key(ensemble::mcp_install::ClientKind::Codex),
+            "ENSEMBLE_CODEX_BIN"
+        );
+        assert_eq!(
+            vendor_bin_env_key(ensemble::mcp_install::ClientKind::Claude),
+            "ENSEMBLE_CLAUDE_BIN"
+        );
+        assert_eq!(
+            vendor_bin_env_key(ensemble::mcp_install::ClientKind::Opencode),
+            "ENSEMBLE_OPENCODE_BIN"
+        );
+    }
+
+    #[test]
+    fn member_launcher_vendor_bin_override_replaces_program() {
+        let cwd = test_abs("cwd");
+        let fake = test_abs("fake").join("codex.cmd");
+        let env = MemberLauncherEnv {
+            cwd: cwd.clone(),
+            exe: test_abs("bin").join("ensemble"),
+            raw_host: Some("z13".to_string()),
+            home: test_abs("home"),
+            codex_home: None,
+            vendor_bin: Some(fake.display().to_string()),
+        };
+        let parsed =
+            parse_member_launcher_args(&argv(&["ensemble", "--repo", "work", "codex"])).unwrap();
+
+        let plan = build_member_launch_plan(ensemble::mcp_install::ClientKind::Codex, parsed, &env)
+            .unwrap();
+
+        // The override pins the exact program; PATH resolution of bare `codex` is bypassed.
+        assert_eq!(plan.vendor_program, fake.display().to_string());
+    }
+
+    #[test]
     fn member_launcher_blank_name_falls_back_consistently() {
         let cwd = test_abs("cwd");
         let env = MemberLauncherEnv {
@@ -3445,6 +3508,7 @@ mod tests {
             raw_host: Some("Z13".to_string()),
             home: test_abs("home"),
             codex_home: None,
+            vendor_bin: None,
         };
         let parsed = parse_member_launcher_args(&argv(&[
             "ensemble", "--repo", "work", "--member", "   ", "claude",
@@ -3469,6 +3533,7 @@ mod tests {
             raw_host: Some("Z13".to_string()),
             home: test_abs("home"),
             codex_home: None,
+            vendor_bin: None,
         };
         let parsed = parse_member_launcher_args(&argv(&[
             "ensemble",
@@ -3543,6 +3608,7 @@ mod tests {
             raw_host: Some("Z13".to_string()),
             home: test_abs("home"),
             codex_home: None,
+            vendor_bin: None,
         };
         let parsed = parse_member_launcher_args(&argv(&[
             "ensemble",

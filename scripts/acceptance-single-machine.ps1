@@ -326,13 +326,17 @@ timeout = 60
     $fakeCodexCmd = Join-Path $SmokeRoot "codex.cmd"
     Write-AsciiFile $fakeCodexCmd "@echo off`necho FAKE_CODEX_ARGS:%*`nexit /b 0`n"
     try {
+        # Pin the launcher to the fake codex via ENSEMBLE_CODEX_BIN so this check is
+        # hermetic even when a real `codex` CLI is installed on PATH on this host.
         Invoke-WithProcessEnv "CODEX_HOME" $fakeCodexHome {
-            $fakeCodex = Invoke-EnsembleCapture `
-                "controlled codex shim" `
-                @("--repo", ".", "--team", $Team, "--member", "codex@fake", "--confirm-policy", "ask", "codex", "--fake-arg") `
-                "controlled-codex-shim.txt"
-            Assert-Contains "controlled codex shim" $fakeCodex.Combined "ensemble: launching controlled ``codex`` as ``codex@fake``"
-            Assert-Contains "controlled codex shim" $fakeCodex.Combined "FAKE_CODEX_ARGS:--fake-arg"
+            Invoke-WithProcessEnv "ENSEMBLE_CODEX_BIN" $fakeCodexCmd {
+                $fakeCodex = Invoke-EnsembleCapture `
+                    "controlled codex shim" `
+                    @("--repo", ".", "--team", $Team, "--member", "codex@fake", "--confirm-policy", "ask", "codex", "--fake-arg") `
+                    "controlled-codex-shim.txt"
+                Assert-Contains "controlled codex shim" $fakeCodex.Combined "ensemble: launching controlled ``codex`` as ``codex@fake``"
+                Assert-Contains "controlled codex shim" $fakeCodex.Combined "FAKE_CODEX_ARGS:--fake-arg"
+            }
         }
     } finally {
         Remove-Item -LiteralPath $fakeCodexCmd -Force -ErrorAction SilentlyContinue
