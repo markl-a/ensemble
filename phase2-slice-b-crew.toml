@@ -1,0 +1,15 @@
+pipeline = ["implement", "review"]
+
+[gate]
+min_approvals = 2
+max_rounds = 2
+on_flake = "exclude"
+stall_limit = 0
+max_task_secs = 0
+
+[roles.implement]
+agent = "codex"
+
+[roles.review]
+agent = "claude"
+blind = true

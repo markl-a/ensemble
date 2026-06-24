@@ -1,0 +1,25 @@
+pipeline = ["implement", "review"]
+
+[gate]
+min_approvals = 2
+max_rounds = 2
+on_flake = "exclude"
+stall_limit = 0
+max_task_secs = 0
+
+# Keep governance requirements explicit for acceptance/release verification runs.
+[test]
+command = "cargo test --quiet"
+
+[roles.implement]
+agent = "codex"
+
+[roles.review]
+agent = "claude"
+blind = true
+
+[agents.codex]
+timeout = 60
+
+[agents.claude]
+timeout = 60
