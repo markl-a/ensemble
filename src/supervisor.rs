@@ -402,11 +402,13 @@ mod tests {
             evidence.git_status.contains("git status")
                 || evidence.git_status.is_empty()
                 || evidence.git_status.contains("fatal")
+                || evidence.git_status.contains("致命")
         );
         assert!(
             evidence.diff_summary.contains("git diff")
                 || evidence.diff_summary.is_empty()
                 || evidence.diff_summary.contains("fatal")
+                || evidence.diff_summary.contains("致命")
         );
     }
 }
