@@ -1,4 +1,4 @@
-use crate::adapter::{Adapter, AdapterError, AgentOutput};
+use crate::adapter::{detect_rate_limit, Adapter, AdapterError, AgentOutput, RateLimitInfo};
 use crate::wire::{RunRequest, RunResponse};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -112,7 +112,10 @@ impl Adapter for RemoteAdapter {
                     text: rr.text,
                 })
             }
-            Err(ureq::Error::Status(429, _)) => Err(AdapterError::RateLimited),
+            Err(ureq::Error::Status(429, _)) => Err(AdapterError::RateLimited(RateLimitInfo {
+                reason: format!("remote node {} returned HTTP 429", self.base_url),
+                retry_at: None,
+            })),
             Err(e) => Err(AdapterError::Flaked(format!(
                 "remote {}: {e}",
                 self.base_url
@@ -169,7 +172,13 @@ fn git_common_repo(cwd: &Path) -> std::path::PathBuf {
 fn map_kind(kind: Option<&str>, msg: String) -> AdapterError {
     match kind {
         Some("Empty") => AdapterError::Empty,
-        Some("RateLimited") => AdapterError::RateLimited,
+        // Re-parse the wire message so the remote node's reset time survives the round-trip.
+        Some("RateLimited") => AdapterError::RateLimited(
+            detect_rate_limit(&msg).unwrap_or(RateLimitInfo {
+                reason: msg,
+                retry_at: None,
+            }),
+        ),
         Some("NotInstalled") => AdapterError::NotInstalled(msg),
         _ => AdapterError::Flaked(msg),
     }
