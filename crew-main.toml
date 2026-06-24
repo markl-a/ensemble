@@ -18,8 +18,17 @@ agent = "codex"
 agent = "claude"
 blind = true
 
+# Quota resilience: if a vendor returns a rate-limit/quota error, the conductor
+# auto-substitutes its backup (a DIFFERENT vendor) once for that role, rather than
+# escalating the whole run. agy (Antigravity) is an independent quota pool, so it
+# backs up the OpenAI-based codex and the Anthropic-based claude.
 [agents.codex]
 timeout = 60
+backup = "agy"
 
 [agents.claude]
 timeout = 60
+backup = "agy"
+
+[agents.agy]
+timeout = 180

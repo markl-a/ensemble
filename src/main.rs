@@ -2295,23 +2295,38 @@ fn cfg_agy(crew: &CrewConfig, agent: &str) -> AgyAdapter {
     }
 }
 
-/// Crew-aware registry. For each agent a role references, resolve in priority order: (1) an explicit
-/// `[agents.<n>] node = "http://..."` in crew.toml → RemoteAdapter (always wins); (2) when `discover`,
-/// a tailnet peer running `ensemble serve` that hosts the agent → RemoteAdapter; (3) the local
-/// `ExecAdapter`/`AgyAdapter` fallback. The tailnet is probed only when `discover` is on AND some
-/// needed agent lacks an explicit node. An unknown local agent is skipped (a missing adapter already
-/// makes the conductor escalate cleanly).
+/// Every agent whose adapter must exist for this crew: each role's agent PLUS any configured
+/// `backup` (a different vendor). Backups must be built too — otherwise the conductor's quota-aware
+/// substitution can't reach a configured backup, so a rate-limited agent escalates the whole run
+/// even though a backup was set (e.g. `[agents.codex] backup = "agy"` with agy not used as a role).
+fn crew_agents_with_backups(crew: &CrewConfig) -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    for role in crew.roles.values() {
+        set.insert(role.agent.clone());
+        if let Some(backup) = crew.backup_for(&role.agent) {
+            set.insert(backup.to_string());
+        }
+    }
+    set
+}
+
+/// Crew-aware registry. For each agent a role references (and each configured backup), resolve in
+/// priority order: (1) an explicit `[agents.<n>] node = "http://..."` in crew.toml → RemoteAdapter
+/// (always wins); (2) when `discover`, a tailnet peer running `ensemble serve` that hosts the agent →
+/// RemoteAdapter; (3) the local `ExecAdapter`/`AgyAdapter` fallback. The tailnet is probed only when
+/// `discover` is on AND some needed agent lacks an explicit node. An unknown local agent is skipped
+/// (a missing adapter already makes the conductor escalate cleanly).
 fn adapters_for(crew: &CrewConfig, discover: bool) -> HashMap<String, Box<dyn Adapter>> {
     let mut m: HashMap<String, Box<dyn Adapter>> = HashMap::new();
-    let agents: std::collections::HashSet<&str> =
-        crew.roles.values().map(|r| r.agent.as_str()).collect();
+    let agents = crew_agents_with_backups(crew);
     let needs_discovery = discover && agents.iter().any(|a| crew.node_for(a).is_none());
     let discovered = if needs_discovery {
         ensemble::discovery::discover_agent_hosts(7878)
     } else {
         HashMap::new()
     };
-    for agent in agents {
+    for agent in &agents {
+        let agent = agent.as_str();
         if let Some(node) = crew.node_for(agent) {
             m.insert(agent.into(), Box::new(RemoteAdapter::new(agent, node))); // explicit wins
         } else if let Some(node) = discovered.get(agent) {
@@ -3124,6 +3139,35 @@ mod tests {
     use super::*;
     fn argv(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn crew_agents_with_backups_includes_configured_backups() {
+        // A backup that is not itself a role (e.g. agy backing codex) must still be in the set so
+        // its adapter gets built and quota-aware substitution can actually reach it.
+        let crew: CrewConfig = toml::from_str(
+            r#"
+pipeline = ["implement", "review"]
+[gate]
+min_approvals = 1
+max_rounds = 1
+on_flake = "exclude"
+[roles.implement]
+agent = "codex"
+[roles.review]
+agent = "claude"
+[agents.codex]
+backup = "agy"
+"#,
+        )
+        .unwrap();
+        let set = crew_agents_with_backups(&crew);
+        assert!(set.contains("codex"), "role agent codex must be present");
+        assert!(set.contains("claude"), "role agent claude must be present");
+        assert!(
+            set.contains("agy"),
+            "codex's backup agy must be built too, else substitution can't reach it"
+        );
     }
 
     #[test]
