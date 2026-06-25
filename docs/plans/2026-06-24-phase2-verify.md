@@ -50,6 +50,7 @@ pwsh -NoProfile -File scripts\phase2-local-ready.ps1 -Repo D:\Projects\ensemble
 - 同一個 Slice A 會啟動暫時的 loopback remote control server：
   - `ensemble serve --bind 127.0.0.1:<free-port> --token <ephemeral>`
   - 經由 `--node http://127.0.0.1:<port>` 驗證 remote `team status/say/inbox`、`watch`、`steer`、`abort`
+  - 另用非 local-escape 的 loopback alias 驗證 `watch/steer/abort <name>@127.0.0.2:<port>` suffix routing，不帶 `--node` 也必須走遠端 control plane
   - mutation（`team say`、`steer`、`abort`）必須帶正確 token；錯 token 必須明確非零失敗且包含 `Unauthorized`
 - 跨機時，若要測 `member@node`，請設定 `-RemoteNode <node>`
 

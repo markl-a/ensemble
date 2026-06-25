@@ -1249,8 +1249,20 @@ fn control_node_url(raw: &str) -> Result<String, String> {
     let node = node.trim_end_matches('/');
     if node.starts_with("http://") || node.starts_with("https://") {
         Ok(node.to_string())
-    } else if node.contains(':') && !node.starts_with('[') {
-        Ok(format!("http://[{node}]:7878"))
+    } else if node.starts_with('[') {
+        if node.contains("]:") {
+            Ok(format!("http://{node}"))
+        } else {
+            Ok(format!("http://{node}:7878"))
+        }
+    } else if let Some((host, port)) = node.rsplit_once(':') {
+        let has_single_colon = !host.contains(':');
+        let has_port = !host.is_empty() && port.chars().all(|c| c.is_ascii_digit());
+        if has_single_colon && has_port {
+            Ok(format!("http://{node}"))
+        } else {
+            Ok(format!("http://[{node}]:7878"))
+        }
     } else {
         Ok(format!("http://{node}:7878"))
     }
@@ -4828,6 +4840,18 @@ node = "http://m2:7878"
         assert_eq!(
             routed.node.as_deref(),
             Some("http://macbook.tail.ts.net:7878")
+        );
+    }
+
+    #[test]
+    fn control_node_url_preserves_host_port_nodes() {
+        assert_eq!(
+            control_node_url("127.0.0.2:60315").unwrap(),
+            "http://127.0.0.2:60315"
+        );
+        assert_eq!(
+            control_node_url("phase2-loopback:60315").unwrap(),
+            "http://phase2-loopback:60315"
         );
     }
 

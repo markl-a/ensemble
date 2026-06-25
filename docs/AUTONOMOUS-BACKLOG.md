@@ -161,6 +161,15 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-25 — **Phase 2 Slice A now verifies member@node control routing end to end.**
+  `scripts/phase2-verify.ps1` still tests explicit `--node <loopback-serve>` control
+  routes, and now also drives `watch`, `steer`, and `abort` through
+  `<name>@127.0.0.2:<port>` without `--node`. The verifier uses a non local-escape
+  loopback alias and wrong-token mutation checks, so a local fallback would fail instead of
+  silently writing the local file plane. This also adds a regression for `member@host:port`
+  suffix routing so ephemeral loopback serve ports work without the unsafe `member@http://...`
+  form. Verified with `cargo test --bin ensemble control_node_url_preserves_host_port_nodes`
+  and Slice A only: `phase2-verify.ps1 -SkipSliceB -SkipSliceC -SkipSliceD`.
 - 2026-06-25 — **Phase 2 local readiness now includes the cross-machine governance regression.**
   `scripts/phase2-local-ready.ps1` now runs `cargo test --test cross_machine --target-dir <target>`
   by default after Phase 1 acceptance, Phantom bridge, and Phase 2 Slice A/B-preflight/C-local.

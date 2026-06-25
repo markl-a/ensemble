@@ -105,8 +105,13 @@ function Expand-NodeList([string[]]$Nodes) {
     return $expanded
 }
 
-function Get-FreeLoopbackPort {
-    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+function Get-FreeLoopbackPort([string]$Address = "127.0.0.1") {
+    $ip = if ($Address -eq "127.0.0.1") {
+        [System.Net.IPAddress]::Loopback
+    } else {
+        [System.Net.IPAddress]::Parse($Address)
+    }
+    $listener = [System.Net.Sockets.TcpListener]::new($ip, 0)
     $listener.Start()
     try {
         return ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
@@ -564,8 +569,32 @@ function Assert-Phase2RunCrewGovernance([string]$CrewPath) {
     Write-Host "Phase 2 crew governance passed: min_approvals=$($json.min_approvals), reviewers=$($reviewerAgents -join ', '), test_command=$($json.test_command)" -ForegroundColor DarkGray
 }
 
+function Convert-ToFeedStem([string]$Name) {
+    $chars = New-Object System.Collections.Generic.List[char]
+    foreach ($ch in $Name.ToCharArray()) {
+        if (([char]::IsAsciiLetterOrDigit($ch)) -or $ch -eq '-' -or $ch -eq '_' -or $ch -eq '.') {
+            $chars.Add($ch)
+        } else {
+            $chars.Add('-')
+        }
+    }
+    $stem = (-join $chars).Trim('.')
+    if ([string]::IsNullOrWhiteSpace($stem)) {
+        return "run"
+    }
+    return $stem
+}
+
+function Get-StreamFeedPath([string]$RepoPath, [string]$Name) {
+    return Join-Path $RepoPath (".ensemble/stream/{0}.ndjson" -f (Convert-ToFeedStem $Name))
+}
+
+function Get-ControlFeedPath([string]$RepoPath, [string]$Name) {
+    return Join-Path $RepoPath (".ensemble/control/{0}.ndjson" -f (Convert-ToFeedStem $Name))
+}
+
 function Stream-Cursor([string]$RepoPath, [string]$Name) {
-    $streamPath = Join-Path $RepoPath ".ensemble/stream/$Name.ndjson"
+    $streamPath = Get-StreamFeedPath $RepoPath $Name
     if (-not (Test-Path -LiteralPath $streamPath -PathType Leaf)) {
         return 0
     }
@@ -645,9 +674,11 @@ function Run-SliceA {
             Assert-Contains $autoNodeText "auto is not supported" "invalid --node"
 
             $repoRoot = (Get-Location).Path
-            $port = Get-FreeLoopbackPort
-            $bind = "127.0.0.1:$port"
+            $loopbackHost = "127.0.0.2"
+            $port = Get-FreeLoopbackPort $loopbackHost
+            $bind = "${loopbackHost}:$port"
             $nodeUrl = "http://$bind"
+            $memberNode = $bind
             $remoteToken = "phase2-loopback-token-$PID"
             $remoteTeam = "phase2-loopback-$PID"
             $remoteStream = "phase2-loopback-stream-$PID"
@@ -655,7 +686,9 @@ function Run-SliceA {
             $remoteTeamRoot = Join-Path $repoRoot ".ensemble/teams/$remoteTeam"
             $serveLog = Join-Path $env:TEMP "ensemble-phase2-control-serve-$PID.log"
             $streamFile = $null
+            $remoteAtStreamFile = $null
             $controlPath = $null
+            $remoteAtControlPath = $null
             $serveAttempt = Start-EnsembleUp -EnsembleArgs @(
                 "serve", "--bind", $bind, "--token", $remoteToken
             ) -WarmupSeconds 2 -Log $serveLog
@@ -736,6 +769,19 @@ function Run-SliceA {
                 ) "remote watch over loopback" -TimeoutSec 20
                 Assert-Contains $remoteWatch.Stdout "remote loopback stream smoke" "remote watch output"
 
+                $remoteAtStream = "$remoteStream@$memberNode"
+                $remoteAtStreamFile = Get-StreamFeedPath $repoRoot $remoteAtStream
+                '{"from":"codex@loopback","kind":"result","body":"remote member-at-node stream smoke"}' |
+                    Add-Content -LiteralPath $remoteAtStreamFile -Encoding utf8NoBOM
+                $remoteAtWatch = Invoke-EnsembleCapture @(
+                    "watch", $remoteAtStream,
+                    "--repo", ".",
+                    "--team", $remoteTeam,
+                    "--since", "0",
+                    "--json"
+                ) "remote watch through member@node suffix" -TimeoutSec 20
+                Assert-Contains $remoteAtWatch.Stdout "remote member-at-node stream smoke" "remote member@node watch output"
+
                 $controlPath = Join-Path $repoRoot ".ensemble/control/$remoteControl.ndjson"
                 $badSteer = Invoke-EnsembleCapture @(
                     "steer", $remoteControl, "remote wrong-token steer",
@@ -794,12 +840,68 @@ function Run-SliceA {
                     Fail "remote abort control feed should contain exactly one abort record; found $($abortLines.Count)"
                 }
                 Assert-Contains $abortLines[0] '"hard":true' "remote abort control feed"
+
+                $remoteAtControl = "$remoteControl@$memberNode"
+                $remoteAtControlPath = Get-ControlFeedPath $repoRoot $remoteAtControl
+                $badRemoteAtSteer = Invoke-EnsembleCapture @(
+                    "steer", $remoteAtControl, "remote member-at-node wrong-token steer",
+                    "--repo", ".",
+                    "--token", "wrong-token"
+                ) "remote member@node steer wrong token" -TimeoutSec 20 -AllowedExitCodes @(1, 2, 3) -AllowFailure
+                if ($badRemoteAtSteer.Code -eq 0) {
+                    Fail "remote member@node steer with a wrong token should fail explicitly"
+                }
+                $badRemoteAtSteerText = "$($badRemoteAtSteer.Stdout)`n$($badRemoteAtSteer.Stderr)"
+                Assert-Contains $badRemoteAtSteerText "Unauthorized" "remote member@node wrong-token steer failure"
+                $badRemoteAtSteerWritten = (Test-Path -LiteralPath $remoteAtControlPath) -and `
+                    ((Get-Content -LiteralPath $remoteAtControlPath -Raw) -match [regex]::Escape("remote member-at-node wrong-token steer"))
+                if ($badRemoteAtSteerWritten) {
+                    Fail "remote member@node wrong-token steer unexpectedly appeared in control feed"
+                }
+
+                Invoke-EnsembleCapture @(
+                    "steer", $remoteAtControl, "remote member-at-node steer",
+                    "--repo", ".",
+                    "--token", $remoteToken
+                ) "remote steer through member@node suffix" -TimeoutSec 20 | Out-Null
+                if (-not (Test-Path -LiteralPath $remoteAtControlPath -PathType Leaf)) {
+                    Fail "remote member@node steer did not create expected control feed: $remoteAtControlPath"
+                }
+                $remoteAtControlText = Get-Content -LiteralPath $remoteAtControlPath -Raw
+                Assert-Contains $remoteAtControlText '"cmd":"steer"' "remote member@node steer control feed"
+                Assert-Contains $remoteAtControlText "remote member-at-node steer" "remote member@node steer control feed"
+
+                $badRemoteAtAbort = Invoke-EnsembleCapture @(
+                    "abort", $remoteAtControl, "--hard",
+                    "--repo", ".",
+                    "--token", "wrong-token"
+                ) "remote member@node abort wrong token" -TimeoutSec 20 -AllowedExitCodes @(1, 2, 3) -AllowFailure
+                if ($badRemoteAtAbort.Code -eq 0) {
+                    Fail "remote member@node abort with a wrong token should fail explicitly"
+                }
+                $badRemoteAtAbortText = "$($badRemoteAtAbort.Stdout)`n$($badRemoteAtAbort.Stderr)"
+                Assert-Contains $badRemoteAtAbortText "Unauthorized" "remote member@node wrong-token abort failure"
+                $remoteAtControlText = Get-Content -LiteralPath $remoteAtControlPath -Raw
+                if ($remoteAtControlText -match [regex]::Escape("remote member-at-node wrong-token")) {
+                    Fail "remote member@node wrong-token mutation unexpectedly appeared in control feed"
+                }
+
+                Invoke-EnsembleCapture @(
+                    "abort", $remoteAtControl, "--hard",
+                    "--repo", ".",
+                    "--token", $remoteToken
+                ) "remote abort through member@node suffix" -TimeoutSec 20 | Out-Null
+                $remoteAtAbortLines = @(Get-Content -LiteralPath $remoteAtControlPath | Where-Object { $_ -match [regex]::Escape('"cmd":"abort"') })
+                if ($remoteAtAbortLines.Count -ne 1) {
+                    Fail "remote member@node abort control feed should contain exactly one abort record; found $($remoteAtAbortLines.Count)"
+                }
+                Assert-Contains $remoteAtAbortLines[0] '"hard":true' "remote member@node abort control feed"
             } finally {
                 if ($serveProc) {
                     Stop-Process -Id $serveProc.Id -Force -ErrorAction SilentlyContinue
                     $serveProc.WaitForExit(3000) | Out-Null
                 }
-                foreach ($artifact in @($streamFile, $controlPath, $serveLog, "$serveLog.err")) {
+                foreach ($artifact in @($streamFile, $remoteAtStreamFile, $controlPath, $remoteAtControlPath, $serveLog, "$serveLog.err")) {
                     if ($artifact -and (Test-Path -LiteralPath $artifact)) {
                         Remove-Item -LiteralPath $artifact -Force -ErrorAction SilentlyContinue
                     }
