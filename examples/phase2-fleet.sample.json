@@ -1,0 +1,55 @@
+{
+  "nodes": ["m1", "m2", "m3", "m4", "m5"],
+  "conductor": "m1",
+  "main": {
+    "repo": "D:\\Projects\\main-project",
+    "team": "main",
+    "watch": "main",
+    "task": "phase2 main smoke run",
+    "test": "cargo test --quiet",
+    "merge": true,
+    "routes": {
+      "codex": "m1",
+      "claude": "m2",
+      "agy": "m3"
+    }
+  },
+  "satellites": [
+    {
+      "name": "sat-a",
+      "repo": "D:\\Projects\\sat-a",
+      "node": "m2",
+      "team": "sat-a",
+      "watch": "sat-a",
+      "task": "phase2 satellite A smoke run",
+      "test": "cargo test --quiet"
+    },
+    {
+      "name": "sat-b",
+      "repo": "D:\\Projects\\sat-b",
+      "node": "m3",
+      "team": "sat-b",
+      "watch": "sat-b",
+      "task": "phase2 satellite B smoke run",
+      "test": "cargo test --quiet"
+    },
+    {
+      "name": "sat-c",
+      "repo": "D:\\Projects\\sat-c",
+      "node": "m4",
+      "team": "sat-c",
+      "watch": "sat-c",
+      "task": "phase2 satellite C smoke run",
+      "test": "cargo test --quiet"
+    },
+    {
+      "name": "sat-d",
+      "repo": "D:\\Projects\\sat-d",
+      "node": "m5",
+      "team": "sat-d",
+      "watch": "sat-d",
+      "task": "phase2 satellite D smoke run",
+      "test": "cargo test --quiet"
+    }
+  ]
+}

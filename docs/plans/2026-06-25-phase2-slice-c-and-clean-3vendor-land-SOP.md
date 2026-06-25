@@ -60,20 +60,61 @@ ensemble up          # 前景常駐；可放背景終端 / Start-Job / tmux
 
 在 **m1** 確認整個 fleet：
 ```bash
-ensemble mesh        # 本機 4 CLI + 每個 tailnet peer host 哪些 agent
-ensemble nodes       # 期待看到 m1~m5
+ensemble mesh        # 期待 local CLIs + remote peers（m2~m5）
+ensemble nodes       # agent→host 輔助視圖；不列本機 m1
 ```
 > 看不到節點 → 回 Step 0：先關 Surfshark 再 `tailscale up`，並確認每台都已 `ensemble up`。
 
 ---
 
-## 3. Slice C 驗收
+## 3. 產生五機 crew 與 run 指令（不用手工複製/手工路由）
 
-### 3a 主專案（team = main，五機可見、可介入）
+先在每台機器的 `ensemble` repo 內建立一份本機私有 manifest：
+
+```bash
+pwsh scripts/phase2-fleet.ps1 -InitSample -Manifest phase2-fleet.local.json
+```
+
+編輯 `phase2-fleet.local.json`：
+- `nodes` / `conductor`：填實際五台 host 對照。
+- `main.repo`：主專案在本機的路徑。
+- `main.routes`：主專案 headless governed run 使用的路由（腳本會把 `m2` 正規化為 `http://m2:7878`）。
+- `satellites[]`：四個衛星專案的 `repo` / `node` / `team` / `test`。
+
+`phase2-fleet.local.json` 已列入 `.gitignore`，不要提交內部路徑或機器名稱。
+
+每台機器依自己的角色 materialize：
+
+```bash
+# m1
+pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Materialize -PlanOnly
+
+# m2~m5：把 Node 換成對應 host alias
+pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m2 -Materialize -PlanOnly
+```
+
+腳本會：
+- 產生 `.ensemble/phase2-fleet/crew-main.generated.toml`（m1/conductor）。
+- 產生 `.ensemble/phase2-fleet/crew-<sat>.generated.toml`（對應衛星機）。
+- 列出該節點要跑的 `ensemble up`、`ensemble run`、`ensemble watch` 指令。
+
+在 m1 也可以加上節點檢查：
+
+```bash
+pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -CheckNodes -PlanOnly
+```
+`-CheckNodes` 會用 `ensemble mesh` 檢查 remote peers（m2~m5）；conductor `m1` 是本機，
+不會出現在 tailnet peer 清單中，需由同一次 `mesh` 的 `local CLIs` 區塊確認。
+
+---
+
+## 4. Slice C 驗收
+
+### 4a 主專案（team = main，五機可見、可介入）
 
 在 **m1**（主 repo 目錄）：
 ```bash
-ensemble run "<主專案任務>" --crew crew-main.toml --repo <主repo路徑> --team main --watch main --merge
+ensemble run "<主專案任務>" --crew .ensemble/phase2-fleet/crew-main.generated.toml --repo <主repo路徑> --team main --watch main --merge
 ```
 任一台操作機可監控 / 介入：
 ```bash
@@ -81,33 +122,33 @@ ensemble watch main --follow
 ensemble steer main "請偏重 error handling" --team main
 ensemble abort main --hard --team main        # 偏離時硬中斷
 ```
-> `crew-main.toml` 已是 `implement=codex / review=claude / audit=agy`、`min_approvals=2`，
+> generated main crew 已是 `implement=codex / review=claude / audit=agy`、`min_approvals=2`，
 > 且 `codex`、`claude` 都 `backup="agy"`（額度爆掉自動換 agy，不整個 escalate）。
 
-### 3b 四個衛星專案（各機各專案，codex + claude）
+### 4b 四個衛星專案（各機各專案，codex + claude）
 
 在各衛星機器（`m2→sat-a`、`m3→sat-b`、`m4→sat-c`、`m5→sat-d`）的專案目錄：
 ```bash
-# 先把 crew-sat-two-ai.toml 複製到該衛星 repo 根目錄，並把 [test].command 改成該專案真正的測試指令
-ensemble run "<衛星任務>" --crew crew-sat-two-ai.toml --repo . --team sat-a --watch sat-a
+ensemble run "<衛星任務>" --crew .ensemble/phase2-fleet/crew-sat-a.generated.toml --repo . --team sat-a --watch sat-a
 ensemble watch sat-a --follow
 ```
+> 更建議直接使用 `phase2-fleet.ps1 -PlanOnly` 輸出的命令，避免 crew path / team / watch 打錯。
 
 ### 完成判定（Slice C）
-- `ensemble nodes` 在 m1 看得到 `m1~m5`。
+- `ensemble mesh` 在 m1 顯示本機 CLIs，且 tailnet peers 看得到 m2~m5；`ensemble nodes` 可作為 agent→host 輔助視圖。
 - 每個 run 都有可讀的 `stream/control` 事件（`ensemble watch <name> --since 0`）。
 - 每個 run 末端為 **LANDED** 或 **ESCALATED**（含 escalate＝治理不落盤，也算正確終局）。
 - 任務可重跑一次仍到達同等終局。
 
 ---
 
-## 4. codex 額度重置後：乾淨三家 LAND（main）
+## 5. codex 額度重置後：乾淨三家 LAND（main）
 
 codex 每日額度重置後（觀測到的訊息：`retry after 11:54 PM`），跑一次 **codex 當 implementer 的乾淨三家版**，
 證明「test pass + 2 家不同 vendor 審核」可正常 land：
 
 ```bash
-ensemble run "<可驗證的小任務>" --crew crew-main.toml --repo <主repo> --team main --watch main --merge
+ensemble run "<可驗證的小任務>" --crew .ensemble/phase2-fleet/crew-main.generated.toml --repo <主repo> --team main --watch main --merge
 ```
 
 期待 transcript：
@@ -126,11 +167,12 @@ ensemble run "<可驗證的小任務>" --crew crew-main.toml --repo <主repo> --
 
 ---
 
-## 5. 疑難排解
+## 6. 疑難排解
 
 | 症狀 | 處置 |
 |---|---|
 | 跨機 `ensemble nodes` 看不到別台 | 先關 Surfshark 再 `tailscale up`（WireGuard 衝突）；確認別台已 `ensemble up` |
+| `ensemble nodes` 沒列出 m1 | 正常；`nodes`/tailnet peer discovery 不列本機，請看 `ensemble mesh` 的 `local CLIs` |
 | `agy` flake / timeout | 給足 timeout（≥120s；crew 已設 `[agents.agy] timeout=180`）。短 timeout（1~5s）一定 flake |
 | 把 `opencode` 當自動 reviewer 卡住 | opencode headless 會 hang，**別放進自動角色**；互動式 `ensemble agent`/MCP 不受限 |
 | `ensemble merge` 拒絕：worktree not clean | 跑 run 的 repo 要 `.gitignore` 掉 `.ensemble/`，且 `crew.toml` 放 repo 外或 ignore |
@@ -139,19 +181,21 @@ ensemble run "<可驗證的小任務>" --crew crew-main.toml --repo <主repo> --
 
 ---
 
-## 6. 一頁速查（每台機器照抄）
+## 7. 一頁速查（每台機器照抄）
 
 ```bash
 # 0) 關 Surfshark；tailscale up; tailscale status
 # 1) pull + build + install
 git pull --ff-only && cargo build --release && cargo install --path . --force
 ensemble doctor
+# 1.5) 產生本機角色 crew + 指令（第一次先 -InitSample 並編輯 manifest；Node 改成本機 alias）
+pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Materialize -PlanOnly
 # 2) 起節點
 ensemble up           # 背景/新終端
 # 3) m1 看 fleet
 ensemble mesh && ensemble nodes
 # 4) 主專案（m1）
-ensemble run "<task>" --crew crew-main.toml --repo <主repo> --team main --watch main --merge
+ensemble run "<task>" --crew .ensemble/phase2-fleet/crew-main.generated.toml --repo <主repo> --team main --watch main --merge
 # 5) 衛星（m2~m5 各自）
-ensemble run "<task>" --crew crew-sat-two-ai.toml --repo . --team sat-a --watch sat-a
+ensemble run "<task>" --crew .ensemble/phase2-fleet/crew-sat-a.generated.toml --repo . --team sat-a --watch sat-a
 ```

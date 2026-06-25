@@ -24,6 +24,7 @@ param(
     [int]$SmokeTimeoutSecs = 120,
     [int]$UpWarmupSecs = 6,
     [string]$RemoteNode = "",
+    [string]$LocalFleetNode = "",
     [string[]]$ExpectedFleetNodes = @(),
     [string]$SmokeRoot = "",
     [string]$TargetDir = "",
@@ -54,6 +55,49 @@ function Require-Tool([string]$Name) {
     if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
         Fail "required tool not found on PATH: $Name"
     }
+}
+
+function Get-UrlHosts([string]$Text) {
+    $hosts = New-Object System.Collections.Generic.List[string]
+    foreach ($match in [regex]::Matches($Text, 'https?://(\[[^\]]+\]|[^/:\s]+)(?::\d+)?')) {
+        $hosts.Add($match.Groups[1].Value.Trim('[', ']'))
+    }
+    return $hosts
+}
+
+function Get-ExpectedHost([string]$NodeName) {
+    $trimmed = $NodeName.Trim().TrimEnd('/')
+    $match = [regex]::Match($trimmed, '^(?:https?://)?(\[[^\]]+\]|[^/:\s]+)(?::\d+)?(?:/.*)?$')
+    if ($match.Success) {
+        return $match.Groups[1].Value.Trim('[', ']')
+    }
+    return $trimmed.Trim('[', ']')
+}
+
+function Test-HostPresent([string]$ExpectedNode, [string[]]$Hosts) {
+    $expected = Get-ExpectedHost $ExpectedNode
+    foreach ($hostName in $Hosts) {
+        if ($hostName.Equals($expected, [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+        if ($hostName.StartsWith("$expected.", [System.StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Expand-NodeList([string[]]$Nodes) {
+    $expanded = New-Object System.Collections.Generic.List[string]
+    foreach ($node in $Nodes) {
+        foreach ($part in ([string]$node).Split(',')) {
+            $trimmed = $part.Trim()
+            if ($trimmed.Length -gt 0) {
+                $expanded.Add($trimmed)
+            }
+        }
+    }
+    return $expanded
 }
 
 function Get-EnsembleCmd {
@@ -440,18 +484,26 @@ function Run-SliceC {
         }
 
         if ($ExpectedFleetNodes.Count -gt 0) {
+            $hosts = @(Get-UrlHosts $mesh.Stdout)
+            $expandedExpected = @(Expand-NodeList $ExpectedFleetNodes)
+            $expectedNodes = @($expandedExpected | Where-Object {
+                    -not ($LocalFleetNode -and ([string]$_).Equals($LocalFleetNode, [System.StringComparison]::OrdinalIgnoreCase))
+                })
             $missing = New-Object System.Collections.Generic.List[string]
-            foreach ($expectedHost in $ExpectedFleetNodes) {
-                if ($nodes.Stdout -notmatch [regex]::Escape($expectedHost)) {
+            foreach ($expectedHost in $expectedNodes) {
+                if (-not (Test-HostPresent $expectedHost $hosts)) {
                     $missing.Add($expectedHost)
                 }
             }
             if ($missing.Count -gt 0) {
-                Fail "expected fleet node(s) not found in nodes output: $($missing -join ', ')"
+                Fail "expected remote fleet node(s) not found in mesh output: $($missing -join ', ')"
+            }
+            if ($LocalFleetNode) {
+                Write-Host "Slice C skipped local fleet node '$LocalFleetNode' because mesh/nodes only list tailnet peers." -ForegroundColor DarkGray
             }
         }
         Write-Host "Slice C note: full 5-node restart/run loop still needs per-host terminal execution." -ForegroundColor Yellow
-        Write-Host "  m1~m5: run 'ensemble up' and confirm mesh/nodes on m1, then launch each project run." -ForegroundColor Yellow
+        Write-Host "  m1~m5: run 'ensemble up'; confirm m1 local CLIs and remote peers via mesh, with nodes as an agent-route helper." -ForegroundColor Yellow
         Write-Host "Slice C local checks passed (mesh/nodes runnable)." -ForegroundColor Green
     }
 }

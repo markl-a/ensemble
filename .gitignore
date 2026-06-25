@@ -7,3 +7,4 @@ Cargo.lock
 # ensemble runtime scratch
 /.ensemble/
 *.blackboard.jsonl
+phase2-fleet.local.json

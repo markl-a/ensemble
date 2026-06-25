@@ -55,7 +55,7 @@ pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo D:\Projects\ensemble -Team
 
 - `ensemble mesh`
 - `ensemble nodes`
-- 檢查 `ensemble nodes` 中有預期節點（可用 `-ExpectedFleetNodes m1,m2,m3,m4,m5`）
+- 檢查 `ensemble mesh` 中有預期 remote peers（可用 `-ExpectedFleetNodes m1,m2,m3,m4,m5 -LocalFleetNode m1`；本機 conductor 會被跳過，因為 tailnet peer discovery 不列自己）
 
 手動（每台主機）：
 
