@@ -161,6 +161,15 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-26 — **Phase 2 fleet service bootstrap can now run through Tailscale SSH.**
+  `scripts/phase2-fleet.ps1` gained `-RemoteService` for service bootstrap actions:
+  from the conductor, `-Node all -Service install-print|install|uninstall-print|uninstall
+  -RunService -RemoteService` invokes `tailscale ssh <node> ensemble serve ...` for each
+  selected service node. This keeps the local `-RunService` path unchanged, still refuses
+  local `-Node all` service execution, and rejects foreground `-Service up` for remote
+  bootstrap because it would hang the SSH call. Verified with `phase2-fleet.ps1 -SelfTest`
+  using a fake `tailscale`, plus explicit negative checks for `-RemoteService` without
+  `-RunService` and remote `-Service up`.
 - 2026-06-26 — **Phase 2 local fleet manifest prepared for the real five-node pass.**
   Created an ignored `phase2-fleet.local.json` on this host that maps the local
   conductor plus four Tailnet-visible peers to one main project and four satellite

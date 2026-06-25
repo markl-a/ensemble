@@ -65,6 +65,12 @@ pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <this-node
 pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <this-node> -Service uninstall-print -RunService
 ```
 
+如果 conductor 已能透過 Tailscale SSH 連到 fleet 節點，可以從 conductor 一次預覽全部節點的 service bootstrap：
+
+```bash
+pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node all -Service install-print -RunService -RemoteService
+```
+
 確認內容正確後，拿掉 `--print` 進行實際安裝或移除：
 
 ```bash
@@ -72,7 +78,15 @@ pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <this-node
 pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <this-node> -Service uninstall -RunService
 ```
 
+或從 conductor 透過 Tailscale SSH 遠端安裝/移除：
+
+```bash
+pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node all -Service install -RunService -RemoteService
+pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node all -Service uninstall -RunService -RemoteService
+```
+
 實際 install 會建立/更新並立即啟動或重啟 `serve`；uninstall 會先停止再移除 service 設定。
+`-RemoteService` 只支援會返回的 service 動作（`install-print`、`install`、`uninstall-print`、`uninstall`），不支援前景長跑的 `up`。
 
 `--install-service` 預設執行 `ensemble serve`，所以會繼承 `serve` 的安全 bind 行為（有 tailnet IP 則綁 tailnet，否則 loopback）。若你要固定 bind，可加 `--bind <addr>`；若要讓遠端 mutation 需要 token，可明確加 `--token <token>`，但這會寫入系統 service 設定。
 

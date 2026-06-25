@@ -5,6 +5,7 @@
 #   pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Service install-print -RunService
 #   pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Service install -RunService
 #   pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Service uninstall -RunService
+#   pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node all -Service install -RunService -RemoteService  # via tailscale ssh
 # Repeatable Slice C acceptance example:
 #   pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Materialize -RunSelected -VerifyEvidence -RepeatCount 2
 
@@ -28,6 +29,7 @@ param(
     [switch]$Json,
     [string]$Service = "none",
     [switch]$RunService,
+    [switch]$RemoteService,
     [switch]$SelfTest
 )
 
@@ -914,7 +916,12 @@ function Invoke-SelectedRuns($Plan) {
 }
 
 function Invoke-SelectedServices($Plan) {
-    if (-not (Get-Command ensemble -ErrorAction SilentlyContinue)) {
+    if ($RemoteService) {
+        if (-not (Get-Command tailscale -ErrorAction SilentlyContinue)) {
+            Fail "tailscale is not on PATH; remote service bootstrap requires Tailscale SSH"
+        }
+    }
+    elseif (-not (Get-Command ensemble -ErrorAction SilentlyContinue)) {
         Fail "ensemble is not on PATH; install first"
     }
     $services = @($Plan.Commands | Where-Object { $_.Kind -eq "service" })
@@ -923,8 +930,14 @@ function Invoke-SelectedServices($Plan) {
     }
     foreach ($cmd in $services) {
         Write-Host ""
-        Write-Host ("running [{0}] {1}" -f $cmd.Node, $cmd.Text)
-        & ensemble @($cmd.Args)
+        if ($RemoteService) {
+            Write-Host ("running remote [{0}] tailscale ssh {0} ensemble {1}" -f $cmd.Node, ($cmd.Args -join " "))
+            & tailscale ssh $cmd.Node ensemble @($cmd.Args)
+        }
+        else {
+            Write-Host ("running [{0}] {1}" -f $cmd.Node, $cmd.Text)
+            & ensemble @($cmd.Args)
+        }
         $code = $LASTEXITCODE
         if ($null -eq $code) {
             $code = 0
@@ -1694,6 +1707,58 @@ function Invoke-SelfTest {
     if ($serviceFakeLines[0] -ne "serve --install-service --print") {
         Fail "self-test expected -RunService to execute service install-print"
     }
+    $fakeTailscaleName = "tailscale"
+    if ($IsWindows) {
+        $fakeTailscaleName = "tailscale.cmd"
+    }
+    $fakeTailscale = Join-Path $fakeBin $fakeTailscaleName
+    if ($IsWindows) {
+        Set-Content -LiteralPath $fakeTailscale -Encoding ascii -Value @(
+            "@echo off",
+            'echo %*>>"%ENSEMBLE_FAKE_LOG%"',
+            "exit /b 0"
+        )
+    }
+    else {
+        Set-Content -LiteralPath $fakeTailscale -Encoding ascii -Value @(
+            "#!/bin/sh",
+            'printf ''%s\n'' "$*" >> "$ENSEMBLE_FAKE_LOG"',
+            "exit 0"
+        )
+        & chmod +x $fakeTailscale
+    }
+    $oldNodeForRemoteService = $script:Node
+    $oldRemoteService = $script:RemoteService
+    $script:Node = "all"
+    $script:RemoteService = $true
+    $remoteServicePlan = New-FleetPlan $fleet $root
+    Set-Content -LiteralPath $fakeLog -Encoding utf8NoBOM -Value ""
+    $oldPath = $env:PATH
+    $oldFakeLog = $env:ENSEMBLE_FAKE_LOG
+    $env:PATH = "$fakeBin$([System.IO.Path]::PathSeparator)$oldPath"
+    $env:ENSEMBLE_FAKE_LOG = $fakeLog
+    try {
+        Invoke-SelectedServices $remoteServicePlan
+    }
+    finally {
+        $env:PATH = $oldPath
+        if ($null -eq $oldFakeLog) {
+            Remove-Item Env:\ENSEMBLE_FAKE_LOG -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:ENSEMBLE_FAKE_LOG = $oldFakeLog
+        }
+        $script:Node = $oldNodeForRemoteService
+        $script:RemoteService = $oldRemoteService
+    }
+    $remoteServiceFakeOut = Get-Content -Raw -LiteralPath $fakeLog
+    $remoteServiceFakeLines = @($remoteServiceFakeOut -split "`r?`n" | Where-Object { $_.Trim().Length -gt 0 })
+    if ($remoteServiceFakeLines.Count -ne 2) {
+        Fail "self-test expected remote -RunService -Node all to execute one tailscale ssh command per manifest node"
+    }
+    if ($remoteServiceFakeLines[0] -ne "ssh m1 ensemble serve --install-service --print" -or $remoteServiceFakeLines[1] -ne "ssh m2 ensemble serve --install-service --print") {
+        Fail "self-test expected remote service bootstrap to use tailscale ssh per node"
+    }
     $script:Service = "none"
 
     Write-Host "phase2-fleet self-test passed"
@@ -1733,13 +1798,19 @@ if ($VerifyReports -and $PlanOnly) {
 if ($RunService -and $PlanOnly) {
     Fail "-RunService cannot be combined with -PlanOnly"
 }
+if ($RemoteService -and -not $RunService) {
+    Fail "-RemoteService requires -RunService"
+}
+if ($RemoteService -and $serviceAction -eq "up") {
+    Fail "-RemoteService does not support foreground -Service up; use install-print, install, uninstall-print, or uninstall"
+}
 if ($RunService -and $serviceAction -eq "none") {
     Fail "-RunService requires an explicit -Service action (install-print, install, uninstall-print, uninstall, or up)"
 }
 if ($RunSelected -and $Node.Equals("all", [System.StringComparison]::OrdinalIgnoreCase)) {
     Fail "-RunSelected requires an explicit -Node <name>; refusing to run every manifest task"
 }
-if ($RunService -and $Node.Equals("all", [System.StringComparison]::OrdinalIgnoreCase)) {
+if ($RunService -and -not $RemoteService -and $Node.Equals("all", [System.StringComparison]::OrdinalIgnoreCase)) {
     Fail "-RunService requires an explicit -Node <name>; refusing to run every manifest service command on this host"
 }
 if ($Materialize) {
