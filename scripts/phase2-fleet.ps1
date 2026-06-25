@@ -17,6 +17,7 @@ param(
     [switch]$Materialize,
     [switch]$CheckNodes,
     [switch]$RunSelected,
+    [switch]$VerifyReports,
     [switch]$VerifyEvidence,
     [switch]$AllowEscalatedRun,
     [switch]$RequireControlEvidence,
@@ -659,6 +660,97 @@ function Write-AcceptanceReport($Project, [object[]]$Runs) {
     Write-Host "wrote acceptance report: $path"
 }
 
+function Read-AcceptanceReport($Project) {
+    $path = Get-AcceptanceReportPath $Project
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        Fail "missing acceptance report for '$($Project.Name)' on node '$($Project.Node)': $path"
+    }
+    try {
+        return Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
+    }
+    catch {
+        Fail "acceptance report for '$($Project.Name)' is not valid JSON: $path`n$($_.Exception.Message)"
+    }
+}
+
+function Require-ReportField($Object, [string]$Name, [string]$Context) {
+    if ($null -eq $Object) {
+        Fail "$Context is missing required field '$Name'"
+    }
+    $prop = $Object.PSObject.Properties[$Name]
+    if ($null -eq $prop -or $null -eq $prop.Value) {
+        Fail "$Context is missing required field '$Name'"
+    }
+    return $prop.Value
+}
+
+function Assert-AcceptanceReport($Project, $Report) {
+    $context = "acceptance report for '$($Project.Name)'"
+    $ok = Require-ReportField $Report "ok" $context
+    $node = Require-ReportField $Report "node" $context
+    $verifyEvidence = Require-ReportField $Report "verifyEvidence" $context
+    $repeatCount = Require-ReportField $Report "repeatCount" $context
+    $projectInfo = Require-ReportField $Report "project" $context
+    $runsValue = Require-ReportField $Report "runs" $context
+
+    if ($ok -ne $true) {
+        Fail "$context is not ok=true"
+    }
+    if ($verifyEvidence -ne $true) {
+        Fail "$context was not produced by -VerifyEvidence"
+    }
+    if ($node -ne $Project.Node) {
+        Fail "$context has node '$node', expected '$($Project.Node)'"
+    }
+
+    $projectName = Require-ReportField $projectInfo "name" "$context project"
+    $projectTeam = Require-ReportField $projectInfo "team" "$context project"
+    $projectWatch = Require-ReportField $projectInfo "watch" "$context project"
+    if ($projectName -ne $Project.Name) {
+        Fail "acceptance report project name mismatch: got '$projectName', expected '$($Project.Name)'"
+    }
+    if ($projectTeam -ne $Project.Team -or $projectWatch -ne $Project.Watch) {
+        Fail "$context has wrong team/watch"
+    }
+    if ([int]$repeatCount -lt [int]$RepeatCount) {
+        Fail "$context repeatCount=$repeatCount, expected at least $RepeatCount"
+    }
+    $runs = @($runsValue)
+    if ($runs.Count -lt [int]$RepeatCount) {
+        Fail "$context records $($runs.Count) run(s), expected at least $RepeatCount"
+    }
+    $index = 0
+    foreach ($run in $runs) {
+        $index++
+        $runContext = "$context run #$index"
+        $evidenceVerified = Require-ReportField $run "evidenceVerified" $runContext
+        $terminal = Require-ReportField $run "terminal" $runContext
+        $exitCode = Require-ReportField $run "exitCode" $runContext
+        if ($evidenceVerified -ne $true) {
+            Fail "$context has an unverified run entry"
+        }
+        if ($terminal -ne "landed" -and $terminal -ne "escalated") {
+            Fail "$context has invalid terminal '$terminal'"
+        }
+        if ([int]$exitCode -ne 0) {
+            $allowedEscalated = Require-ReportField $run "allowedEscalated" $runContext
+            if ($allowedEscalated -ne $true) {
+                Fail "$context has nonzero exitCode without allowedEscalated=true"
+            }
+        }
+    }
+}
+function Invoke-AcceptanceReportVerifier($Plan) {
+    $projects = @($Plan.Projects | Where-Object { $_.Selected })
+    if ($projects.Count -eq 0) {
+        Fail "no selected acceptance reports for node '$Node'"
+    }
+    foreach ($project in $projects) {
+        $report = Read-AcceptanceReport $project
+        Assert-AcceptanceReport $project $report
+        Write-Host ("verified acceptance report [{0}] {1}: {2}" -f $project.Node, $project.Name, (Get-AcceptanceReportPath $project))
+    }
+}
 function Invoke-SelectedRuns($Plan) {
     $projects = @($Plan.Projects | Where-Object { $_.Selected })
     if ($projects.Count -eq 0) {
@@ -1064,6 +1156,50 @@ function Invoke-SelfTest {
     if ($report.project.name -ne "sat-a" -or $report.node -ne "m2") {
         Fail "self-test expected acceptance report to identify the selected project and node"
     }
+    Invoke-AcceptanceReportVerifier $nodePlan
+    $scriptPath = if ([string]::IsNullOrWhiteSpace($PSCommandPath)) { Join-Path $PSScriptRoot "phase2-fleet.ps1" } else { $PSCommandPath }
+    $childOut = & pwsh -NoProfile -File $scriptPath -Manifest $manifestPath -Node m2 -VerifyReports -RepeatCount 2 2>&1
+    $childCode = $LASTEXITCODE
+    if ($null -eq $childCode) {
+        $childCode = 0
+    }
+    if ($childCode -ne 0) {
+        Fail "self-test expected CLI -VerifyReports to validate the selected acceptance report`n$($childOut | Out-String)"
+    }
+    $malformedReport = [pscustomobject]@{
+        ok = $true
+        node = "m2"
+        verifyEvidence = $true
+        repeatCount = 2
+        project = [pscustomobject]@{
+            name = "sat-a"
+            team = "sat-a"
+            watch = "sat-a"
+        }
+        runs = @(
+            [pscustomobject]@{
+                iteration = 1
+                terminal = "landed"
+                evidenceVerified = $true
+                exitCode = $null
+            },
+            [pscustomobject]@{
+                iteration = 2
+                terminal = "landed"
+                evidenceVerified = $true
+                exitCode = $null
+            }
+        )
+    }
+    $malformedReport | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $acceptanceReport -Encoding utf8NoBOM
+    $childOut = & pwsh -NoProfile -File $scriptPath -Manifest $manifestPath -Node m2 -VerifyReports -RepeatCount 2 2>&1
+    $childCode = $LASTEXITCODE
+    if ($null -eq $childCode) {
+        $childCode = 0
+    }
+    if ($childCode -eq 0) {
+        Fail "self-test expected CLI -VerifyReports to reject a run entry missing exitCode`n$($childOut | Out-String)"
+    }
     Set-Content -LiteralPath $acceptanceReport -Encoding utf8NoBOM -Value '{"ok":true,"stale":true}'
     $fakeEvidenceFail = Join-Path $root "fake-evidence-fail.ps1"
     Set-Content -LiteralPath $fakeEvidenceFail -Encoding utf8NoBOM -Value @(
@@ -1128,6 +1264,51 @@ function Invoke-SelfTest {
     $multiReports = @($multiPlan.Projects | Where-Object { $_.Selected } | ForEach-Object { Get-AcceptanceReportPath $_ })
     if ($multiReports.Count -ne 2) {
         Fail "self-test expected multi-selected manifest to select two projects on m2"
+    }
+    $oldVerifyEvidenceForReports = $script:VerifyEvidence
+    $oldRepeatCountForReports = $script:RepeatCount
+    $script:VerifyEvidence = $true
+    $script:RepeatCount = 2
+    try {
+        foreach ($project in @($multiPlan.Projects | Where-Object { $_.Selected })) {
+            $runs = @(
+                [pscustomobject]@{
+                    iteration = 1
+                    command = "fake"
+                    exitCode = 0
+                    terminal = "landed"
+                    evidenceVerified = $true
+                    allowedEscalated = $false
+                    teamSince = 0
+                    watchSince = 0
+                    controlSince = 0
+                },
+                [pscustomobject]@{
+                    iteration = 2
+                    command = "fake"
+                    exitCode = 0
+                    terminal = "landed"
+                    evidenceVerified = $true
+                    allowedEscalated = $false
+                    teamSince = 0
+                    watchSince = 0
+                    controlSince = 0
+                }
+            )
+            Write-AcceptanceReport $project $runs
+        }
+    }
+    finally {
+        $script:VerifyEvidence = $oldVerifyEvidenceForReports
+        $script:RepeatCount = $oldRepeatCountForReports
+    }
+    $childOut = & pwsh -NoProfile -File $scriptPath -Manifest $multiManifestPath -Node all -VerifyReports -RepeatCount 2 2>&1
+    $childCode = $LASTEXITCODE
+    if ($null -eq $childCode) {
+        $childCode = 0
+    }
+    if ($childCode -ne 0) {
+        Fail "self-test expected CLI -Node all -VerifyReports to validate all selected acceptance reports`n$($childOut | Out-String)"
     }
     foreach ($staleReport in $multiReports) {
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $staleReport) | Out-Null
@@ -1358,6 +1539,9 @@ if ($RepeatCount -lt 1) {
 if ($RunSelected -and $PlanOnly) {
     Fail "-RunSelected cannot be combined with -PlanOnly"
 }
+if ($VerifyReports -and $PlanOnly) {
+    Fail "-VerifyReports cannot be combined with -PlanOnly"
+}
 if ($RunService -and $PlanOnly) {
     Fail "-RunService cannot be combined with -PlanOnly"
 }
@@ -1385,7 +1569,10 @@ if ($RunService) {
 if ($RunSelected) {
     Invoke-SelectedRuns $plan
 }
-if ($PlanOnly -or (-not $Materialize -and -not $CheckNodes -and -not $RunSelected -and -not $RunService)) {
+if ($VerifyReports) {
+    Invoke-AcceptanceReportVerifier $plan
+}
+if ($PlanOnly -or (-not $Materialize -and -not $CheckNodes -and -not $RunSelected -and -not $VerifyReports -and -not $RunService)) {
     if ($Json) {
         Write-PlanJson $plan
     } else {

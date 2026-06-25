@@ -139,6 +139,18 @@ pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Materi
 pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m2 -Materialize -RunSelected -VerifyEvidence -RepeatCount 2
 ```
 
+所有選中的 run 都完成後，用同一份 manifest 驗證 acceptance reports。若 m1 能讀到主 repo 與四顆衛星 repo：
+
+```bash
+pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node all -VerifyReports -RepeatCount 2
+```
+
+若每台只讀自己的 repo，則各台用自己的節點名驗證：
+
+```bash
+pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m2 -VerifyReports -RepeatCount 2
+```
+
 在 m1 也可以加上節點檢查：
 
 ```bash
@@ -205,6 +217,7 @@ pwsh /path/to/ensemble/scripts/phase2-run-evidence.ps1 -Repo . -Team sat-a -Watc
 - 同一個 repo/team/watch 重跑時，先記 run 前 team/watch/control cursor，再對 `phase2-run-evidence.ps1` 傳 `-TeamSince` / `-WatchSince` / `-ControlSince`，避免舊 run 終局或介入事件混入驗收。
 - 任務由 `-RepeatCount 2` 自動重跑一次，兩次都能到達同等終局。
 - `phase2-fleet.ps1 -RunSelected -VerifyEvidence -RepeatCount 2` 產出的 `.ensemble/phase2-fleet/acceptance-<project>-<node>.json` 中，`ok=true`、`repeatCount=2`，且每筆 `runs[]` 都有 terminal、exitCode、team/watch/control cursor 與 `evidenceVerified=true`。
+- `phase2-fleet.ps1 -Node all -VerifyReports -RepeatCount 2` 在可讀取全部 repo 的節點通過；或每台節點各自用 `-Node <this-node> -VerifyReports -RepeatCount 2` 通過。
 
 ---
 
@@ -268,4 +281,6 @@ ensemble mesh && ensemble nodes
 pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Materialize -RunSelected -VerifyEvidence -RepeatCount 2
 # 5) 衛星（m2~m5 各自）
 pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m2 -Materialize -RunSelected -VerifyEvidence -RepeatCount 2
+# 6) 驗 acceptance reports（m1 可讀全部 repo 時）
+pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node all -VerifyReports -RepeatCount 2
 ```

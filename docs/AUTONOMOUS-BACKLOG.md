@@ -161,6 +161,13 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-25 — **Phase 2 fleet acceptance reports can now be verified from the manifest.**
+  `scripts/phase2-fleet.ps1 -VerifyReports -RepeatCount 2` reads the same fleet manifest and
+  validates the selected projects' `acceptance-<project>-<node>.json` files. It checks `ok=true`,
+  `verifyEvidence=true`, matching project/team/watch metadata, at least the expected repeat count,
+  and verified `landed|escalated` run entries. `-Node all -VerifyReports -RepeatCount 2` gives the
+  real Slice C pass a single manifest-driven report audit when one host can read all repos; otherwise
+  each node can verify its own selected project. Verified with `phase2-fleet.ps1 -SelfTest`.
 - 2026-06-25 — **Phase 2 fleet selected runs now write acceptance reports.**
   `scripts/phase2-fleet.ps1 -RunSelected -VerifyEvidence -RepeatCount 2` now writes
   `<repo>/.ensemble/phase2-fleet/acceptance-<project>-<node>.json` next to the generated
