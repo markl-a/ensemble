@@ -161,6 +161,14 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-25 — **Phase 2 Slice A loopback now verifies remote abort.**
+  `scripts/phase2-verify.ps1` already covered remote `team status/say/inbox`, `watch`, `steer`,
+  explicit `--node auto` failures, and wrong-token mutation failures. It now also sends
+  `ensemble abort <name> --hard --node <loopback-serve>` first with a wrong token (must fail
+  `Unauthorized` and leave no abort record), then with the ephemeral token, and asserts the remote
+  control feed contains exactly one hard-abort command. Verified with
+  `pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo D:\Projects\ensemble -TargetDir
+  D:\tmp\ensemble-phase2-baseline-target -SkipSliceB -SkipSliceC -SkipSliceD`.
 - 2026-06-25 — **Phase 2 Slice C now has a manifest goal-shape preflight.**
   Added `scripts/phase2-goal-shape.ps1` to validate the real fleet manifest before operators
   touch the five machines: exactly 5 nodes, conductor included, main codex/claude/agy routes

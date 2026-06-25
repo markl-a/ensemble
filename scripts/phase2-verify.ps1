@@ -616,6 +616,34 @@ function Run-SliceA {
                 $controlText = Get-Content -LiteralPath $controlPath -Raw
                 Assert-Contains $controlText '"cmd":"steer"' "remote steer control feed"
                 Assert-Contains $controlText "remote loopback steer" "remote steer control feed"
+
+                $badAbort = Invoke-EnsembleCapture @(
+                    "abort", $remoteControl, "--hard",
+                    "--repo", ".",
+                    "--node", $nodeUrl,
+                    "--token", "wrong-token"
+                ) "remote abort wrong token" -TimeoutSec 20 -AllowedExitCodes @(1, 2, 3) -AllowFailure
+                if ($badAbort.Code -eq 0) {
+                    Fail "remote abort with a wrong token should fail explicitly"
+                }
+                $badAbortText = "$($badAbort.Stdout)`n$($badAbort.Stderr)"
+                Assert-Contains $badAbortText "Unauthorized" "remote wrong-token abort failure"
+                $controlText = Get-Content -LiteralPath $controlPath -Raw
+                if ($controlText -match [regex]::Escape('"cmd":"abort"')) {
+                    Fail "remote wrong-token abort unexpectedly appeared in control feed"
+                }
+
+                Invoke-EnsembleCapture @(
+                    "abort", $remoteControl, "--hard",
+                    "--repo", ".",
+                    "--node", $nodeUrl,
+                    "--token", $remoteToken
+                ) "remote abort with token" -TimeoutSec 20 | Out-Null
+                $abortLines = @(Get-Content -LiteralPath $controlPath | Where-Object { $_ -match [regex]::Escape('"cmd":"abort"') })
+                if ($abortLines.Count -ne 1) {
+                    Fail "remote abort control feed should contain exactly one abort record; found $($abortLines.Count)"
+                }
+                Assert-Contains $abortLines[0] '"hard":true' "remote abort control feed"
             } finally {
                 if ($serveProc) {
                     Stop-Process -Id $serveProc.Id -Force -ErrorAction SilentlyContinue
