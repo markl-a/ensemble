@@ -3,7 +3,8 @@
 #
 # This script chains existing verifiers; it does not create a new acceptance standard.
 # Default path:
-#   Phase 1 deterministic acceptance -> Phantom bridge -> Phase 2 Slice A/B-preflight/C-local.
+#   Phase 1 deterministic acceptance -> Phantom bridge -> Phase 2 Slice A/B-preflight/C-local
+#   -> cross-machine hermetic regression.
 # Clean reinstall is opt-in because it intentionally mutates the user-level install.
 
 param(
@@ -16,6 +17,7 @@ param(
     [switch]$SkipPhase1,
     [switch]$SkipPhantom,
     [switch]$SkipPhase2,
+    [switch]$SkipCrossMachineRegression,
     [switch]$RunCleanReinstall,
     [int]$AgyTimeoutSecs = 1
 )
@@ -23,7 +25,7 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
-if ($SkipPhase1 -and $SkipPhantom -and $SkipPhase2 -and -not $RunCleanReinstall) {
+if ($SkipPhase1 -and $SkipPhantom -and $SkipPhase2 -and $SkipCrossMachineRegression -and -not $RunCleanReinstall) {
     Write-Host "FAIL: all readiness stages were skipped; enable at least one check." -ForegroundColor Red
     exit 1
 }
@@ -31,6 +33,12 @@ if ($SkipPhase1 -and $SkipPhantom -and $SkipPhase2 -and -not $RunCleanReinstall)
 function Fail([string]$Message) {
     Write-Host "FAIL: $Message" -ForegroundColor Red
     exit 1
+}
+
+function Require-Tool([string]$Name) {
+    if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
+        Fail "required tool not found on PATH: $Name"
+    }
 }
 
 function Step([string]$Title, [scriptblock]$Action) {
@@ -121,6 +129,19 @@ if (-not $SkipPhase2) {
             $args += "-CheckFleetManifestNodes"
         }
         pwsh @args
+    }
+}
+
+if (-not $SkipCrossMachineRegression) {
+    Step "Cross-machine hermetic regression" {
+        Require-Tool "cargo"
+        Push-Location $repoFull
+        try {
+            cargo test --test cross_machine --target-dir $targetFull
+        }
+        finally {
+            Pop-Location
+        }
     }
 }
 

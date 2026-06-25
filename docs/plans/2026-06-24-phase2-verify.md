@@ -14,7 +14,7 @@ pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo D:\Projects\ensemble
 pwsh -NoProfile -File scripts\phase2-local-ready.ps1 -Repo D:\Projects\ensemble
 ```
 
-這個 wrapper 只串接既有 verifier，不取代下方每個 Slice 的完成條件。預設會要求 `phantom` 在 PATH 上；若此機器刻意不測 Phantom bridge，需顯式加 `-SkipPhantom`。`Slice D` clean reinstall 會動到 user-level install，需顯式加 `-RunCleanReinstall` 才會跑。
+這個 wrapper 只串接既有 verifier，不取代下方每個 Slice 的完成條件。預設會要求 `phantom` 在 PATH 上；若此機器刻意不測 Phantom bridge，需顯式加 `-SkipPhantom`。預設也會跑 `cargo test --test cross_machine`，用 in-process `serve`/`RemoteAdapter` 驗證跨機治理 invariant；快速排障時可顯式加 `-SkipCrossMachineRegression`。`Slice D` clean reinstall 會動到 user-level install，需顯式加 `-RunCleanReinstall` 才會跑。
 
 建議先確保：
 
@@ -29,7 +29,7 @@ pwsh -NoProfile -File scripts\phase2-local-ready.ps1 -Repo D:\Projects\ensemble
 - `scripts\smoke.ps1 -NoBuild -TargetDir <tmp-target> -TimeoutSecs 180 -AgyTimeoutSecs 1` 通過，實際跑出 `codex -> test gate -> claude -> LANDED -> merge`，且 `phase2-run-evidence.ps1` 驗證 team/watch terminal evidence，`supervise` 回傳 `on_track`
 - `scripts\phase2-verify.ps1 -TargetDir <tmp-target> -SkipSliceA -SkipSliceB -SkipSliceC -UpBind 127.0.0.1:0` 通過 Slice D：baseline uninstall、install、service dry-run、smoke、up、mesh、nodes、final uninstall；結束後本機 install binary 與 User PATH entry 都已清掉
 - `scripts\phantom-single-machine.ps1 -Repo D:\Projects\ensemble -TargetDir <tmp-target> -NoBuild` 通過，覆蓋 Phantom -> shell tool -> ensemble `agent --node local` -> local Codex 的單機橋接路徑；這只證明 Phantom 可在單機調用 ensemble，不等於 Phase 2 五機 fleet 已完成
-- `scripts\phase2-local-ready.ps1 -Repo D:\Projects\ensemble -TargetDir <tmp-target> -SmokeRoot <tmp-root>` 通過，串接 Phase 1 deterministic acceptance、Phantom bridge、Slice A、Slice B governance preflight、Slice C local mesh/nodes；`-SkipPhase1 -SkipPhantom` 快速路徑與全 skip 防呆也通過
+- `scripts\phase2-local-ready.ps1 -Repo D:\Projects\ensemble -TargetDir <tmp-target> -SmokeRoot <tmp-root>` 通過，串接 Phase 1 deterministic acceptance、Phantom bridge、Slice A、Slice B governance preflight、Slice C local mesh/nodes、`cross_machine` hermetic regression；`-SkipPhase1 -SkipPhantom -SkipCrossMachineRegression` 快速路徑與全 skip 防呆也通過
 
 這些證據只證明本機 baseline 與 clean reinstall path；真實 5-node Slice B/C 仍需在 m1~m5 fleet 上跑。
 
@@ -152,7 +152,7 @@ pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo D:\Projects\ensemble -Skip
 ## 目前 `main` 對應腳本
 
 - `scripts/phase2-verify.ps1`（本文件對應自動切片）
-- `scripts/phase2-local-ready.ps1`（上五機前的本機 readiness wrapper；預設不跑 clean reinstall）
+- `scripts/phase2-local-ready.ps1`（上五機前的本機 readiness wrapper；預設跑 `cross_machine`，但不跑 clean reinstall）
 - `scripts/phase2-run-evidence.ps1`（單一主/衛星 run 完成後，檢查 team/watch/control 證據與 board/watch 的 `LANDED` 或 `escalated: ...` 終局）
 - `scripts/phase2-goal-shape.ps1`（檢查 5-node + 4 satellites manifest 形狀）
 - `scripts/phase2-fleet.ps1 -PlanOnly -Json`（輸出機器可讀的 full-fleet project/command plan，供 Slice C verifier 檢查）；`-RunSelected -VerifyEvidence -RepeatCount 2` 另會寫出 per-project acceptance report；`-VerifyReports -RepeatCount 2` 匯總驗證這些 reports

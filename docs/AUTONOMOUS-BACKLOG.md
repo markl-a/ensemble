@@ -161,6 +161,13 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-25 — **Phase 2 local readiness now includes the cross-machine governance regression.**
+  `scripts/phase2-local-ready.ps1` now runs `cargo test --test cross_machine --target-dir <target>`
+  by default after Phase 1 acceptance, Phantom bridge, and Phase 2 Slice A/B-preflight/C-local.
+  This makes the in-process remote `serve`/`RemoteAdapter` path, test-gate fail-stop behavior,
+  two-distinct-reviewer quorum, and duplicate-vendor negative case part of the standard
+  one-machine gate before the operator moves to the real m1~m5 fleet. Pass
+  `-SkipCrossMachineRegression` only for fast troubleshooting.
 - 2026-06-25 — **Phase 2 fleet acceptance reports can now be verified from the manifest.**
   `scripts/phase2-fleet.ps1 -VerifyReports -RepeatCount 2` reads the same fleet manifest and
   validates the selected projects' `acceptance-<project>-<node>.json` files. It checks `ok=true`,
