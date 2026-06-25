@@ -161,6 +161,18 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-25 — **Pre-manual Phase 1 and Phantom bridge are green on this Windows host.**
+  Re-ran `scripts/phase2-local-ready.ps1 -Repo D:\Projects\ensemble -TargetDir
+  D:\tmp\ensemble-phase2-local-ready-target -SmokeRoot
+  D:\tmp\ensemble-phase2-local-ready-rerun -AgyTimeoutSecs 1`; it passed Phase 1
+  deterministic acceptance, Phantom bridge, Phase 2 Slice A, Slice B governance
+  preflight, Slice C local mesh/nodes, and `cargo test --test cross_machine`.
+  Also verified `scripts/phantom-single-machine.ps1 -Repo <phantom-repo>
+  -TargetDir D:\tmp\ensemble-phase2-local-ready-target -NoBuild -Agent codex
+  -Prompt PONG`, proving Phantom can call ensemble against the target Phantom repo
+  with `--node local` (local private path intentionally omitted). Installed the verified binary to
+  `%LOCALAPPDATA%\ensemble\bin`; the current PowerShell process does not refresh
+  User PATH, so operator manual testing should start from a new terminal.
 - 2026-06-25 — **Phase 2 fleet acceptance reports now bind generated crew and project spec hashes.**
   `scripts/phase2-fleet.ps1 -RunSelected -VerifyEvidence` now refreshes selected generated
   crew files from the current manifest before running, and acceptance reports include the

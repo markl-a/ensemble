@@ -291,6 +291,12 @@ moving to Phase 2. It verifies the path Phantom -> shell tool -> ensemble agent
 pwsh scripts\phantom-single-machine.ps1 -Repo D:\Projects\ensemble -TargetDir D:\tmp\ensemble-acceptance-phase1-target -NoBuild
 ```
 
+For the real Phantom project path, use the same verifier with that repo:
+
+```powershell
+pwsh scripts\phantom-single-machine.ps1 -Repo <phantom-repo> -TargetDir D:\tmp\ensemble-phase2-local-ready-target -NoBuild -Agent codex -Prompt PONG
+```
+
 The verifier requires both the direct ensemble call and the Phantom shell call to
 return JSON with `ok:true` and `node:"local"`. It uses a temporary `.cmd` shim
 because the current `phantom tool shell` command is sensitive to nested quotes.
@@ -309,6 +315,10 @@ pwsh scripts\phase2-local-ready.ps1 -Repo D:\Projects\ensemble
 It chains the deterministic Phase 1 acceptance, Phantom bridge, and the local
 Phase 2 slices that do not require m1~m5 to be online. Add `-RunCleanReinstall`
 only when you intentionally want to exercise the install/uninstall path.
+
+If `scripts\install.ps1` just added `%LOCALAPPDATA%\ensemble\bin` to the User
+PATH, open a new terminal before typing `ensemble ...`; the current PowerShell
+process does not reload User PATH automatically.
 
 Use a scratch repo for the first personal test:
 

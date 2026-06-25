@@ -29,7 +29,9 @@ pwsh -NoProfile -File scripts\phase2-local-ready.ps1 -Repo D:\Projects\ensemble
 - `scripts\smoke.ps1 -NoBuild -TargetDir <tmp-target> -TimeoutSecs 180 -AgyTimeoutSecs 1` 通過，實際跑出 `codex -> test gate -> claude -> LANDED -> merge`，且 `phase2-run-evidence.ps1` 驗證 team/watch terminal evidence，`supervise` 回傳 `on_track`
 - `scripts\phase2-verify.ps1 -TargetDir <tmp-target> -SkipSliceA -SkipSliceB -SkipSliceC -UpBind 127.0.0.1:0` 通過 Slice D：baseline uninstall、install、service dry-run、smoke、up、mesh、nodes、final uninstall；結束後本機 install binary 與 User PATH entry 都已清掉
 - `scripts\phantom-single-machine.ps1 -Repo D:\Projects\ensemble -TargetDir <tmp-target> -NoBuild` 通過，覆蓋 Phantom -> shell tool -> ensemble `agent --node local` -> local Codex 的單機橋接路徑；這只證明 Phantom 可在單機調用 ensemble，不等於 Phase 2 五機 fleet 已完成
+- `scripts\phantom-single-machine.ps1 -Repo <phantom-repo> -TargetDir D:\tmp\ensemble-phase2-local-ready-target -NoBuild -Agent codex -Prompt PONG` 通過，覆蓋 Phantom 在目標 Phantom repo 內透過 shell tool 調用 ensemble 並強制 `--node local`（本機 private path 不寫入文件）
 - `scripts\phase2-local-ready.ps1 -Repo D:\Projects\ensemble -TargetDir <tmp-target> -SmokeRoot <tmp-root>` 通過，串接 Phase 1 deterministic acceptance、Phantom bridge、Slice A、Slice B governance preflight、Slice C local mesh/nodes、`cross_machine` hermetic regression；`-SkipPhase1 -SkipPhantom -SkipCrossMachineRegression` 快速路徑與全 skip 防呆也通過
+- 2026-06-25 再次執行 `scripts\phase2-local-ready.ps1 -Repo D:\Projects\ensemble -TargetDir D:\tmp\ensemble-phase2-local-ready-target -SmokeRoot D:\tmp\ensemble-phase2-local-ready-rerun -AgyTimeoutSecs 1` 通過；同日用 `scripts\install.ps1 -SourceExe D:\tmp\ensemble-phase2-local-ready-target\release\ensemble.exe` 將通過驗證的 binary 裝回 `%LOCALAPPDATA%\ensemble\bin`。Windows 既有 PowerShell process 不會自動刷新 User PATH，手動測試請新開 terminal 後再直接使用 `ensemble`。
 
 這些證據只證明本機 baseline 與 clean reinstall path；真實 5-node Slice B/C 仍需在 m1~m5 fleet 上跑。
 
