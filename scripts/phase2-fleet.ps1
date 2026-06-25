@@ -6,6 +6,7 @@
 #   pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Service install -RunService
 #   pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Service uninstall -RunService
 #   pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node all -Service install -RunService -RemoteService  # via tailscale ssh
+#   pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node all -Service install -RunService -RemoteService -RemoteServiceTransport ssh  # via OpenSSH
 # Repeatable Slice C acceptance example:
 #   pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Materialize -RunSelected -VerifyEvidence -RepeatCount 2
 
@@ -30,6 +31,8 @@ param(
     [string]$Service = "none",
     [switch]$RunService,
     [switch]$RemoteService,
+    [ValidateSet("tailscale", "ssh")]
+    [string]$RemoteServiceTransport = "tailscale",
     [switch]$SelfTest
 )
 
@@ -917,11 +920,14 @@ function Invoke-SelectedRuns($Plan) {
 
 function Invoke-SelectedServices($Plan) {
     if ($RemoteService) {
-        if (-not (Get-Command tailscale -ErrorAction SilentlyContinue)) {
-            Fail "tailscale is not on PATH; remote service bootstrap requires Tailscale SSH"
+        if ($RemoteServiceTransport -eq "tailscale" -and -not (Get-Command tailscale -ErrorAction SilentlyContinue)) {
+            Fail "tailscale is not on PATH; remote service bootstrap with -RemoteServiceTransport tailscale requires Tailscale SSH"
+        }
+        if ($RemoteServiceTransport -eq "ssh" -and -not (Get-Command ssh -ErrorAction SilentlyContinue)) {
+            Fail "ssh is not on PATH; remote service bootstrap with -RemoteServiceTransport ssh requires OpenSSH"
         }
     }
-    elseif (-not (Get-Command ensemble -ErrorAction SilentlyContinue)) {
+    if (-not (Get-Command ensemble -ErrorAction SilentlyContinue)) {
         Fail "ensemble is not on PATH; install first"
     }
     $services = @($Plan.Commands | Where-Object { $_.Kind -eq "service" })
@@ -930,9 +936,16 @@ function Invoke-SelectedServices($Plan) {
     }
     foreach ($cmd in $services) {
         Write-Host ""
-        if ($RemoteService) {
-            Write-Host ("running remote [{0}] tailscale ssh {0} ensemble {1}" -f $cmd.Node, ($cmd.Args -join " "))
-            & tailscale ssh $cmd.Node ensemble @($cmd.Args)
+        $isLocalConductor = $RemoteService -and $cmd.Node.Equals([string]$Plan.Conductor, [System.StringComparison]::OrdinalIgnoreCase)
+        if ($RemoteService -and -not $isLocalConductor) {
+            if ($RemoteServiceTransport -eq "ssh") {
+                Write-Host ("running remote [{0}] ssh -o BatchMode=yes -o ConnectTimeout=10 {0} ensemble {1}" -f $cmd.Node, ($cmd.Args -join " "))
+                & ssh -o BatchMode=yes -o ConnectTimeout=10 $cmd.Node ensemble @($cmd.Args)
+            }
+            else {
+                Write-Host ("running remote [{0}] tailscale ssh {0} ensemble {1}" -f $cmd.Node, ($cmd.Args -join " "))
+                & tailscale ssh $cmd.Node ensemble @($cmd.Args)
+            }
         }
         else {
             Write-Host ("running [{0}] {1}" -f $cmd.Node, $cmd.Text)
@@ -1727,6 +1740,26 @@ function Invoke-SelfTest {
         )
         & chmod +x $fakeTailscale
     }
+    $fakeSshName = "ssh"
+    if ($IsWindows) {
+        $fakeSshName = "ssh.cmd"
+    }
+    $fakeSsh = Join-Path $fakeBin $fakeSshName
+    if ($IsWindows) {
+        Set-Content -LiteralPath $fakeSsh -Encoding ascii -Value @(
+            "@echo off",
+            'echo %*>>"%ENSEMBLE_FAKE_LOG%"',
+            "exit /b 0"
+        )
+    }
+    else {
+        Set-Content -LiteralPath $fakeSsh -Encoding ascii -Value @(
+            "#!/bin/sh",
+            'printf ''%s\n'' "$*" >> "$ENSEMBLE_FAKE_LOG"',
+            "exit 0"
+        )
+        & chmod +x $fakeSsh
+    }
     $oldNodeForRemoteService = $script:Node
     $oldRemoteService = $script:RemoteService
     $script:Node = "all"
@@ -1754,10 +1787,44 @@ function Invoke-SelfTest {
     $remoteServiceFakeOut = Get-Content -Raw -LiteralPath $fakeLog
     $remoteServiceFakeLines = @($remoteServiceFakeOut -split "`r?`n" | Where-Object { $_.Trim().Length -gt 0 })
     if ($remoteServiceFakeLines.Count -ne 2) {
-        Fail "self-test expected remote -RunService -Node all to execute one tailscale ssh command per manifest node"
+        Fail "self-test expected remote -RunService -Node all to execute the local conductor plus one remote command per peer"
     }
-    if ($remoteServiceFakeLines[0] -ne "ssh m1 ensemble serve --install-service --print" -or $remoteServiceFakeLines[1] -ne "ssh m2 ensemble serve --install-service --print") {
-        Fail "self-test expected remote service bootstrap to use tailscale ssh per node"
+    if ($remoteServiceFakeLines[0] -ne "serve --install-service --print" -or $remoteServiceFakeLines[1] -ne "ssh m2 ensemble serve --install-service --print") {
+        Fail "self-test expected remote service bootstrap to run conductor locally and peer through tailscale ssh"
+    }
+    $oldNodeForRemoteService = $script:Node
+    $oldRemoteService = $script:RemoteService
+    $oldRemoteServiceTransport = $script:RemoteServiceTransport
+    $script:Node = "all"
+    $script:RemoteService = $true
+    $script:RemoteServiceTransport = "ssh"
+    Set-Content -LiteralPath $fakeLog -Encoding utf8NoBOM -Value ""
+    $oldPath = $env:PATH
+    $oldFakeLog = $env:ENSEMBLE_FAKE_LOG
+    $env:PATH = "$fakeBin$([System.IO.Path]::PathSeparator)$oldPath"
+    $env:ENSEMBLE_FAKE_LOG = $fakeLog
+    try {
+        Invoke-SelectedServices $remoteServicePlan
+    }
+    finally {
+        $env:PATH = $oldPath
+        if ($null -eq $oldFakeLog) {
+            Remove-Item Env:\ENSEMBLE_FAKE_LOG -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:ENSEMBLE_FAKE_LOG = $oldFakeLog
+        }
+        $script:Node = $oldNodeForRemoteService
+        $script:RemoteService = $oldRemoteService
+        $script:RemoteServiceTransport = $oldRemoteServiceTransport
+    }
+    $remoteSshServiceFakeOut = Get-Content -Raw -LiteralPath $fakeLog
+    $remoteSshServiceFakeLines = @($remoteSshServiceFakeOut -split "`r?`n" | Where-Object { $_.Trim().Length -gt 0 })
+    if ($remoteSshServiceFakeLines.Count -ne 2) {
+        Fail "self-test expected ssh remote service transport to execute the local conductor plus one remote command per peer"
+    }
+    if ($remoteSshServiceFakeLines[0] -ne "serve --install-service --print" -or $remoteSshServiceFakeLines[1] -ne "-o BatchMode=yes -o ConnectTimeout=10 m2 ensemble serve --install-service --print") {
+        Fail "self-test expected ssh remote service transport to use non-interactive OpenSSH options"
     }
     $script:Service = "none"
 

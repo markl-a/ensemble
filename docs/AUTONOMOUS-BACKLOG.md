@@ -161,6 +161,17 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-26 — **Remote service bootstrap reached the first real peer; fleet still partial.**
+  Fixed `phase2-fleet.ps1 -RemoteService -Node all` so the manifest conductor is
+  bootstrapped locally while only peer nodes go through remote transport. Added
+  `-RemoteServiceTransport ssh` for environments where the `tailscale ssh` wrapper
+  is blocked by local OpenSSH host-key policy; OpenSSH transport uses
+  `BatchMode=yes` and `ConnectTimeout=10` so missing keys/auth fail clearly instead
+  of hanging. Real dry-run evidence: conductor service plan renders locally, one
+  remote peer is already visible in `ensemble mesh`/`nodes`, and the full Slice C
+  node check now fails clearly because the remaining peers are not yet reachable as
+  ensemble serve hosts. Verified with `phase2-fleet.ps1 -SelfTest` and a real
+  `phase2-verify.ps1 ... -CheckFleetManifestNodes` partial-fleet failure.
 - 2026-06-26 — **Phase 2 fleet service bootstrap can now run through Tailscale SSH.**
   `scripts/phase2-fleet.ps1` gained `-RemoteService` for service bootstrap actions:
   from the conductor, `-Node all -Service install-print|install|uninstall-print|uninstall

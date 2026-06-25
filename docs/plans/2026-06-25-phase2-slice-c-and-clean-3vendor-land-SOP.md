@@ -71,6 +71,12 @@ pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <this-node
 pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node all -Service install-print -RunService -RemoteService
 ```
 
+若 `tailscale ssh` wrapper 被本機 OpenSSH host-key policy 擋住，但一般 `ssh <host>` 可連 Tailnet host，改用 OpenSSH transport：
+
+```bash
+pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node all -Service install-print -RunService -RemoteService -RemoteServiceTransport ssh
+```
+
 確認內容正確後，拿掉 `--print` 進行實際安裝或移除：
 
 ```bash
@@ -84,6 +90,8 @@ pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <this-node
 pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node all -Service install -RunService -RemoteService
 pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node all -Service uninstall -RunService -RemoteService
 ```
+
+OpenSSH transport 同樣可用於實際 install/uninstall；它會用 non-interactive SSH options（`BatchMode=yes`、`ConnectTimeout=10`），所以缺 key 或缺權限會快速失敗，不會卡在 password prompt。
 
 實際 install 會建立/更新並立即啟動或重啟 `serve`；uninstall 會先停止再移除 service 設定。
 `-RemoteService` 只支援會返回的 service 動作（`install-print`、`install`、`uninstall-print`、`uninstall`），不支援前景長跑的 `up`。
