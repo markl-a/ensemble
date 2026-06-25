@@ -161,6 +161,16 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-25 — **Phase 2 smoke now verifies real run team/watch evidence.**
+  `scripts/smoke.ps1` now runs the governed smoke with `--team <team>`, captures pre-run
+  team/watch/control cursors, and invokes `scripts/phase2-run-evidence.ps1` after the run. This closes
+  a real gap found by replaying the Slice D smoke repo: the old smoke had a watch terminal decision but
+  no team-board run transcript because `ensemble run` was missing `--team`. Verified with
+  `scripts\smoke.ps1 -NoBuild -TargetDir D:\tmp\ensemble-phase2-local-ready-target -SmokeRoot
+  D:\tmp\ensemble-smoke-team-evidence -TimeoutSecs 180 -AgyTimeoutSecs 1`, then the full clean reinstall
+  path `scripts\phase2-local-ready.ps1 -SkipPhase1 -SkipPhantom -SkipPhase2 -RunCleanReinstall` using
+  `D:\tmp\ensemble-phase2-local-ready-clean2`, including uninstall -> install -> service dry-run ->
+  smoke -> up/mesh/nodes -> final uninstall.
 - 2026-06-25 — **Phase 2 per-run evidence verifier added.**
   `scripts/phase2-run-evidence.ps1` verifies the evidence left by one completed main or satellite run:
   callers must pass independent `-TeamSince` and `-WatchSince` cursors; `team inbox` must contain a

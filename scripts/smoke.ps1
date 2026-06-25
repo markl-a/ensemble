@@ -3,7 +3,7 @@
 # build ensemble.exe, create a throwaway git repo, and drive one governed multi-AI run locally.
 #
 # Default path:
-#   codex implements -> claude reviews -> test gate -> auto-merge -> watch transcript check
+#   codex implements -> claude reviews -> test gate -> auto-merge -> watch/team evidence check
 #
 # Team preflight:
 #   team board say/inbox/status -> launcher dry-run for codex/claude/opencode
@@ -125,6 +125,58 @@ function Invoke-EnsembleCapture(
     }
 }
 
+function Invoke-ProcessCapture(
+    [string]$Title,
+    [string]$FilePath,
+    [string[]]$CommandArgs,
+    [string]$ArtifactName,
+    [switch]$AllowFailure,
+    [int]$TimeoutSec = 0
+) {
+    Write-Host "== $Title ==" -ForegroundColor Cyan
+    $stdoutPath = Join-Path $ArtifactDir $ArtifactName
+    $stderrPath = "$stdoutPath.stderr"
+    if ($TimeoutSec -gt 0) {
+        $proc = Start-Process -FilePath $FilePath -ArgumentList $CommandArgs -NoNewWindow -PassThru `
+            -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -WorkingDirectory $SmokeRoot
+        if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
+            try {
+                if ($IsWindows) {
+                    taskkill /PID $proc.Id /T /F | Out-Null
+                } else {
+                    $proc.Kill()
+                }
+            } catch { }
+            $proc.WaitForExit(3000) | Out-Null
+            $code = 124
+            Add-Content -LiteralPath $stderrPath -Encoding utf8 -Value "$Title timed out after ${TimeoutSec}s"
+        } else {
+            $code = $proc.ExitCode
+        }
+    } else {
+        & $FilePath @CommandArgs > $stdoutPath 2> $stderrPath
+        $code = $LASTEXITCODE
+    }
+    $stdout = Read-TextFile $stdoutPath
+    $stderr = Read-TextFile $stderrPath
+    if (-not [string]::IsNullOrWhiteSpace($stdout)) {
+        Write-Host $stdout.TrimEnd()
+    }
+    if (-not [string]::IsNullOrWhiteSpace($stderr)) {
+        Write-Host $stderr.TrimEnd() -ForegroundColor DarkYellow
+    }
+    if (($code -ne 0) -and (-not $AllowFailure)) {
+        Fail "$Title failed with exit $code. See $stdoutPath and $stderrPath"
+    }
+    return [pscustomobject]@{
+        Code = $code
+        Stdout = $stdout
+        Stderr = $stderr
+        StdoutPath = $stdoutPath
+        StderrPath = $stderrPath
+    }
+}
+
 function Convert-JsonOrFail([string]$Title, [string]$JsonText) {
     try {
         return $JsonText | ConvertFrom-Json
@@ -137,6 +189,13 @@ function Assert-Contains([string]$Title, [string]$Text, [string]$Needle) {
     if (-not $Text.Contains($Needle)) {
         Fail "$Title did not contain expected text: $Needle"
     }
+}
+
+function Count-NonEmptyFileLines([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return 0
+    }
+    return @((Get-Content -LiteralPath $Path) | Where-Object { ([string]$_).Trim().Length -gt 0 }).Count
 }
 
 function Contains-RunOutcome([string]$Text, [string]$Kind) {
@@ -443,7 +502,21 @@ $(Toml-AgentTimeouts -Agents $uniqueAgents -Timeout $TimeoutSecs)
         exit 0
     }
 
-    $runArgs = @("run", $Task, "--repo", ".", "--crew", "crew.toml", "--watch", $Watch, "--no-discover")
+    $preRunInbox = Invoke-EnsembleCapture `
+        "team inbox cursor before governed run" `
+        @("team", "inbox", "--repo", ".", "--team", $Team, "--json") `
+        "team-inbox.before-run.json"
+    $preRunInboxJson = Convert-JsonOrFail "team inbox cursor before governed run" $preRunInbox.Stdout
+    $teamCursor = [int]$preRunInboxJson.next
+    $watchCursor = Count-NonEmptyFileLines (Join-Path $SmokeRoot ".ensemble/stream/$Watch.ndjson")
+    $controlCursor = Count-NonEmptyFileLines (Join-Path $SmokeRoot ".ensemble/control/$Watch.ndjson")
+    Write-Utf8File (Join-Path $ArtifactDir "run-evidence-cursors.json") (([pscustomobject]@{
+        teamCursor = $teamCursor
+        watchCursor = $watchCursor
+        controlCursor = $controlCursor
+    } | ConvertTo-Json -Compress))
+
+    $runArgs = @("run", $Task, "--repo", ".", "--crew", "crew.toml", "--team", $Team, "--watch", $Watch, "--no-discover")
     if (-not $NoMerge) {
         $runArgs += "--merge"
     }
@@ -453,13 +526,40 @@ $(Toml-AgentTimeouts -Agents $uniqueAgents -Timeout $TimeoutSecs)
     $runLanded = Contains-RunOutcome $governedRunText "LANDED"
     $runEscalated = Contains-RunOutcome $governedRunText "ESCALATED"
 
-    if (-not $runLanded -and -not $runEscalated) {
-        if ($governedRun.Code -ne 0) {
-            Fail "governed multi-AI run did not produce a terminal LANDED or ESCALATED state"
-        }
+    if ($runLanded -and $runEscalated) {
+        Fail "governed multi-AI run produced ambiguous LANDED and ESCALATED terminal states"
     }
+    if (-not $runLanded -and -not $runEscalated) {
+        Fail "governed multi-AI run did not produce a terminal LANDED or ESCALATED state"
+    }
+    $expectedTerminal = if ($runLanded) { "landed" } else { "escalated" }
 
     Invoke-EnsembleCapture "watch transcript render" @("watch", $Watch, "--repo", ".") "watch-transcript.txt" -AllowFailure | Out-Null
+
+    $evidenceScript = Join-Path $PSScriptRoot "phase2-run-evidence.ps1"
+    if (-not (Test-Path -LiteralPath $evidenceScript -PathType Leaf)) {
+        Fail "phase2 run evidence verifier not found: $evidenceScript"
+    }
+    $evidence = Invoke-ProcessCapture `
+        "phase2 run evidence verifier" `
+        "pwsh" `
+        @(
+            "-NoProfile", "-File", $evidenceScript,
+            "-Repo", ".",
+            "-Team", $Team,
+            "-Watch", $Watch,
+            "-TeamSince", "$teamCursor",
+            "-WatchSince", "$watchCursor",
+            "-ControlSince", "$controlCursor",
+            "-ExpectTerminal", $expectedTerminal,
+            "-TargetDir", $TargetDir,
+            "-NoBuild"
+        ) `
+        "phase2-run-evidence.txt" `
+        -AllowFailure
+    if ($evidence.Code -ne 0) {
+        Fail "phase2 run evidence verifier failed with exit $($evidence.Code). See $($evidence.StdoutPath) and $($evidence.StderrPath)"
+    }
 
     if (($governedRun.Code -eq 0) -and (-not $SkipSupervisor)) {
         Invoke-EnsembleCapture `

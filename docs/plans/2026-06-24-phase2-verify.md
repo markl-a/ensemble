@@ -26,7 +26,7 @@ pwsh -NoProfile -File scripts\phase2-local-ready.ps1 -Repo D:\Projects\ensemble
 
 - `cargo build --release --bin ensemble --target-dir <tmp-target>` 通過
 - `scripts\acceptance-single-machine.ps1 -NoBuild -TargetDir <tmp-target> -AgyTimeoutSecs 1` 通過，覆蓋 team status/say/inbox、watch/steer/abort、MCP team/control tools、controlled codex/agy launcher、bounded agy 可見 result/flake
-- `scripts\smoke.ps1 -NoBuild -TargetDir <tmp-target> -TimeoutSecs 240 -AgyTimeoutSecs 5` 通過，實際跑出 `codex -> test gate -> claude -> LANDED -> merge`，且 `supervise` 回傳 `on_track`
+- `scripts\smoke.ps1 -NoBuild -TargetDir <tmp-target> -TimeoutSecs 180 -AgyTimeoutSecs 1` 通過，實際跑出 `codex -> test gate -> claude -> LANDED -> merge`，且 `phase2-run-evidence.ps1` 驗證 team/watch terminal evidence，`supervise` 回傳 `on_track`
 - `scripts\phase2-verify.ps1 -TargetDir <tmp-target> -SkipSliceA -SkipSliceB -SkipSliceC -UpBind 127.0.0.1:0` 通過 Slice D：baseline uninstall、install、service dry-run、smoke、up、mesh、nodes、final uninstall；結束後本機 install binary 與 User PATH entry 都已清掉
 - `scripts\phantom-single-machine.ps1 -Repo D:\Projects\ensemble -TargetDir <tmp-target> -NoBuild` 通過，覆蓋 Phantom -> shell tool -> ensemble `agent --node local` -> local Codex 的單機橋接路徑；這只證明 Phantom 可在單機調用 ensemble，不等於 Phase 2 五機 fleet 已完成
 - `scripts\phase2-local-ready.ps1 -Repo D:\Projects\ensemble -TargetDir <tmp-target> -SmokeRoot <tmp-root>` 通過，串接 Phase 1 deterministic acceptance、Phantom bridge、Slice A、Slice B governance preflight、Slice C local mesh/nodes；`-SkipPhase1 -SkipPhantom` 快速路徑與全 skip 防呆也通過
