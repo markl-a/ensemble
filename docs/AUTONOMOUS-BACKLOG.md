@@ -161,6 +161,20 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-26 — **Phase 2 local fleet manifest prepared for the real five-node pass.**
+  Created an ignored `phase2-fleet.local.json` on this host that maps the local
+  conductor plus four Tailnet-visible peers to one main project and four satellite
+  projects. The manifest is intentionally untracked because it contains private
+  machine and repo paths. Verified it with `phase2-goal-shape.ps1 -Manifest
+  phase2-fleet.local.json`, `phase2-fleet.ps1 -Manifest phase2-fleet.local.json
+  -Node all -PlanOnly -Json`, and `phase2-verify.ps1 -SkipSliceA -SkipSliceB
+  -SkipSliceD -FleetManifest phase2-fleet.local.json -FleetNode <local-node>`.
+  Also dry-ran `phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node
+  <local-node> -Service install-print -RunService`, which rendered the Windows
+  scheduled-task service install plan for `ensemble serve`. Current external
+  blocker for the real Slice C/D pass: `ensemble mesh`/`nodes` still discover no
+  ensemble peers, so the other fleet machines need `ensemble up` or the service
+  installed before running `-CheckFleetManifestNodes` and `-RunSelected`.
 - 2026-06-25 — **Pre-manual Phase 1 and Phantom bridge are green on this Windows host.**
   Re-ran `scripts/phase2-local-ready.ps1 -Repo D:\Projects\ensemble -TargetDir
   D:\tmp\ensemble-phase2-local-ready-target -SmokeRoot
