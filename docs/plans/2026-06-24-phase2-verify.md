@@ -59,7 +59,7 @@ pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo D:\Projects\ensemble -Team
 
 手動（每台主機）：
 
-1. 所有機器：`ensemble up`
+1. 所有機器：可先用 `ensemble up` 前景啟動；若要常駐，改用同一份 manifest 執行 `pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <this-node> -Service install-print -RunService` 預覽，確認後執行 `-Service install -RunService`
 2. m1 執行 `ensemble mesh` / `ensemble nodes`
 3. 每台依角色先預覽與產生 crew：`pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <m1..m5> -Materialize -PlanOnly`
 4. 確認 plan 正確後，該節點直接跑被選中的任務：`pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <m1..m5> -Materialize -RunSelected`（`-RunSelected` 必須指定非 `all` 的 `-Node`）

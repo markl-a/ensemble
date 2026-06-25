@@ -1,5 +1,10 @@
 #!/usr/bin/env pwsh
 # Materialize Phase-2 five-node fleet crew files from one local manifest.
+#
+# Per-host service bootstrap examples:
+#   pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Service install-print -RunService
+#   pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Service install -RunService
+#   pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Service uninstall -RunService
 
 param(
     [string]$Manifest = "phase2-fleet.local.json",
@@ -11,6 +16,8 @@ param(
     [switch]$CheckNodes,
     [switch]$RunSelected,
     [switch]$PlanOnly,
+    [string]$Service = "none",
+    [switch]$RunService,
     [switch]$SelfTest
 )
 
@@ -78,6 +85,31 @@ function New-CommandSpec([string]$NodeName, [string]$Kind, [string[]]$ArgList) {
         Kind = $Kind
         Args = @($ArgList)
         Text = Format-Command $ArgList
+    }
+}
+
+function Normalize-ServiceAction([string]$Action) {
+    if ([string]::IsNullOrWhiteSpace($Action)) {
+        return "none"
+    }
+    $normalized = $Action.Trim().ToLowerInvariant()
+    $allowed = @("none", "up", "install-print", "install", "uninstall-print", "uninstall")
+    if ($allowed -notcontains $normalized) {
+        Fail "unsupported -Service '$Action' (expected one of: $($allowed -join ', '))"
+    }
+    return $normalized
+}
+
+function New-ServiceArgs([string]$Action) {
+    $normalized = Normalize-ServiceAction $Action
+    switch ($normalized) {
+        "none" { return @("up") }
+        "up" { return @("up") }
+        "install-print" { return @("serve", "--install-service", "--print") }
+        "install" { return @("serve", "--install-service") }
+        "uninstall-print" { return @("serve", "--uninstall-service", "--print") }
+        "uninstall" { return @("serve", "--uninstall-service") }
+        default { Fail "unsupported -Service '$Action'" }
     }
 }
 
@@ -282,9 +314,10 @@ function New-FleetPlan($Fleet, [string]$ManifestDir) {
     $projects = @()
     $commands = @()
 
+    $serviceArgs = New-ServiceArgs $Service
     foreach ($fleetNode in $nodes) {
         if (Select-Node ([string]$fleetNode)) {
-            $commands += New-CommandSpec -NodeName ([string]$fleetNode) -Kind "service" -ArgList @("up")
+            $commands += New-CommandSpec -NodeName ([string]$fleetNode) -Kind "service" -ArgList $serviceArgs
         }
     }
 
@@ -427,6 +460,28 @@ function Invoke-SelectedRuns($Plan) {
         }
         if ($code -ne 0) {
             Fail "selected run failed on node '$($cmd.Node)' with exit code $code"
+        }
+    }
+}
+
+function Invoke-SelectedServices($Plan) {
+    if (-not (Get-Command ensemble -ErrorAction SilentlyContinue)) {
+        Fail "ensemble is not on PATH; install first"
+    }
+    $services = @($Plan.Commands | Where-Object { $_.Kind -eq "service" })
+    if ($services.Count -eq 0) {
+        Fail "no selected service commands for node '$Node'"
+    }
+    foreach ($cmd in $services) {
+        Write-Host ""
+        Write-Host ("running [{0}] {1}" -f $cmd.Node, $cmd.Text)
+        & ensemble @($cmd.Args)
+        $code = $LASTEXITCODE
+        if ($null -eq $code) {
+            $code = 0
+        }
+        if ($code -ne 0) {
+            Fail "selected service command failed on node '$($cmd.Node)' with exit code $code"
         }
     }
 }
@@ -606,6 +661,42 @@ function Invoke-SelfTest {
     if ($fakeLines[0] -match '^(watch|up)(\s|$)') {
         Fail "self-test expected -RunSelected to execute run commands only"
     }
+    $script:Service = "install-print"
+    $servicePlan = New-FleetPlan $fleet $root
+    $serviceCommands = @($servicePlan.Commands | Where-Object { $_.Kind -eq "service" })
+    if ($serviceCommands.Count -ne 1) {
+        Fail "self-test expected one selected service command"
+    }
+    if (($serviceCommands[0].Args -join " ") -ne "serve --install-service --print") {
+        Fail "self-test expected service install-print to produce serve --install-service --print"
+    }
+    Set-Content -LiteralPath $fakeLog -Encoding utf8NoBOM -Value ""
+    $oldPath = $env:PATH
+    $oldFakeLog = $env:ENSEMBLE_FAKE_LOG
+    $env:PATH = "$fakeBin$([System.IO.Path]::PathSeparator)$oldPath"
+    $env:ENSEMBLE_FAKE_LOG = $fakeLog
+    try {
+        Invoke-SelectedServices $servicePlan
+    }
+    finally {
+        $env:PATH = $oldPath
+        if ($null -eq $oldFakeLog) {
+            Remove-Item Env:\ENSEMBLE_FAKE_LOG -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:ENSEMBLE_FAKE_LOG = $oldFakeLog
+        }
+    }
+    $serviceFakeOut = Get-Content -Raw -LiteralPath $fakeLog
+    $serviceFakeLines = @($serviceFakeOut -split "`r?`n" | Where-Object { $_.Trim().Length -gt 0 })
+    if ($serviceFakeLines.Count -ne 1) {
+        Fail "self-test expected -RunService to execute exactly one selected service command"
+    }
+    if ($serviceFakeLines[0] -ne "serve --install-service --print") {
+        Fail "self-test expected -RunService to execute service install-print"
+    }
+    $script:Service = "none"
+
     Write-Host "phase2-fleet self-test passed"
 }
 
@@ -623,12 +714,22 @@ if ($InitSample) {
 $manifestDir = Split-Path -Parent $manifestPath
 $fleet = Read-FleetManifest $manifestPath
 $plan = New-FleetPlan $fleet $manifestDir
+$serviceAction = Normalize-ServiceAction $Service
 
 if ($RunSelected -and $PlanOnly) {
     Fail "-RunSelected cannot be combined with -PlanOnly"
 }
+if ($RunService -and $PlanOnly) {
+    Fail "-RunService cannot be combined with -PlanOnly"
+}
+if ($RunService -and $serviceAction -eq "none") {
+    Fail "-RunService requires an explicit -Service action (install-print, install, uninstall-print, uninstall, or up)"
+}
 if ($RunSelected -and $Node.Equals("all", [System.StringComparison]::OrdinalIgnoreCase)) {
     Fail "-RunSelected requires an explicit -Node <name>; refusing to run every manifest task"
+}
+if ($RunService -and $Node.Equals("all", [System.StringComparison]::OrdinalIgnoreCase)) {
+    Fail "-RunService requires an explicit -Node <name>; refusing to run every manifest service command on this host"
 }
 if ($Materialize) {
     Materialize-Plan $plan
@@ -639,9 +740,12 @@ elseif ($RunSelected) {
 if ($CheckNodes) {
     Check-FleetNodes $plan
 }
+if ($RunService) {
+    Invoke-SelectedServices $plan
+}
 if ($RunSelected) {
     Invoke-SelectedRuns $plan
 }
-if ($PlanOnly -or (-not $Materialize -and -not $CheckNodes -and -not $RunSelected)) {
+if ($PlanOnly -or (-not $Materialize -and -not $CheckNodes -and -not $RunSelected -and -not $RunService)) {
     Write-Plan $plan
 }

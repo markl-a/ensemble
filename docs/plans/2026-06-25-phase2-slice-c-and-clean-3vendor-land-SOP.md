@@ -61,15 +61,15 @@ ensemble up          # 前景常駐；可放背景終端 / Start-Job / tmux
 若要把節點變成登入/開機後可重建的常駐服務，先預覽 OS service plan：
 
 ```bash
-ensemble serve --install-service --print
-ensemble serve --uninstall-service --print
+pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <this-node> -Service install-print -RunService
+pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <this-node> -Service uninstall-print -RunService
 ```
 
 確認內容正確後，拿掉 `--print` 進行實際安裝或移除：
 
 ```bash
-ensemble serve --install-service
-ensemble serve --uninstall-service
+pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <this-node> -Service install -RunService
+pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <this-node> -Service uninstall -RunService
 ```
 
 實際 install 會建立/更新並立即啟動或重啟 `serve`；uninstall 會先停止再移除 service 設定。
@@ -116,7 +116,7 @@ pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m2 -Materi
 - 產生 `.ensemble/phase2-fleet/crew-<sat>.generated.toml`（對應衛星機）。
 - 列出該節點要跑的 `ensemble up`、`ensemble run`、`ensemble watch` 指令。
 
-確認 plan 正確後，也可以讓腳本直接執行該節點被選中的 `ensemble run`（只跑 `run`，不會自動跑 `up` 或 `watch`）。`-RunSelected` 必須搭配明確的 `-Node <host>`，不接受預設的 `all`：
+確認 plan 正確後，也可以讓腳本直接執行該節點被選中的 `ensemble run`（只跑 `run`，不會自動跑 `up` 或 `watch`）。`-RunSelected` 必須搭配明確的 `-Node <host>`，不接受預設的 `all`。service bootstrap 則用 `-Service install-print|install|uninstall-print|uninstall -RunService`，同樣必須指定明確節點：
 
 ```bash
 pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Materialize -RunSelected
@@ -206,7 +206,7 @@ ensemble run "<可驗證的小任務>" --crew .ensemble/phase2-fleet/crew-main.g
 | 把 `opencode` 當自動 reviewer 卡住 | opencode headless 會 hang，**別放進自動角色**；互動式 `ensemble agent`/MCP 不受限 |
 | `ensemble merge` 拒絕：worktree not clean | 跑 run 的 repo 要 `.gitignore` 掉 `.ensemble/`，且 `crew.toml` 放 repo 外或 ignore |
 | codex `rate-limited … no backup` | 確認 crew 有設 `backup`（本 repo 的 crew 已設 agy）；本版已修「backup adapter 沒被建」的 bug |
-| service install plan 看起來不對 | 先用 `ensemble serve --install-service --print` 檢查；路徑不對時加 `--exe <path>` |
+| service install plan 看起來不對 | 先用 `pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <this-node> -Service install-print -RunService` 檢查；路徑不對時直接用 `ensemble serve --install-service --print --exe <path>` 深入排查 |
 | 重裝 | Windows：`pwsh scripts\uninstall.ps1` → `install.ps1`；macOS：`cargo install --path . --force` 覆蓋 |
 
 ---
@@ -223,7 +223,7 @@ pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Materi
 # 2) 起節點
 ensemble up           # 背景/新終端
 # 或常駐服務：先 preview，再去掉 --print
-ensemble serve --install-service --print
+pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Service install-print -RunService
 # 3) m1 看 fleet
 ensemble mesh && ensemble nodes
 # 4) 主專案（m1）

@@ -161,6 +161,14 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-25 — **Phase 2 fleet service bootstrap moved under the manifest runner.**
+  `scripts/phase2-fleet.ps1` now accepts `-Service install-print|install|uninstall-print|uninstall|up`
+  and `-RunService`, so each host can use the same untracked `phase2-fleet.local.json` plus its
+  explicit `-Node <host>` to preview or run its own `ensemble serve --install-service` lifecycle.
+  `-RunService` refuses the default `all` node and refuses an omitted `-Service`, avoiding accidental
+  foreground `up` or repeated local service mutations. Self-test now covers both selected run execution
+  and selected service execution through a fake `ensemble`, and the Phase 2 goal/verify/SOP docs use
+  the manifest-driven service bootstrap commands.
 - 2026-06-25 — **Phase 2 local regression + clean reinstall slice reverified on Windows.**
   Current branch `phase2-verify-fixes` passed deterministic single-machine acceptance and the
   local Phase 2 verifier slice: `pwsh -NoProfile -File scripts\acceptance-single-machine.ps1

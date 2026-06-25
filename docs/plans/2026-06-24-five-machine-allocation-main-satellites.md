@@ -81,8 +81,8 @@ ensemble up
 若希望節點在登入/開機後自動提供 `serve`，先 dry-run 檢查 OS service plan，再實際安裝：
 
 ```powershell
-ensemble serve --install-service --print
-ensemble serve --install-service
+pwsh /path/to/ensemble/scripts/phase2-fleet.ps1 -Manifest /path/to/ensemble/phase2-fleet.local.json -Node <this-node> -Service install-print -RunService
+pwsh /path/to/ensemble/scripts/phase2-fleet.ps1 -Manifest /path/to/ensemble/phase2-fleet.local.json -Node <this-node> -Service install -RunService
 ```
 
 實際 install 會建立/更新並立即啟動或重啟 `serve`；uninstall 會先停止再移除 service 設定。
@@ -90,8 +90,8 @@ ensemble serve --install-service
 移除時同樣先 preview：
 
 ```powershell
-ensemble serve --uninstall-service --print
-ensemble serve --uninstall-service
+pwsh /path/to/ensemble/scripts/phase2-fleet.ps1 -Manifest /path/to/ensemble/phase2-fleet.local.json -Node <this-node> -Service uninstall-print -RunService
+pwsh /path/to/ensemble/scripts/phase2-fleet.ps1 -Manifest /path/to/ensemble/phase2-fleet.local.json -Node <this-node> -Service uninstall -RunService
 ```
 
 確認 fleet 與能力：
@@ -188,7 +188,7 @@ ensemble run "衛星任務" --crew .ensemble/phase2-fleet/crew-sat-a.generated.t
 
 ## 六、日常作業順序（簡版）
 
-1. 所有節點：`ensemble up`；若要常駐則先 `ensemble serve --install-service --print`，確認後 `ensemble serve --install-service`
+1. 所有節點：`ensemble up`；若要常駐則先 `pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <this-node> -Service install-print -RunService`，確認後改成 `-Service install -RunService`
 2. 全員確認：`ensemble mesh`、`ensemble nodes`、`ensemble doctor`
 3. 每台依角色執行 `pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <m1..m5> -Materialize -PlanOnly`
 4. 確認 plan 正確後，該節點執行 `pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <m1..m5> -Materialize -RunSelected`（`-RunSelected` 必須指定非 `all` 的 `-Node`）
