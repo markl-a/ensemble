@@ -440,10 +440,14 @@ function Run-SliceC {
         }
 
         if ($ExpectedFleetNodes.Count -gt 0) {
-            foreach ($host in $ExpectedFleetNodes) {
-                if ($nodes.Stdout -notmatch [regex]::Escape($host)) {
-                    Write-Host "WARNING: expected fleet host '$host' not found in nodes output" -ForegroundColor Yellow
+            $missing = New-Object System.Collections.Generic.List[string]
+            foreach ($expectedHost in $ExpectedFleetNodes) {
+                if ($nodes.Stdout -notmatch [regex]::Escape($expectedHost)) {
+                    $missing.Add($expectedHost)
                 }
+            }
+            if ($missing.Count -gt 0) {
+                Fail "expected fleet node(s) not found in nodes output: $($missing -join ', ')"
             }
         }
         Write-Host "Slice C note: full 5-node restart/run loop still needs per-host terminal execution." -ForegroundColor Yellow
