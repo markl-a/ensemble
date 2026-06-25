@@ -1,17 +1,12 @@
-# Satellite project crew — 2 AI on a single machine: codex implements, claude reviews.
+# Satellite project crew — 2 AI on a single machine: codex implements,
+# claude reviews, and codex supplies the second reviewer role.
 #
-# min_approvals = 1: one reviewer approval can land. Raise to 2 only if you add a second
-# DISTINCT-vendor reviewer role (see crew-main.toml's audit = agy pattern).
-#
-# Quota resilience: codex backs up to agy. Every fleet machine installs all four CLIs
-# (codex/claude/opencode/agy) for the main project, so agy is available here too — a codex
-# rate-limit auto-substitutes agy for the implement role instead of escalating, and claude
-# still reviews a DIFFERENT vendor's work (no self-review). opencode is intentionally left
-# out of automated roles because its headless mode hangs.
-pipeline = ["implement", "review"]
+# Phase 2 satellite invariant: keep the minimal codex+claude CLI set, but still
+# require two distinct reviewer vendors before landing.
+pipeline = ["implement", "review", "audit"]
 
 [gate]
-min_approvals = 1
+min_approvals = 2
 max_rounds = 3
 on_flake = "exclude"
 
@@ -26,12 +21,12 @@ agent = "codex"
 agent = "claude"
 blind = true
 
+[roles.audit]
+agent = "codex"
+blind = true
+
 [agents.codex]
 timeout = 120
-backup = "agy"
 
 [agents.claude]
 timeout = 150
-
-[agents.agy]
-timeout = 180

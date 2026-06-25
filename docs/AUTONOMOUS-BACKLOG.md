@@ -161,6 +161,16 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-25 — **Phase 2 fleet satellite crews now preserve the 2-approval governance invariant.**
+  `scripts/phase2-fleet.ps1` no longer generates satellite crews with `min_approvals = 1`, and the legacy root `crew-sat-two-ai.toml` sample was aligned too.
+  Satellites still use the minimal codex+claude CLI set requested by the operator, but generated
+  crews now run `codex` implementer + `claude` review + `codex` audit, so `min_approvals = 2`
+  has two distinct reviewer vendors available. The machine-readable plan now exposes
+  `min_approvals` and `reviewer_agents`, and `scripts/phase2-verify.ps1` rejects generated
+  fleet plans that cannot satisfy the Phase 2 quorum. Verified with `phase2-fleet.ps1
+  -SelfTest`, `phase2-goal-shape.ps1 -SelfTest`, `phase2-goal-shape.ps1 -Manifest
+  examples\phase2-fleet.sample.json`, and `phase2-verify.ps1 -SkipSliceA -SkipSliceB
+  -SkipSliceD -FleetManifest examples\phase2-fleet.sample.json -FleetNode m1`.
 - 2026-06-25 — **Phase 2 fleet RunSelected can now verify run evidence automatically.**
   `scripts/phase2-fleet.ps1 -RunSelected -VerifyEvidence` now captures team/watch/control cursors
   before each selected manifest run, derives the run terminal (`landed` or `escalated`) from the

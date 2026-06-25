@@ -267,6 +267,15 @@ function Assert-Phase2FleetGeneratedPlanShape($Plan) {
         $crew = [string](Get-JsonProp $project "crew" "")
         $team = [string](Get-JsonProp $project "team" "")
         $watch = [string](Get-JsonProp $project "watch" "")
+        $minApprovals = [int](Get-JsonProp $project "min_approvals" 0)
+        $reviewerAgents = @(Get-JsonArray (Get-JsonProp $project "reviewer_agents" @()) | ForEach-Object { [string]$_ })
+        $distinctReviewers = @($reviewerAgents | Sort-Object -Unique)
+        if ($minApprovals -lt 2) {
+            Fail "Phase 2 Slice C generated project '$name' must keep min_approvals >= 2; got $minApprovals"
+        }
+        if ($distinctReviewers.Count -lt $minApprovals) {
+            Fail "Phase 2 Slice C generated project '$name' must expose enough distinct reviewers for min_approvals=$minApprovals; got $($distinctReviewers.Count)"
+        }
         $runMatch = @($runCommands | Where-Object {
                 $cmdNode = [string](Get-JsonProp $_ "node" "")
                 $cmdNode.Equals($node, [System.StringComparison]::OrdinalIgnoreCase) -and

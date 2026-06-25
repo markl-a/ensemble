@@ -139,10 +139,10 @@ pwsh /path/to/ensemble/scripts/phase2-fleet.ps1 -Manifest /path/to/ensemble/phas
 生成內容的核心形狀如下：
 
 ```toml
-pipeline = ["implement", "review"]
+pipeline = ["implement", "review", "audit"]
 
 [gate]
-min_approvals = 1
+min_approvals = 2
 max_rounds = 3
 on_flake = "exclude"
 
@@ -151,6 +151,10 @@ agent = "codex"
 
 [roles.review]
 agent = "claude"
+blind = true
+
+[roles.audit]
+agent = "codex"
 blind = true
 
 [agents.codex]
@@ -183,7 +187,7 @@ ensemble run "衛星任務" --crew .ensemble/phase2-fleet/crew-sat-a.generated.t
 - `crew.toml` 的 `[agents.<name>] node` 目前要使用完整 URL（例如 `http://m2:7878`）。日常不要手工改這段，改用 `scripts/phase2-fleet.ps1` 從 manifest 產生，腳本會把 `m2` 這種 host alias 正規化成可用 URL。
 - `ensemble nodes` 是 agent→host 的輔助視圖，且只列 tailnet peers；完整五機可見性請用 `ensemble mesh`，本機 conductor 由 `local CLIs` 區塊確認。
 - 主專案想要「五機都看到、都可介入」的效果，請把所有機器都先 `ensemble up`，或安裝 `ensemble serve --install-service`，並保持 `team=main` 一致。
-- 衛星專案保持最小路由，先用 `min_approvals = 1` 會快；當流程穩定再改 2（至少兩家不同 vendor 時）。
+- 衛星專案保持最小 CLI 集合（codex + claude），但 generated crew 仍維持 `min_approvals = 2`：`claude` review + `codex` audit 兩個 distinct vendor 才能 land。
 - `on_flake = "exclude"` 是建議值，避免 flake 被誤算為 approval。
 - 任何 run 前先跑 `ensemble nodes` 與 `ensemble doctor`，確認節點與 CLI 狀態正確。
 

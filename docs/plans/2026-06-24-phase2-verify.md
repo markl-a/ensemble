@@ -114,7 +114,7 @@ pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo <repo> -Crew <generated-cr
 - `ensemble nodes`
 - 檢查 `ensemble mesh` 中有預期 remote peers（可用 `-ExpectedFleetNodes m1,m2,m3,m4,m5 -LocalFleetNode m1`；本機 conductor 會被跳過，因為 tailnet peer discovery 不列自己）
 - `pwsh scripts\phase2-goal-shape.ps1 -Manifest phase2-fleet.local.json` 可在上機前檢查 manifest 是否符合 Phase 2 形狀：5 nodes、1 main project、4 satellites、main codex/claude/agy routes 都指向 fleet nodes
-- 若已有 `phase2-fleet.local.json`，可直接讓 verifier 驗證同一份 manifest 會生成完整 fleet plan（5 nodes、1 main run、4 satellite runs、對應 watch/service commands），並印出指定節點的 Slice C plan：`-FleetManifest phase2-fleet.local.json -FleetNode m1`
+- 若已有 `phase2-fleet.local.json`，可直接讓 verifier 驗證同一份 manifest 會生成完整 fleet plan（5 nodes、1 main run、4 satellite runs、對應 watch/service commands，且每個 generated project 都揭露 `min_approvals >= 2` 與足夠 distinct reviewers），並印出指定節點的 Slice C plan：`-FleetManifest phase2-fleet.local.json -FleetNode m1`
 - `scripts\phase2-fleet.ps1 -RunSelected -VerifyEvidence` 會在每個 selected run 前自動抓 team/watch/control cursor，run 後自動呼叫 `phase2-run-evidence.ps1 -ExpectTerminal <landed|escalated>`；非零 `ESCALATED` 預設仍會讓腳本失敗，若本次驗收接受 escalate 作為明確終局，需顯式加 `-AllowEscalatedRun`；若該 run 有實際介入，額外加 `-RequireControlEvidence`、`-RequireSteerEvidence` 或 `-RequireAbortEvidence`
 - 若要從 manifest.nodes 自動檢查 expected peers，加 `-CheckFleetManifestNodes`；本機節點可用 `-FleetNode <this-node>` 或 `-LocalFleetNode <this-node>` 排除，因為 `mesh/nodes` 不列自己
 

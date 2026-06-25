@@ -194,6 +194,7 @@ ensemble watch sat-a --follow
 pwsh /path/to/ensemble/scripts/phase2-run-evidence.ps1 -Repo . -Team sat-a -Watch sat-a -TeamSince $teamCursor -WatchSince $watchCursor
 ```
 > 更建議先用 `phase2-fleet.ps1 -PlanOnly` 預覽，確認後用 `-RunSelected -VerifyEvidence` 執行，避免 crew path / team / watch 打錯，也避免手動 cursor 記錯。
+> generated satellite crew 仍維持 `min_approvals=2`：`claude` review + `codex` audit 兩個 distinct vendor 都 LGTM 才能 land；只是 CLI 集合保持最小的 codex/claude。
 
 ### 完成判定（Slice C）
 - `ensemble mesh` 在 m1 顯示本機 CLIs，且 tailnet peers 看得到 m2~m5；`ensemble nodes` 可作為 agent→host 輔助視圖。
