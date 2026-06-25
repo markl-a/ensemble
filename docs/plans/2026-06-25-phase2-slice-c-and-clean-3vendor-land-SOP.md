@@ -43,7 +43,7 @@ cargo install --path . --force
   pwsh scripts\install.ps1 -SourceExe target\release\ensemble.exe -SkipBuild
   ```
 - **macOS（m1/m5 arm64）**：用上面的 `cargo install --path .`；確認 `~/.cargo/bin` 在 PATH。
-  （`scripts\*.ps1` 是 Windows 專用，Mac 不要用。）
+  `scripts/phase2-fleet.ps1` 與 verify scripts 需要 PowerShell 7 (`pwsh`)；若 Mac 尚未安裝，先裝 `pwsh`，再用同一套 fleet manifest 流程。
 
 安裝後每台驗收環境：
 ```bash
@@ -98,6 +98,13 @@ pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m2 -Materi
 - 產生 `.ensemble/phase2-fleet/crew-<sat>.generated.toml`（對應衛星機）。
 - 列出該節點要跑的 `ensemble up`、`ensemble run`、`ensemble watch` 指令。
 
+確認 plan 正確後，也可以讓腳本直接執行該節點被選中的 `ensemble run`（只跑 `run`，不會自動跑 `up` 或 `watch`）。`-RunSelected` 必須搭配明確的 `-Node <host>`，不接受預設的 `all`：
+
+```bash
+pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Materialize -RunSelected
+pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m2 -Materialize -RunSelected
+```
+
 在 m1 也可以加上節點檢查：
 
 ```bash
@@ -116,6 +123,10 @@ pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -CheckN
 ```bash
 ensemble run "<主專案任務>" --crew .ensemble/phase2-fleet/crew-main.generated.toml --repo <主repo路徑> --team main --watch main --merge
 ```
+或由 manifest 直接執行本節點分配到的主專案 run：
+```bash
+pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Materialize -RunSelected
+```
 任一台操作機可監控 / 介入：
 ```bash
 ensemble watch main --follow
@@ -132,7 +143,7 @@ ensemble abort main --hard --team main        # 偏離時硬中斷
 ensemble run "<衛星任務>" --crew .ensemble/phase2-fleet/crew-sat-a.generated.toml --repo . --team sat-a --watch sat-a
 ensemble watch sat-a --follow
 ```
-> 更建議直接使用 `phase2-fleet.ps1 -PlanOnly` 輸出的命令，避免 crew path / team / watch 打錯。
+> 更建議先用 `phase2-fleet.ps1 -PlanOnly` 預覽，確認後用 `-RunSelected` 執行，避免 crew path / team / watch 打錯。
 
 ### 完成判定（Slice C）
 - `ensemble mesh` 在 m1 顯示本機 CLIs，且 tailnet peers 看得到 m2~m5；`ensemble nodes` 可作為 agent→host 輔助視圖。
@@ -195,7 +206,7 @@ ensemble up           # 背景/新終端
 # 3) m1 看 fleet
 ensemble mesh && ensemble nodes
 # 4) 主專案（m1）
-ensemble run "<task>" --crew .ensemble/phase2-fleet/crew-main.generated.toml --repo <主repo> --team main --watch main --merge
+pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Materialize -RunSelected
 # 5) 衛星（m2~m5 各自）
-ensemble run "<task>" --crew .ensemble/phase2-fleet/crew-sat-a.generated.toml --repo . --team sat-a --watch sat-a
+pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m2 -Materialize -RunSelected
 ```

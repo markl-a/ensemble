@@ -61,8 +61,9 @@ pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo D:\Projects\ensemble -Team
 
 1. 所有機器：`ensemble up`
 2. m1 執行 `ensemble mesh` / `ensemble nodes`
-3. 主專案：`ensemble run "..."`
-4. 每個衛星專案：在對應機器各跑最小 run
+3. 每台依角色先預覽與產生 crew：`pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <m1..m5> -Materialize -PlanOnly`
+4. 確認 plan 正確後，該節點直接跑被選中的任務：`pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <m1..m5> -Materialize -RunSelected`（`-RunSelected` 必須指定非 `all` 的 `-Node`）
+5. 監控：`ensemble watch <watch-name> --follow`
 
 ## Slice D：clean reinstall + smoke 重建
 

@@ -25,10 +25,16 @@
 ### 2.1 主專案 generated `crew`
 
 主專案 crew 不再手工複製或手工改 node；用 `scripts/phase2-fleet.ps1` 從
-`phase2-fleet.local.json` 產生到主專案：
+`phase2-fleet.local.json` 產生到主專案。先預覽與 materialize：
 
 ```powershell
 pwsh /path/to/ensemble/scripts/phase2-fleet.ps1 -Manifest /path/to/ensemble/phase2-fleet.local.json -Node m1 -Materialize -PlanOnly
+```
+
+確認後可直接執行本節點選中的主專案 run：
+
+```powershell
+pwsh /path/to/ensemble/scripts/phase2-fleet.ps1 -Manifest /path/to/ensemble/phase2-fleet.local.json -Node m1 -Materialize -RunSelected
 ```
 
 生成內容的核心形狀如下（`node` 會是完整 URL，不是裸 host）：
@@ -107,6 +113,12 @@ ensemble abort main --hard
 pwsh /path/to/ensemble/scripts/phase2-fleet.ps1 -Manifest /path/to/ensemble/phase2-fleet.local.json -Node m2 -Materialize -PlanOnly
 ```
 
+確認後可直接執行該衛星節點選中的 run：
+
+```powershell
+pwsh /path/to/ensemble/scripts/phase2-fleet.ps1 -Manifest /path/to/ensemble/phase2-fleet.local.json -Node m2 -Materialize -RunSelected
+```
+
 生成內容的核心形狀如下：
 
 ```toml
@@ -163,8 +175,8 @@ ensemble run "衛星任務" --crew .ensemble/phase2-fleet/crew-sat-a.generated.t
 1. 所有節點：`ensemble up`
 2. 全員確認：`ensemble mesh`、`ensemble nodes`、`ensemble doctor`
 3. 每台依角色執行 `pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <m1..m5> -Materialize -PlanOnly`
-4. 主專案：`ensemble run "..." --crew .ensemble/phase2-fleet/crew-main.generated.toml --team main --merge`
-5. 衛星專案：各機各自執行 `.ensemble/phase2-fleet/crew-<sat>.generated.toml`
+4. 確認 plan 正確後，該節點執行 `pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <m1..m5> -Materialize -RunSelected`（`-RunSelected` 必須指定非 `all` 的 `-Node`）
+5. 主專案與衛星專案都由 manifest 內的 `team` / `watch` / `crew` / `repo` 設定產生，不手工改路由
 6. 監控與介入：`ensemble watch` / `ensemble steer` / `ensemble abort`
 
 ## 七、Slice C 可直接執行的驗收指令（建議）
@@ -198,7 +210,7 @@ pwsh /path/to/ensemble/scripts/phase2-fleet.ps1 -Manifest /path/to/ensemble/phas
 主專案最小 run（五機可用）：
 
 ```powershell
-ensemble run "phase2 smoke run" --crew .ensemble/phase2-fleet/crew-main.generated.toml --repo <main-repo> --team main --watch main --no-discover
+pwsh /path/to/ensemble/scripts/phase2-fleet.ps1 -Manifest /path/to/ensemble/phase2-fleet.local.json -Node m1 -Materialize -RunSelected
 ensemble watch main --follow
 ensemble steer main "先維持 test 驗證為主，修正偏差" --team main
 ensemble abort main --hard --team main   # 當 run 持續偏離時
@@ -209,7 +221,7 @@ ensemble abort main --hard --team main   # 當 run 持續偏離時
 ```powershell
 cd /path/to/satellite-repo
 pwsh /path/to/ensemble/scripts/phase2-fleet.ps1 -Manifest /path/to/ensemble/phase2-fleet.local.json -Node <sat-node> -Materialize -PlanOnly
-ensemble run "satellite smoke run" --crew .ensemble/phase2-fleet/crew-<sat>.generated.toml --repo . --team <sat-team> --watch <sat-team> --no-discover
+pwsh /path/to/ensemble/scripts/phase2-fleet.ps1 -Manifest /path/to/ensemble/phase2-fleet.local.json -Node <sat-node> -Materialize -RunSelected
 ensemble watch <sat-team> --follow
 ```
 

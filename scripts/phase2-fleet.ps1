@@ -9,6 +9,7 @@ param(
     [switch]$Force,
     [switch]$Materialize,
     [switch]$CheckNodes,
+    [switch]$RunSelected,
     [switch]$PlanOnly,
     [switch]$SelfTest
 )
@@ -51,6 +52,33 @@ function Quote-Arg([string]$Value) {
         return "''"
     }
     return "'" + $Value.Replace("'", "''") + "'"
+}
+
+function Format-Arg([string]$Value) {
+    if ([string]::IsNullOrEmpty($Value)) {
+        return "''"
+    }
+    if ($Value -match '^[A-Za-z0-9_./:@\\=-]+$') {
+        return $Value
+    }
+    return Quote-Arg $Value
+}
+
+function Format-Command([string[]]$ArgList) {
+    $parts = @("ensemble")
+    foreach ($arg in $ArgList) {
+        $parts += Format-Arg $arg
+    }
+    return ($parts -join " ")
+}
+
+function New-CommandSpec([string]$NodeName, [string]$Kind, [string[]]$ArgList) {
+    return [pscustomobject]@{
+        Node = $NodeName
+        Kind = $Kind
+        Args = @($ArgList)
+        Text = Format-Command $ArgList
+    }
 }
 
 function Resolve-ManifestPath([string]$Path) {
@@ -211,24 +239,23 @@ function New-SatelliteCrewText($Satellite) {
     return ($lines -join [Environment]::NewLine) + [Environment]::NewLine
 }
 
-function New-RunCommand([string]$Task, [string]$Crew, [string]$Repo, [string]$Team, [string]$Watch, [bool]$Merge) {
-    $parts = @(
-        "ensemble",
+function New-RunArgs([string]$Task, [string]$Crew, [string]$Repo, [string]$Team, [string]$Watch, [bool]$Merge) {
+    $argList = @(
         "run",
-        (Quote-Arg $Task),
+        $Task,
         "--crew",
-        (Quote-Arg $Crew),
+        $Crew,
         "--repo",
-        (Quote-Arg $Repo),
+        $Repo,
         "--team",
-        (Quote-Arg $Team),
+        $Team,
         "--watch",
-        (Quote-Arg $Watch)
+        $Watch
     )
     if ($Merge) {
-        $parts += "--merge"
+        $argList += "--merge"
     }
-    return ($parts -join " ")
+    return $argList
 }
 
 function Select-Node([string]$Candidate) {
@@ -257,11 +284,7 @@ function New-FleetPlan($Fleet, [string]$ManifestDir) {
 
     foreach ($fleetNode in $nodes) {
         if (Select-Node ([string]$fleetNode)) {
-            $commands += [pscustomobject]@{
-                Node = [string]$fleetNode
-                Kind = "service"
-                Text = "ensemble up"
-            }
+            $commands += New-CommandSpec -NodeName ([string]$fleetNode) -Kind "service" -ArgList @("up")
         }
     }
 
@@ -276,16 +299,8 @@ function New-FleetPlan($Fleet, [string]$ManifestDir) {
         Selected = $mainSelected
     }
     if ($mainSelected) {
-        $commands += [pscustomobject]@{
-            Node = $conductor
-            Kind = "run"
-            Text = New-RunCommand $mainTask $mainCrew $mainRepo $mainTeam $mainWatch $mainMerge
-        }
-        $commands += [pscustomobject]@{
-            Node = $conductor
-            Kind = "watch"
-            Text = "ensemble watch $(Quote-Arg $mainWatch) --repo $(Quote-Arg $mainRepo) --team $(Quote-Arg $mainTeam) --follow"
-        }
+        $commands += New-CommandSpec -NodeName $conductor -Kind "run" -ArgList (New-RunArgs $mainTask $mainCrew $mainRepo $mainTeam $mainWatch $mainMerge)
+        $commands += New-CommandSpec -NodeName $conductor -Kind "watch" -ArgList @("watch", $mainWatch, "--repo", $mainRepo, "--team", $mainTeam, "--follow")
     }
 
     $satellites = @(Get-Prop $Fleet "satellites" @())
@@ -309,16 +324,8 @@ function New-FleetPlan($Fleet, [string]$ManifestDir) {
             Selected = $satSelected
         }
         if ($satSelected) {
-            $commands += [pscustomobject]@{
-                Node = $satNode
-                Kind = "run"
-                Text = New-RunCommand $satTask $satCrew $satRepo $satTeam $satWatch $false
-            }
-            $commands += [pscustomobject]@{
-                Node = $satNode
-                Kind = "watch"
-                Text = "ensemble watch $(Quote-Arg $satWatch) --repo $(Quote-Arg $satRepo) --team $(Quote-Arg $satTeam) --follow"
-            }
+            $commands += New-CommandSpec -NodeName $satNode -Kind "run" -ArgList (New-RunArgs $satTask $satCrew $satRepo $satTeam $satWatch $false)
+            $commands += New-CommandSpec -NodeName $satNode -Kind "watch" -ArgList @("watch", $satWatch, "--repo", $satRepo, "--team", $satTeam, "--follow")
         }
     }
 
@@ -400,6 +407,28 @@ function Check-FleetNodes($Plan) {
         Fail "expected remote fleet node(s) not found in mesh output: $($missing -join ', ')"
     }
     Write-Host "fleet node check passed (remote peers: $($expectedRemoteNodes -join ', '); local conductor skipped: $($Plan.Conductor))"
+}
+
+function Invoke-SelectedRuns($Plan) {
+    if (-not (Get-Command ensemble -ErrorAction SilentlyContinue)) {
+        Fail "ensemble is not on PATH; install first"
+    }
+    $runs = @($Plan.Commands | Where-Object { $_.Kind -eq "run" })
+    if ($runs.Count -eq 0) {
+        Fail "no selected run commands for node '$Node'"
+    }
+    foreach ($cmd in $runs) {
+        Write-Host ""
+        Write-Host ("running [{0}] {1}" -f $cmd.Node, $cmd.Text)
+        & ensemble @($cmd.Args)
+        $code = $LASTEXITCODE
+        if ($null -eq $code) {
+            $code = 0
+        }
+        if ($code -ne 0) {
+            Fail "selected run failed on node '$($cmd.Node)' with exit code $code"
+        }
+    }
 }
 
 function Write-SampleManifest([string]$Path) {
@@ -530,6 +559,53 @@ function Invoke-SelfTest {
     if ($sat.Text -notmatch 'node = "http://m2:7878"') {
         Fail "self-test expected satellite node to be normalized"
     }
+    $fakeBin = Join-Path $root "fake-bin"
+    New-Item -ItemType Directory -Force -Path $fakeBin | Out-Null
+    $fakeLog = Join-Path $root "fake-ensemble.log"
+    if ($IsWindows) {
+        $fakeExe = Join-Path $fakeBin "ensemble.cmd"
+        Set-Content -LiteralPath $fakeExe -Encoding ascii -Value @(
+            "@echo off",
+            'echo %*>>"%ENSEMBLE_FAKE_LOG%"',
+            "exit /b 0"
+        )
+    }
+    else {
+        $fakeExe = Join-Path $fakeBin "ensemble"
+        Set-Content -LiteralPath $fakeExe -Encoding ascii -Value @(
+            "#!/bin/sh",
+            'printf ''%s\n'' "$*" >> "$ENSEMBLE_FAKE_LOG"',
+            "exit 0"
+        )
+        & chmod +x $fakeExe
+    }
+    $oldPath = $env:PATH
+    $oldFakeLog = $env:ENSEMBLE_FAKE_LOG
+    $env:PATH = "$fakeBin$([System.IO.Path]::PathSeparator)$oldPath"
+    $env:ENSEMBLE_FAKE_LOG = $fakeLog
+    try {
+        Invoke-SelectedRuns $nodePlan
+    }
+    finally {
+        $env:PATH = $oldPath
+        if ($null -eq $oldFakeLog) {
+            Remove-Item Env:\ENSEMBLE_FAKE_LOG -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:ENSEMBLE_FAKE_LOG = $oldFakeLog
+        }
+    }
+    $fakeOut = Get-Content -Raw -LiteralPath $fakeLog
+    $fakeLines = @($fakeOut -split "`r?`n" | Where-Object { $_.Trim().Length -gt 0 })
+    if ($fakeLines.Count -ne 1) {
+        Fail "self-test expected -RunSelected to execute exactly one selected run"
+    }
+    if ($fakeLines[0] -notmatch '^run "?phase2 satellite smoke run"? --crew .+crew-sat-a\.generated\.toml --repo .+sat-a --team sat-a --watch sat-a') {
+        Fail "self-test expected -RunSelected to execute the selected satellite run"
+    }
+    if ($fakeLines[0] -match '^(watch|up)(\s|$)') {
+        Fail "self-test expected -RunSelected to execute run commands only"
+    }
     Write-Host "phase2-fleet self-test passed"
 }
 
@@ -548,12 +624,24 @@ $manifestDir = Split-Path -Parent $manifestPath
 $fleet = Read-FleetManifest $manifestPath
 $plan = New-FleetPlan $fleet $manifestDir
 
+if ($RunSelected -and $PlanOnly) {
+    Fail "-RunSelected cannot be combined with -PlanOnly"
+}
+if ($RunSelected -and $Node.Equals("all", [System.StringComparison]::OrdinalIgnoreCase)) {
+    Fail "-RunSelected requires an explicit -Node <name>; refusing to run every manifest task"
+}
 if ($Materialize) {
+    Materialize-Plan $plan
+}
+elseif ($RunSelected) {
     Materialize-Plan $plan
 }
 if ($CheckNodes) {
     Check-FleetNodes $plan
 }
-if ($PlanOnly -or (-not $Materialize -and -not $CheckNodes)) {
+if ($RunSelected) {
+    Invoke-SelectedRuns $plan
+}
+if ($PlanOnly -or (-not $Materialize -and -not $CheckNodes -and -not $RunSelected)) {
     Write-Plan $plan
 }
