@@ -96,7 +96,7 @@ OpenSSH transport 同樣可用於實際 install/uninstall；它會用 non-intera
 實際 install 會建立/更新並立即啟動或重啟 `serve`；uninstall 會先停止再移除 service 設定。
 `-RemoteService` 只支援會返回的 service 動作（`install-print`、`install`、`uninstall-print`、`uninstall`），不支援前景長跑的 `up`。
 
-`--install-service` 預設執行 `ensemble serve`，所以會繼承 `serve` 的安全 bind 行為（有 tailnet IP 則綁 tailnet，否則 loopback）。若你要固定 bind，可加 `--bind <addr>`；若要讓遠端 mutation 需要 token，可明確加 `--token <token>`，但這會寫入系統 service 設定。
+`--install-service` 預設執行 `ensemble serve`，所以會繼承 `serve` 的安全 bind 行為（有 tailnet IP 則綁 tailnet，否則 loopback）。若 manifest 有 `service.port`，`phase2-fleet.ps1` 會把它寫成 `ensemble serve --port <port>`；若你要固定 bind，可加 `--bind <addr>`；若要讓遠端 mutation 需要 token，可明確加 `--token <token>`，但這會寫入系統 service 設定。
 
 在 **m1** 確認整個 fleet：
 ```bash
@@ -104,6 +104,7 @@ ensemble mesh        # 期待 local CLIs + remote peers（m2~m5）
 ensemble nodes       # agent→host 輔助視圖；不列本機 m1
 pwsh scripts/phase2-verify.ps1 -Repo . -SkipSliceA -SkipSliceB -SkipSliceD -FleetManifest phase2-fleet.local.json -FleetNode m1 -CheckFleetManifestNodes
 ```
+若 manifest 使用非預設 port，手動 mesh/nodes 需加 `--port <service.port>`；`phase2-fleet.ps1 -CheckNodes` 會自動使用 manifest port。
 > 看不到節點 → 回 Step 0：先關 Surfshark 再 `tailscale up`，並確認每台都已 `ensemble up`。
 
 ---
@@ -118,8 +119,9 @@ pwsh scripts/phase2-fleet.ps1 -InitSample -Manifest phase2-fleet.local.json
 
 編輯 `phase2-fleet.local.json`：
 - `nodes` / `conductor`：填實際五台 host 對照。
+- `service.port`：ensemble serve/discovery 使用的 port；預設 7878。若 Phantom 或其他服務已佔用 7878，改用例如 8788，腳本會同步套用到 generated crew routes、`up`/`install-service`、`mesh`/`nodes` checks。
 - `main.repo`：主專案在本機的路徑。
-- `main.routes`：主專案 headless governed run 使用的路由（腳本會把 `m2` 正規化為 `http://m2:7878`）。
+- `main.routes`：主專案 headless governed run 使用的路由（腳本會把 `m2` 正規化為 `http://m2:<service.port>`；若 route 本身已有 `host:port` 或 URL 則保留）。
 - `satellites[]`：四個衛星專案的 `repo` / `node` / `team` / `test`。
 
 `phase2-fleet.local.json` 已列入 `.gitignore`，不要提交內部路徑或機器名稱。

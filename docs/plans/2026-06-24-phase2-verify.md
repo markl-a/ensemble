@@ -115,6 +115,7 @@ pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo <repo> -Crew <generated-cr
 
 - `ensemble mesh`
 - `ensemble nodes`
+- 若 manifest 設了非預設 `service.port`（例如 Phantom 已佔用 7878 時用 8788），手動檢查需改跑 `ensemble mesh --port <port>` / `ensemble nodes --port <port>`；`phase2-fleet.ps1 -CheckNodes` 會自動使用 manifest 的 `service.port`
 - 檢查 `ensemble mesh` 中有預期 remote peers（可用 `-ExpectedFleetNodes m1,m2,m3,m4,m5 -LocalFleetNode m1`；本機 conductor 會被跳過，因為 tailnet peer discovery 不列自己）
 - `pwsh scripts\phase2-goal-shape.ps1 -Manifest phase2-fleet.local.json` 可在上機前檢查 manifest 是否符合 Phase 2 形狀：5 nodes、1 main project、4 satellites、main codex/claude/agy routes 都指向 fleet nodes
 - 若已有 `phase2-fleet.local.json`，可直接讓 verifier 驗證同一份 manifest 會生成完整 fleet plan（5 nodes、1 main run、4 satellite runs、對應 watch/service commands，且每個 generated project 都揭露 `min_approvals >= 2` 與足夠 distinct reviewers），並印出指定節點的 Slice C plan：`-FleetManifest phase2-fleet.local.json -FleetNode m1`
@@ -125,8 +126,8 @@ pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo <repo> -Crew <generated-cr
 手動（每台主機）：
 
 1. 編輯 manifest 後先跑 `pwsh scripts\phase2-goal-shape.ps1 -Manifest phase2-fleet.local.json`
-2. 所有機器：可先用 `ensemble up` 前景啟動；若要常駐，改用同一份 manifest 執行 `pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <this-node> -Service install-print -RunService` 預覽，確認後執行 `-Service install -RunService`。若 conductor 可用 Tailscale SSH 連到所有節點，可從 conductor 執行 `pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node all -Service install-print -RunService -RemoteService` 預覽，再執行 `-Service install -RunService -RemoteService` 遠端安裝/重啟服務；若本機 `tailscale ssh` wrapper 被 OpenSSH host-key policy 擋住，但一般 OpenSSH 可連 Tailnet host，改加 `-RemoteServiceTransport ssh`。`ssh` transport 會強制 `BatchMode=yes` 與 `ConnectTimeout=10`，不可卡在密碼 prompt。`-RemoteService` 不支援前景長跑的 `-Service up`。
-3. m1 執行 `ensemble mesh` / `ensemble nodes`
+2. 所有機器：可先用 `ensemble up` 前景啟動；若 manifest 設了 `service.port`，用 `ensemble up --port <port>`。若要常駐，改用同一份 manifest 執行 `pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <this-node> -Service install-print -RunService` 預覽，確認後執行 `-Service install -RunService`。若 conductor 可用 Tailscale SSH 連到所有節點，可從 conductor 執行 `pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node all -Service install-print -RunService -RemoteService` 預覽，再執行 `-Service install -RunService -RemoteService` 遠端安裝/重啟服務；若本機 `tailscale ssh` wrapper 被 OpenSSH host-key policy 擋住，但一般 OpenSSH 可連 Tailnet host，改加 `-RemoteServiceTransport ssh`。`ssh` transport 會強制 `BatchMode=yes` 與 `ConnectTimeout=10`，不可卡在密碼 prompt。`-RemoteService` 不支援前景長跑的 `-Service up`。
+3. m1 執行 `ensemble mesh` / `ensemble nodes`；非預設 port 時加 `--port <port>`
 4. 每台依角色先預覽與產生 crew：`pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <m1..m5> -Materialize -PlanOnly`
 5. 確認 plan 正確後，該節點直接跑被選中的任務並自動收斂 evidence：`pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <m1..m5> -Materialize -RunSelected -VerifyEvidence -RepeatCount 2`（`-RunSelected` 必須指定非 `all` 的 `-Node`；`-RepeatCount 2` 是正式 Slice C rerun 驗收；成功後檢查 `.ensemble/phase2-fleet/acceptance-<project>-<node>.json`）
 6. 匯總驗收：在可讀取全部 repo 的節點跑 `pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node all -VerifyReports -RepeatCount 2`；若每台只讀自己的 repo，則各台用自己的 `-Node <m1..m5> -VerifyReports -RepeatCount 2`

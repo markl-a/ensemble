@@ -38,6 +38,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+$script:FleetServicePort = 7878
 
 function Fail([string]$Message) {
     Write-Host "FAIL: $Message" -ForegroundColor Red
@@ -63,6 +64,27 @@ function Require-Prop($Object, [string]$Name, [string]$Path) {
     return [string]$value
 }
 
+function Get-FleetServicePort($Fleet) {
+    $service = Get-Prop $Fleet "service" $null
+    $raw = Get-Prop $service "port" 7878
+    try {
+        $port = [int]$raw
+    }
+    catch {
+        Fail "manifest service.port must be an integer from 1 to 65535"
+    }
+    if ($port -lt 1 -or $port -gt 65535) {
+        Fail "manifest service.port must be an integer from 1 to 65535"
+    }
+    return $port
+}
+
+function New-PortArgs([int]$Port) {
+    if ($Port -eq 7878) {
+        return @()
+    }
+    return @("--port", "$Port")
+}
 function Toml-String([string]$Value) {
     $escaped = $Value.Replace('\', '\\').Replace('"', '\"')
     $escaped = $escaped.Replace("`r", '\r').Replace("`n", '\n').Replace("`t", '\t')
@@ -229,11 +251,12 @@ function Normalize-ServiceAction([string]$Action) {
 
 function New-ServiceArgs([string]$Action) {
     $normalized = Normalize-ServiceAction $Action
+    $portArgs = New-PortArgs $script:FleetServicePort
     switch ($normalized) {
-        "none" { return @("up") }
-        "up" { return @("up") }
-        "install-print" { return @("serve", "--install-service", "--print") }
-        "install" { return @("serve", "--install-service") }
+        "none" { return @("up") + $portArgs }
+        "up" { return @("up") + $portArgs }
+        "install-print" { return @("serve", "--install-service") + $portArgs + @("--print") }
+        "install" { return @("serve", "--install-service") + $portArgs }
         "uninstall-print" { return @("serve", "--uninstall-service", "--print") }
         "uninstall" { return @("serve", "--uninstall-service") }
         default { Fail "unsupported -Service '$Action'" }
@@ -269,12 +292,12 @@ function Normalize-NodeUrl([string]$NodeName) {
         if ($trimmed -match '^\[[^\]]+\]:\d+$') {
             return "http://$trimmed"
         }
-        return "http://$trimmed`:7878"
+        return "http://$trimmed`:$script:FleetServicePort"
     }
     if ($trimmed.Contains(":") -and -not $trimmed.StartsWith("[")) {
-        return "http://[$trimmed]:7878"
+        return "http://[$trimmed]:$script:FleetServicePort"
     }
-    return "http://$trimmed`:7878"
+    return "http://$trimmed`:$script:FleetServicePort"
 }
 
 function Get-UrlHosts([string]$Text) {
@@ -432,6 +455,7 @@ function New-FleetPlan($Fleet, [string]$ManifestDir) {
         Fail "manifest.nodes must contain m1..m5 (or your mapped host names)"
     }
     $conductor = [string](Get-Prop $Fleet "conductor" $nodes[0])
+    $script:FleetServicePort = Get-FleetServicePort $Fleet
     $main = Get-Prop $Fleet "main" $null
     if ($null -eq $main) {
         Fail "manifest is missing required field: main"
@@ -511,6 +535,7 @@ function New-FleetPlan($Fleet, [string]$ManifestDir) {
         Conductor = $conductor
         Projects  = $projects
         Commands  = $commands
+        ServicePort = $script:FleetServicePort
     }
 }
 
@@ -541,6 +566,7 @@ function Convert-PlanForJson($Plan) {
     return [pscustomobject]@{
         nodes     = @($Plan.Nodes)
         conductor = $Plan.Conductor
+        service_port = [int]$Plan.ServicePort
         projects  = @($Plan.Projects | ForEach-Object {
                 [pscustomobject]@{
                     kind     = $_.Kind
@@ -591,14 +617,14 @@ function Check-FleetNodes($Plan) {
     if (-not (Get-Command ensemble -ErrorAction SilentlyContinue)) {
         Fail "ensemble is not on PATH; install first"
     }
-    $meshOut = & ensemble mesh 2>&1
+    $meshOut = & ensemble mesh --port $Plan.ServicePort 2>&1
     $meshCode = $LASTEXITCODE
     $meshText = ($meshOut | Out-String)
     Write-Host $meshText.TrimEnd()
     if ($meshCode -ne 0) {
         Fail "ensemble mesh exited $meshCode"
     }
-    $nodesOut = & ensemble nodes 2>&1
+    $nodesOut = & ensemble nodes --port $Plan.ServicePort 2>&1
     $nodesCode = $LASTEXITCODE
     $nodesText = ($nodesOut | Out-String)
     Write-Host $nodesText.TrimEnd()
@@ -969,6 +995,9 @@ function Write-SampleManifest([string]$Path) {
 {
   "nodes": ["m1", "m2", "m3", "m4", "m5"],
   "conductor": "m1",
+  "service": {
+    "port": 8788
+  },
   "main": {
     "repo": "D:\\Projects\\main-project",
     "team": "main",
@@ -1039,6 +1068,9 @@ function Invoke-SelfTest {
     $json = @{
         nodes      = @("m1", "m2")
         conductor  = "m1"
+        service    = @{
+            port = 8788
+        }
         main       = @{
             repo   = $mainRepo
             test   = "echo main"
@@ -1062,6 +1094,9 @@ function Invoke-SelfTest {
     $fleet = Read-FleetManifest $manifestPath
     $plan = New-FleetPlan $fleet $root
     $jsonPlan = Convert-PlanForJson $plan | ConvertTo-Json -Depth 12 | ConvertFrom-Json
+    if ([int]$jsonPlan.service_port -ne 8788) {
+        Fail "self-test expected JSON plan to expose the manifest service port"
+    }
     if (@($jsonPlan.projects).Count -ne 2) {
         Fail "self-test expected JSON plan to include main plus one satellite project"
     }
@@ -1083,7 +1118,7 @@ function Invoke-SelfTest {
         Fail "self-test expected JSON plan to include one watch command per project"
     }
     $main = @($plan.Projects | Where-Object { $_.Kind -eq "main" })[0]
-    if ($main.Text -notmatch 'node = "http://m1:7878"') {
+    if ($main.Text -notmatch 'node = "http://m1:8788"') {
         Fail "self-test expected main codex route to be normalized"
     }
     if ((Normalize-NodeUrl "m2:9000") -ne "http://m2:9000") {
@@ -1119,7 +1154,7 @@ function Invoke-SelfTest {
     if ($sat.Text -notmatch '\[roles\.audit\]' -or $sat.Text -notmatch 'agent = "codex"') {
         Fail "self-test expected satellite generated crew to include a codex audit reviewer"
     }
-    if ($sat.Text -notmatch 'node = "http://m2:7878"') {
+    if ($sat.Text -notmatch 'node = "http://m2:8788"') {
         Fail "self-test expected satellite node to be normalized"
     }
     Materialize-Plan $nodePlan
@@ -1692,8 +1727,8 @@ function Invoke-SelfTest {
     if ($serviceCommands.Count -ne 1) {
         Fail "self-test expected one selected service command"
     }
-    if (($serviceCommands[0].Args -join " ") -ne "serve --install-service --print") {
-        Fail "self-test expected service install-print to produce serve --install-service --print"
+    if (($serviceCommands[0].Args -join " ") -ne "serve --install-service --port 8788 --print") {
+        Fail "self-test expected service install-print to produce serve --install-service --port 8788 --print"
     }
     Set-Content -LiteralPath $fakeLog -Encoding utf8NoBOM -Value ""
     $oldPath = $env:PATH
@@ -1717,7 +1752,7 @@ function Invoke-SelfTest {
     if ($serviceFakeLines.Count -ne 1) {
         Fail "self-test expected -RunService to execute exactly one selected service command"
     }
-    if ($serviceFakeLines[0] -ne "serve --install-service --print") {
+    if ($serviceFakeLines[0] -ne "serve --install-service --port 8788 --print") {
         Fail "self-test expected -RunService to execute service install-print"
     }
     $fakeTailscaleName = "tailscale"
@@ -1789,7 +1824,7 @@ function Invoke-SelfTest {
     if ($remoteServiceFakeLines.Count -ne 2) {
         Fail "self-test expected remote -RunService -Node all to execute the local conductor plus one remote command per peer"
     }
-    if ($remoteServiceFakeLines[0] -ne "serve --install-service --print" -or $remoteServiceFakeLines[1] -ne "ssh m2 ensemble serve --install-service --print") {
+    if ($remoteServiceFakeLines[0] -ne "serve --install-service --port 8788 --print" -or $remoteServiceFakeLines[1] -ne "ssh m2 ensemble serve --install-service --port 8788 --print") {
         Fail "self-test expected remote service bootstrap to run conductor locally and peer through tailscale ssh"
     }
     $oldNodeForRemoteService = $script:Node
@@ -1823,7 +1858,7 @@ function Invoke-SelfTest {
     if ($remoteSshServiceFakeLines.Count -ne 2) {
         Fail "self-test expected ssh remote service transport to execute the local conductor plus one remote command per peer"
     }
-    if ($remoteSshServiceFakeLines[0] -ne "serve --install-service --print" -or $remoteSshServiceFakeLines[1] -ne "-o BatchMode=yes -o ConnectTimeout=10 m2 ensemble serve --install-service --print") {
+    if ($remoteSshServiceFakeLines[0] -ne "serve --install-service --port 8788 --print" -or $remoteSshServiceFakeLines[1] -ne "-o BatchMode=yes -o ConnectTimeout=10 m2 ensemble serve --install-service --port 8788 --print") {
         Fail "self-test expected ssh remote service transport to use non-interactive OpenSSH options"
     }
     $script:Service = "none"

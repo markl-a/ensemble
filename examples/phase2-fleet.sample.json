@@ -1,6 +1,9 @@
 {
   "nodes": ["m1", "m2", "m3", "m4", "m5"],
   "conductor": "m1",
+  "service": {
+    "port": 8788
+  },
   "main": {
     "repo": "D:\\Projects\\main-project",
     "team": "main",

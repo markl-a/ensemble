@@ -13,22 +13,24 @@ fn abort_flag() -> Arc<AtomicBool> {
         .clone()
 }
 
+const DEFAULT_SERVE_PORT: u16 = 7878;
+
 const USAGE: &str = "usage:\n  \
     ensemble run \"<task>\" [--crew <crew.toml>] [--repo <path>] [--team <name>] [--merge [--into <target>]] [--watch <name>]\n  \
     ensemble run-many \"<task1>\" \"<task2>\" ... [--crew <crew.toml>] [--repo <path>]\n  \
     ensemble crew inspect [--crew <crew.toml>] [--json]   (print parsed crew/gate/reviewer metadata for verification)\n  \
     ensemble dispatch \"<task1>\" ... --ledger <db> [--crew <crew.toml>] [--repo <path>]   (durable, resumable)\n  \
     ensemble ledger <status|recover> --ledger <db> [--stale-secs N]\n  \
-    ensemble nodes   (probe the tailnet for `serve` hosts and the agents they offer)\n  \
-    ensemble mesh   (this node's CLIs + which agents each tailnet peer hosts)\n  \
+    ensemble nodes [--port <n>]   (probe the tailnet for `serve` hosts and the agents they offer)\n  \
+    ensemble mesh [--port <n>]   (this node's CLIs + which agents each tailnet peer hosts)\n  \
     ensemble doctor   (check this machine is ready: which AI CLIs + tailscale are on PATH, is-git-repo)\n  \
     ensemble agent <name> \"<task>\" [--node auto|<host>] [--repo <path>] [--json]   (delegate ONE turn to one CLI)\n  \
     ensemble [--repo <path>] [--team <name>] [--member <member>] [--confirm-policy ask|approve|deny] [--print-config] <codex|claude|opencode> [vendor args...]\n  \
     ensemble [--repo <path>] [--team <name>] [--member <member>] [--timeout <secs>] [--confirm-policy ask|approve|deny] [--print-prompt] [--json] agy [vendor args...]   (no prompt: interactive; --prompt/-p: bounded team turn)\n  \
     ensemble merge <branch> [--into <target>] [--repo <path>] [--resolver <agent>]   (land a kept branch; conflict → escalate, or --resolver runs ONE AI round)\n  \
-    ensemble serve [--bind <addr>] [--token <token>]   (default: this node's tailnet IP:7878; loopback if no tailnet)\n  \
-    ensemble serve --install-service|--uninstall-service [--bind <addr>] [--token <token>] [--exe <path>] [--print]   (install/remove boot/login-started serve)\n  \
-    ensemble up [--bind <addr>] [--token <token>]   (quick start: show the mesh, then serve in the foreground)\n  \
+    ensemble serve [--bind <addr>|--port <n>] [--token <token>]   (default: this node's tailnet IP:7878; loopback if no tailnet)\n  \
+    ensemble serve --install-service|--uninstall-service [--bind <addr>|--port <n>] [--token <token>] [--exe <path>] [--print]   (install/remove boot/login-started serve)\n  \
+    ensemble up [--bind <addr>|--port <n>] [--token <token>]   (quick start: show the mesh, then serve in the foreground)\n  \
     ensemble mcp [--repo <path>] [--team <name>] [--name <agent>] [--crew <crew.toml>]   (stdio MCP server: make a LIVE CLI a crew member — mesh + board + queue + worktree + merge + run)\n  \
     ensemble mcp install --client <claude|codex|opencode> [--repo <p>] [--team <name>] [--name <id>] [--exe <p>] [--crew <p>] [--config <p>] [--print]   (one-click: register `ensemble mcp` into that CLI's config)\n  \
     ensemble mcp uninstall --client <claude|codex|opencode> [--repo <p>] [--config <p>] [--print]   (remove ensemble's MCP entry from that CLI's config)\n  \
@@ -108,11 +110,17 @@ fn serve_cmd(args: &[String]) {
         return serve_uninstall_service_cmd(args);
     }
     require_value_if_present(args, "--token");
+    require_value_if_present(args, "--port");
+    if let Err(e) = reject_bind_and_port(args) {
+        eprintln!("ensemble serve: {e}");
+        std::process::exit(2);
+    }
     let explicit = parse_flag(args, "--bind");
+    let port = parse_discovery_port_or_exit(args);
     let token = control_token(args);
     // Default to the tailnet interface so serve is reachable only over the tailnet, not the LAN.
     let self_ips = ensemble::discovery::self_tailscale_ips();
-    let bind = ensemble::resolve_bind(&self_ips, explicit.as_deref(), 7878);
+    let bind = ensemble::resolve_bind(&self_ips, explicit.as_deref(), port);
     if let ensemble::BindAddr::Loopback(_) = bind {
         eprintln!(
             "ensemble: no tailnet IP found (is tailscale up?) — binding loopback only (local). \
@@ -129,9 +137,11 @@ fn serve_cmd(args: &[String]) {
 
 /// `ensemble mesh` — print which AI CLIs are on THIS node + which agents each discovered tailnet
 /// peer hosts. Read-only (no side effects).
-fn mesh_cmd(_args: &[String]) {
+fn mesh_cmd(args: &[String]) {
+    require_value_if_present(args, "--port");
+    let port = parse_discovery_port_or_exit(args);
     let local = ensemble::present_clis();
-    let hosts = ensemble::discover_mesh(7878);
+    let hosts = ensemble::discover_mesh(port);
     println!("{}", ensemble::render_mesh(&local, &hosts));
 }
 
@@ -140,10 +150,16 @@ fn mesh_cmd(_args: &[String]) {
 /// permanent/boot-started path is `serve --install-service` (tick C), not `up`.
 fn up_cmd(args: &[String]) {
     require_value_if_present(args, "--token");
+    require_value_if_present(args, "--port");
+    if let Err(e) = reject_bind_and_port(args) {
+        eprintln!("ensemble up: {e}");
+        std::process::exit(2);
+    }
     let explicit = parse_flag(args, "--bind");
+    let port = parse_discovery_port_or_exit(args);
     let token = control_token(args);
     let self_ips = ensemble::discovery::self_tailscale_ips();
-    let bind = ensemble::resolve_bind(&self_ips, explicit.as_deref(), 7878);
+    let bind = ensemble::resolve_bind(&self_ips, explicit.as_deref(), port);
     if let ensemble::BindAddr::Loopback(_) = bind {
         eprintln!(
             "ensemble: no tailnet IP found (is tailscale up?) — serving loopback only (local). \
@@ -152,7 +168,7 @@ fn up_cmd(args: &[String]) {
     }
     let addr = bind.addr().to_string();
     let local = ensemble::present_clis();
-    let hosts = ensemble::discover_mesh(7878);
+    let hosts = ensemble::discover_mesh(port);
     println!("{}", ensemble::render_up(&addr, &local, &hosts));
     // Belt-and-suspenders flush before the long blocking serve. Rust's stdout is line-buffered
     // (LineWriter), so println!'s trailing newline already flushed the banner — this just makes the
@@ -170,12 +186,13 @@ fn build_serve_service_config(
     default_exe: std::path::PathBuf,
     cwd: &Path,
 ) -> Result<ensemble::ServeServiceConfig, String> {
-    for flag in ["--bind", "--token", "--exe"] {
+    for flag in ["--bind", "--port", "--token", "--exe"] {
         require_value_if_present(args, flag);
     }
     if has_flag(args, "--install-service") && has_flag(args, "--uninstall-service") {
         return Err("--install-service and --uninstall-service are mutually exclusive".to_string());
     }
+    reject_bind_and_port(args)?;
     let exe = parse_flag(args, "--exe")
         .map(std::path::PathBuf::from)
         .unwrap_or(default_exe);
@@ -186,6 +203,7 @@ fn build_serve_service_config(
     Ok(ensemble::ServeServiceConfig {
         exe,
         bind: parse_flag(args, "--bind"),
+        port: parse_discovery_port(args)?,
         // Only bake an explicit token into a service definition. The ambient ENSEMBLE_TOKEN for this
         // install shell may be temporary and should not silently become persistent service state.
         token: control_token_from_sources(parse_flag(args, "--token"), None),
@@ -239,7 +257,9 @@ fn install_serve_service(cfg: &ensemble::ServeServiceConfig, print: bool) -> Res
 
     #[cfg(windows)]
     {
-        end_windows_task_if_present()?;
+        // Stopping the existing task is best-effort during install: first install or an
+        // already-stopped task should still proceed to /Create /F and /Run.
+        let _ = end_windows_task_if_present();
         run_command("schtasks", &ensemble::windows_install_argv(cfg))?;
         return run_command("schtasks", &ensemble::windows_run_argv());
     }
@@ -3734,8 +3754,10 @@ fn resolve_replace_target(path: &std::path::Path) -> std::path::PathBuf {
 }
 
 /// `ensemble nodes` — probe the tailnet and print which agent each discovered `serve` node hosts.
-fn nodes_cmd(_args: &[String]) {
-    let hosts = ensemble::discovery::discover_agent_hosts(7878);
+fn nodes_cmd(args: &[String]) {
+    require_value_if_present(args, "--port");
+    let port = parse_discovery_port_or_exit(args);
+    let hosts = ensemble::discovery::discover_agent_hosts(port);
     if hosts.is_empty() {
         println!(
             "no ensemble nodes discovered (is `tailscale` installed, MagicDNS on, and are peers running `ensemble serve`?)"
@@ -3782,6 +3804,38 @@ fn parse_flag(args: &[String], flag: &str) -> Option<String> {
         .position(|a| a == flag)
         .and_then(|i| args.get(i + 1))
         .cloned()
+}
+
+fn parse_discovery_port(args: &[String]) -> Result<Option<u16>, String> {
+    let Some(raw) = parse_flag(args, "--port") else {
+        return Ok(None);
+    };
+    let port: u16 = raw
+        .parse()
+        .map_err(|_| format!("--port must be an integer from 1 to 65535, got `{raw}`"))?;
+    if port == 0 {
+        return Err("--port must be an integer from 1 to 65535, got `0`".to_string());
+    }
+    Ok(Some(port))
+}
+
+fn parse_discovery_port_or_exit(args: &[String]) -> u16 {
+    match parse_discovery_port(args) {
+        Ok(Some(port)) => port,
+        Ok(None) => DEFAULT_SERVE_PORT,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn reject_bind_and_port(args: &[String]) -> Result<(), String> {
+    if has_flag(args, "--bind") && has_flag(args, "--port") {
+        Err("--bind and --port are mutually exclusive".to_string())
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -3871,6 +3925,41 @@ backup = "agy"
             "--no-discover"
         ));
         assert!(!has_flag(&argv(&["ensemble", "run", "x"]), "--no-discover"));
+    }
+
+    #[test]
+    fn parse_discovery_port_accepts_valid_port() {
+        assert_eq!(
+            parse_discovery_port(&argv(&["ensemble", "mesh", "--port", "8788"])).unwrap(),
+            Some(8788)
+        );
+        assert_eq!(
+            parse_discovery_port(&argv(&["ensemble", "mesh"])).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_discovery_port_rejects_invalid_values() {
+        let err = parse_discovery_port(&argv(&["ensemble", "nodes", "--port", "abc"])).unwrap_err();
+        assert!(err.contains("--port must be an integer"));
+
+        let err = parse_discovery_port(&argv(&["ensemble", "nodes", "--port", "0"])).unwrap_err();
+        assert!(err.contains("1 to 65535"));
+    }
+
+    #[test]
+    fn reject_bind_and_port_rejects_ambiguous_runtime_bind() {
+        let err = reject_bind_and_port(&argv(&[
+            "ensemble",
+            "up",
+            "--bind",
+            "100.64.0.1:9999",
+            "--port",
+            "8788",
+        ]))
+        .unwrap_err();
+        assert!(err.contains("mutually exclusive"));
     }
 
     #[test]
@@ -4262,7 +4351,46 @@ node = "http://m2:7878"
 
         assert_eq!(parsed.exe, cwd.join("bin/ensemble"));
         assert_eq!(parsed.bind.as_deref(), Some("100.64.0.1:7878"));
+        assert_eq!(parsed.port, None);
         assert_eq!(parsed.token.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn serve_service_config_persists_explicit_port() {
+        let cwd = test_abs("cwd");
+        let default_exe = test_abs("bin").join("ensemble");
+        let parsed = build_serve_service_config(
+            &argv(&["ensemble", "serve", "--install-service", "--port", "8788"]),
+            default_exe.clone(),
+            &cwd,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.exe, default_exe);
+        assert_eq!(parsed.bind, None);
+        assert_eq!(parsed.port, Some(8788));
+    }
+
+    #[test]
+    fn serve_service_config_rejects_bind_plus_port() {
+        let cwd = test_abs("cwd");
+        let default_exe = test_abs("bin").join("ensemble");
+        let err = build_serve_service_config(
+            &argv(&[
+                "ensemble",
+                "serve",
+                "--install-service",
+                "--bind",
+                "100.64.0.1:7878",
+                "--port",
+                "8788",
+            ]),
+            default_exe,
+            &cwd,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("--bind and --port are mutually exclusive"));
     }
 
     #[test]
@@ -4278,6 +4406,7 @@ node = "http://m2:7878"
 
         assert_eq!(parsed.exe, default_exe);
         assert_eq!(parsed.bind, None);
+        assert_eq!(parsed.port, None);
         assert_eq!(
             parsed.token, None,
             "service install should bake only an explicit --token, not the caller's ambient env"

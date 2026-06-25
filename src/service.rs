@@ -8,6 +8,7 @@ pub const SYSTEMD_UNIT_NAME: &str = "ensemble.service";
 pub struct ServeServiceConfig {
     pub exe: PathBuf,
     pub bind: Option<String>,
+    pub port: Option<u16>,
     pub token: Option<String>,
 }
 
@@ -16,6 +17,10 @@ pub fn serve_program_args(cfg: &ServeServiceConfig) -> Vec<String> {
     if let Some(bind) = cfg.bind.as_deref().filter(|s| !s.trim().is_empty()) {
         args.push("--bind".to_string());
         args.push(bind.to_string());
+    }
+    if let Some(port) = cfg.port {
+        args.push("--port".to_string());
+        args.push(port.to_string());
     }
     if let Some(token) = cfg.token.as_deref().filter(|s| !s.trim().is_empty()) {
         args.push("--token".to_string());
@@ -203,6 +208,7 @@ mod tests {
         ServeServiceConfig {
             exe: PathBuf::from(exe),
             bind: None,
+            port: None,
             token: None,
         }
     }
@@ -220,6 +226,7 @@ mod tests {
         let cfg = ServeServiceConfig {
             exe: PathBuf::from("/opt/ensemble/bin/ensemble"),
             bind: Some("100.64.0.1:7878".to_string()),
+            port: None,
             token: Some("secret".to_string()),
         };
 
@@ -234,6 +241,7 @@ mod tests {
         let cfg = ServeServiceConfig {
             exe: PathBuf::from(r"C:\Program Files\ensemble\ensemble.exe"),
             bind: Some("100.64.0.1:7878".to_string()),
+            port: None,
             token: None,
         };
 
@@ -275,6 +283,7 @@ mod tests {
         let cfg = ServeServiceConfig {
             exe: PathBuf::from("/Applications/Ensemble Bin/ensemble"),
             bind: Some("100.64.0.1:7878".to_string()),
+            port: None,
             token: None,
         };
         let plist = launchd_plist(&cfg);
@@ -305,6 +314,7 @@ mod tests {
         let cfg = ServeServiceConfig {
             exe: PathBuf::from("/home/dev/Ensemble Bin/ensemble"),
             bind: Some("100.64.0.1:7878".to_string()),
+            port: None,
             token: None,
         };
         let unit = systemd_unit(&cfg);
@@ -323,12 +333,32 @@ mod tests {
         let cfg = ServeServiceConfig {
             exe: PathBuf::from("/home/dev/%bin/$ensemble"),
             bind: None,
+            port: None,
             token: Some("abc%H$USER".to_string()),
         };
         let unit = systemd_unit(&cfg);
 
         assert!(unit
             .contains("ExecStart=\"/home/dev/%%bin/$$ensemble\" serve --token \"abc%%H$$USER\""));
+    }
+
+    #[test]
+    fn serve_args_include_non_default_port_when_requested() {
+        let cfg = ServeServiceConfig {
+            exe: PathBuf::from("/opt/ensemble/bin/ensemble"),
+            bind: None,
+            port: Some(8788),
+            token: Some("secret".to_string()),
+        };
+
+        assert_eq!(
+            serve_program_args(&cfg),
+            vec!["serve", "--port", "8788", "--token", "secret"]
+        );
+        assert!(windows_install_argv(&cfg).contains(&format!(
+            "{} serve --port 8788 --token secret",
+            cfg.exe.display()
+        )));
     }
 
     #[test]
