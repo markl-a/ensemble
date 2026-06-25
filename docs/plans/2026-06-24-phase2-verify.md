@@ -57,6 +57,8 @@ pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo D:\Projects\ensemble -Team
 - 執行 `ensemble run`，檢查輸出包含 `LANDED` 或 `ESCALATED`
 - `ensemble watch <watch> --since 0` 至少可讀取回溯訊息
 - `ensemble steer` 與 `ensemble abort` 可行，且 `.ensemble/control/<watch>.ndjson` 可看到對應控制事件
+- Hermetic regression：`cargo test --test cross_machine`
+  會用 in-process `serve` + `RemoteAdapter` 驗證遠端 codex implementer、遠端 claude/agy reviewers、test gate、`min_approvals = 2` 的治理路徑；同時覆蓋 red test gate 不可 land、同 vendor reviewer 不能湊滿 Phase 2 quorum 的負案例
 
 只測 Slice B governance，不啟動 AI run：
 

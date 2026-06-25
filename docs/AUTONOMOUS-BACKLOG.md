@@ -161,6 +161,13 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-25 — **Phase 2 Slice B now has hermetic remote-governance coverage.**
+  `tests/cross_machine.rs` starts in-process `ensemble serve` nodes and drives the conductor
+  through `RemoteAdapter` for the HTTP/git-sync path. Positive coverage proves a remote codex
+  implementer lands only after a real test-gate pass and two distinct remote reviewer verdicts
+  (`claude` + `agy`). Negative coverage proves a red test gate escalates before reviewers run,
+  and two reviewer roles backed by the same vendor do not satisfy `min_approvals = 2`. This is
+  still not the real 5-node Slice B/C/D acceptance; those remain operator/fleet-run work.
 - 2026-06-25 — **Phase 2 Slice B now preflights governance before a run.**
   New `ensemble crew inspect [--crew <path>] [--json]` uses the Rust TOML parser to expose the
   pipeline, min approvals, test command, reviewer agents, distinct reviewer count, and explicit
