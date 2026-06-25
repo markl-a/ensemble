@@ -461,10 +461,14 @@ function Run-SliceD {
         if (-not $SkipCleanSmoke) {
             $smokeExe = Join-Path $TargetDir "release/ensemble.exe"
             if (Test-Path -LiteralPath $smokeExe) {
-                pwsh -NoProfile -File $smokeScript -NoBuild -Repo $Repo -SmokeRoot $SmokeRoot -TargetDir $TargetDir -TimeoutSecs $SmokeTimeoutSecs
+                pwsh -NoProfile -File $smokeScript `
+                    -NoBuild -Repo $Repo -SmokeRoot $SmokeRoot -TargetDir $TargetDir `
+                    -Reviewers "claude" -AllowEscalatedRun -TimeoutSecs $SmokeTimeoutSecs
             } else {
                 Write-Host "release binary missing under $TargetDir; running smoke without -NoBuild to build once." -ForegroundColor Yellow
-                pwsh -NoProfile -File $smokeScript -Repo $Repo -SmokeRoot $SmokeRoot -TargetDir $TargetDir -TimeoutSecs $SmokeTimeoutSecs
+                pwsh -NoProfile -File $smokeScript `
+                    -Repo $Repo -SmokeRoot $SmokeRoot -TargetDir $TargetDir `
+                    -Reviewers "claude" -AllowEscalatedRun -TimeoutSecs $SmokeTimeoutSecs
             }
         } else {
             Write-Host "SkipCleanSmoke enabled, skipping smoke command."

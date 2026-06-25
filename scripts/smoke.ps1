@@ -14,6 +14,7 @@
 #   pwsh D:\Projects\ensemble\scripts\smoke.ps1 -Reviewers claude,agy -TimeoutSecs 240
 #   pwsh D:\Projects\ensemble\scripts\smoke.ps1 -Task "Create RESULT.txt with SINGLE_MACHINE_MULTI_AI_OK" -ProbeAgents
 #   pwsh D:\Projects\ensemble\scripts\smoke.ps1 -PreflightOnly
+#   pwsh D:\Projects\ensemble\scripts\smoke.ps1 -Reviewers codex,claude -AllowEscalatedRun
 
 param(
     [string]$Task = "Create or overwrite RESULT.txt with exactly one line: SINGLE_MACHINE_MULTI_AI_OK. Do not modify any other file.",
@@ -32,7 +33,8 @@ param(
     [switch]$PreflightOnly,
     [switch]$SkipLauncherDryRun,
     [switch]$SkipAgyWrapper,
-    [switch]$SkipSupervisor
+    [switch]$SkipSupervisor,
+    [switch]$AllowEscalatedRun
 )
 
 $ErrorActionPreference = "Stop"
@@ -115,6 +117,10 @@ function Assert-Contains([string]$Title, [string]$Text, [string]$Needle) {
     if (-not $Text.Contains($Needle)) {
         Fail "$Title did not contain expected text: $Needle"
     }
+}
+
+function Contains-RunOutcome([string]$Text, [string]$Kind) {
+    return $Text -match [regex]::Escape($Kind)
 }
 
 function Invoke-WithProcessEnv([string]$Name, [string]$Value, [scriptblock]$Body) {
@@ -423,6 +429,15 @@ $(Toml-AgentTimeouts -Agents $uniqueAgents -Timeout $TimeoutSecs)
     }
 
     $governedRun = Invoke-EnsembleCapture "governed multi-AI run" $runArgs "governed-run.txt" -AllowFailure
+    $governedRunText = "$($governedRun.Stdout)`n$($governedRun.Stderr)"
+    $runLanded = Contains-RunOutcome $governedRunText "LANDED"
+    $runEscalated = Contains-RunOutcome $governedRunText "ESCALATED"
+
+    if (-not $runLanded -and -not $runEscalated) {
+        if ($governedRun.Code -ne 0) {
+            Fail "governed multi-AI run did not produce a terminal LANDED or ESCALATED state"
+        }
+    }
 
     Invoke-EnsembleCapture "watch transcript render" @("watch", $Watch, "--repo", ".") "watch-transcript.txt" -AllowFailure | Out-Null
 
@@ -456,24 +471,44 @@ $(Toml-AgentTimeouts -Agents $uniqueAgents -Timeout $TimeoutSecs)
     Write-Utf8File (Join-Path $ArtifactDir "git-log.final.txt") (($finalLog | Out-String).TrimEnd())
 
     if ($governedRun.Code -ne 0) {
-        Fail "governed multi-AI run failed with exit $($governedRun.Code); artifacts recorded under $ArtifactDir"
+        if ($AllowEscalatedRun -and $runEscalated) {
+            Write-Host "  run escalated; continuing by design because -AllowEscalatedRun is set." -ForegroundColor Yellow
+        } else {
+            Fail "governed multi-AI run failed with exit $($governedRun.Code); artifacts recorded under $ArtifactDir"
+        }
+    }
+
+    if (-not $runLanded -and -not $AllowEscalatedRun) {
+        Fail "governed multi-AI run did not land."
+    }
+
+    if ($runEscalated -and -not $AllowEscalatedRun) {
+        Fail "governed multi-AI run escalated instead of landing."
     }
 
     if (-not $NoMerge) {
-        if (-not (Test-Path "RESULT.txt")) {
-            Fail "RESULT.txt was not merged onto main"
-        }
-        $result = Get-Content -LiteralPath "RESULT.txt" -Raw
-        if ($result -notmatch "SINGLE_MACHINE_MULTI_AI_OK") {
-            Fail "RESULT.txt does not contain SINGLE_MACHINE_MULTI_AI_OK"
+        if ($runLanded) {
+            if (-not (Test-Path "RESULT.txt")) {
+                Fail "RESULT.txt was not merged onto main"
+            }
+            $result = Get-Content -LiteralPath "RESULT.txt" -Raw
+            if ($result -notmatch "SINGLE_MACHINE_MULTI_AI_OK") {
+                Fail "RESULT.txt does not contain SINGLE_MACHINE_MULTI_AI_OK"
+            }
+        } elseif ($AllowEscalatedRun) {
+            Write-Host "  skipping RESULT.txt merge assertions because run escalated." -ForegroundColor Yellow
+        } else {
+            Fail "run landed false and merge was requested."
         }
         $dirty = git status --porcelain
         if ($LASTEXITCODE -ne 0) {
             Fail "git status failed with exit $LASTEXITCODE"
         }
-        if ($dirty) {
+        if ($dirty -and -not ($AllowEscalatedRun -and $runEscalated)) {
             Fail "smoke repo is dirty after auto-merge:`n$dirty"
         }
+    } else {
+        Write-Host "  merged assertions skipped by -NoMerge." -ForegroundColor DarkGray
     }
 } finally {
     Pop-Location

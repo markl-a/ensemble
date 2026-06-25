@@ -72,7 +72,7 @@ pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo D:\Projects\ensemble -Team
 2. `install.ps1`
 3. `ensemble up`（背景執行，確認可啟動且不立即結束）
 4. `ensemble mesh`、`ensemble nodes`
-5. `smoke.ps1 -PreflightOnly`
+5. `smoke.ps1 -Reviewers claude -AllowEscalatedRun`
 6. `uninstall.ps1`
 
 對應腳本入口：

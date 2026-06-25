@@ -261,6 +261,8 @@ pub struct WatchArgs {
     pub member: Option<String>,
     pub repo: Option<String>,
     pub node: Option<String>,
+    pub team: Option<String>,
+    pub json: bool,
     pub since: usize,
     pub follow: bool,
 }
@@ -273,6 +275,8 @@ pub fn parse_watch_args(args: &[String]) -> WatchArgs {
         member: None,
         repo: None,
         node: None,
+        team: None,
+        json: false,
         since: 0,
         follow: false,
     };
@@ -287,12 +291,20 @@ pub fn parse_watch_args(args: &[String]) -> WatchArgs {
                 out.node = args.get(i + 1).cloned();
                 i += 2;
             }
+            "--team" => {
+                out.team = args.get(i + 1).cloned();
+                i += 2;
+            }
             "--token" => {
                 i += 2;
             }
             "--since" => {
                 out.since = args.get(i + 1).and_then(|s| s.parse().ok()).unwrap_or(0);
                 i += 2;
+            }
+            "--json" => {
+                out.json = true;
+                i += 1;
             }
             "--follow" => {
                 out.follow = true;
@@ -547,12 +559,33 @@ mod tests {
             "/r",
             "--node",
             "macbook",
+            "--team",
+            "ops",
         ]));
         assert_eq!(w.member.as_deref(), Some("claude@z13"));
         assert_eq!(w.since, 5);
         assert!(w.follow);
         assert_eq!(w.repo.as_deref(), Some("/r"));
         assert_eq!(w.node.as_deref(), Some("macbook"));
+        assert_eq!(w.team.as_deref(), Some("ops"));
+    }
+
+    #[test]
+    fn parse_watch_args_json_mode() {
+        let w = parse_watch_args(&argv(&[
+            "ensemble",
+            "watch",
+            "cli@node",
+            "--json",
+            "--team",
+            "team-main",
+            "--since",
+            "7",
+        ]));
+        assert_eq!(w.member.as_deref(), Some("cli@node"));
+        assert!(w.json);
+        assert_eq!(w.team.as_deref(), Some("team-main"));
+        assert_eq!(w.since, 7);
     }
 
     #[test]

@@ -31,7 +31,7 @@ const USAGE: &str = "usage:\n  \
     ensemble mcp install --client <claude|codex|opencode> [--repo <p>] [--team <name>] [--name <id>] [--exe <p>] [--crew <p>] [--config <p>] [--print]   (one-click: register `ensemble mcp` into that CLI's config)\n  \
     ensemble mcp uninstall --client <claude|codex|opencode> [--repo <p>] [--config <p>] [--print]   (remove ensemble's MCP entry from that CLI's config)\n  \
     ensemble team <status|say|inbox> [--repo <path>] [--team <name>] [--node <host|url>] [--token <token>] [--json]   (inspect and post to the team board)\n  \
-    ensemble watch <member[@node]> [--repo <path>] [--node <host|url>] [--token <token>] [--since <n>] [--follow]   (tail a live member's stream feed)\n  \
+    ensemble watch <member[@node]> [--repo <path>] [--node <host|url>] [--team <name>] [--token <token>] [--since <n>] [--follow] [--json]   (tail a live member's stream feed)\n  \
     ensemble supervise <name> [--repo <path>] [--team <name>] [--agent claude] [--since <n>] [--json] [--apply-steer] [--abort-on-critical]   (ask an AI to inspect recent team/run evidence)\n  \
     ensemble steer <name[@node]> \"<prompt>\" [--repo <path>] [--node <host|url>] [--token <token>]   (inject a redirect into a live --watch run's next round)\n  \
     ensemble abort <name[@node]> [--hard] [--repo <path>] [--node <host|url>] [--token <token>]   (stop a live --watch run; --hard kills the running CLI now)\n  \
@@ -156,12 +156,13 @@ fn up_cmd(args: &[String]) {
     }
 }
 
-/// `ensemble watch <member[@node]> [--repo <p>] [--node <host|url>] [--since <n>] [--follow]` — tail a member's stream feed
+/// `ensemble watch <member[@node]> [--repo <p>] [--node <host|url>] [--team <name>] [--token <token>] [--since <n>] [--follow] [--json]` — tail a member's stream feed
 /// (.ensemble/stream/<member>.ndjson), rendering each event. Read-only. `--follow` polls for new events
 /// until Ctrl-C.
 fn watch_cmd(args: &[String]) {
     require_value_if_present(args, "--repo");
     require_value_if_present(args, "--node");
+    require_value_if_present(args, "--team");
     require_value_if_present(args, "--token");
     require_value_if_present(args, "--since");
     let w = ensemble::parse_watch_args(args);
@@ -169,7 +170,7 @@ fn watch_cmd(args: &[String]) {
         Some(m) => m,
         None => {
             eprintln!(
-                "usage: ensemble watch <member> [--repo <p>] [--node <host|url>] [--since <n>] [--follow]"
+                "usage: ensemble watch <member> [--repo <p>] [--node <host|url>] [--team <name>] [--since <n>] [--follow] [--json]"
             );
             std::process::exit(2);
         }
@@ -195,7 +196,11 @@ fn watch_cmd(args: &[String]) {
         use std::io::Write as _;
         let mut out = std::io::stdout().lock();
         for l in &lines {
-            writeln!(out, "{}", ensemble::render_line(l))?;
+            if w.json {
+                writeln!(out, "{l}")?;
+            } else {
+                writeln!(out, "{}", ensemble::render_line(l))?;
+            }
             *cursor += 1;
         }
         out.flush()
