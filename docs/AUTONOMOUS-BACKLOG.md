@@ -20,6 +20,16 @@ queue a recurring cron drains — **one double-gated task per tick.**
   Tailscale and pingable, but has no `7878`/`8788` listener; OpenSSH returns publickey denied and the
   Tailscale SSH wrapper is blocked by host-key strict checking, so it still needs an external login/service
   bootstrap path before full 5-node Slice C can pass.
+- **Post-bootstrap local regression refreshed:** `scripts/phase2-local-ready.ps1 -Repo D:\Projects\ensemble
+  -TargetDir D:\tmp\ensemble-phase2-local-ready-target -SmokeRoot
+  D:\tmp\ensemble-phase2-local-ready-post-phantom -AgyTimeoutSecs 1` passed Phase-1 deterministic
+  acceptance, Phantom single-machine bridge, Phase-2 Slice A/B-preflight/C-local, and the hermetic
+  `cross_machine` regression (4 tests). `scripts/phase2-verify.ps1 -Repo D:\Projects\ensemble
+  -TargetDir D:\tmp\ensemble-phase2-local-ready-target -SmokeRoot
+  D:\tmp\ensemble-phase2-slice-d-post-phantom -SkipSliceA -SkipSliceB -SkipSliceC` passed Slice D:
+  uninstall -> install -> service dry-run -> governed smoke (`codex -> test -> claude -> LANDED`) ->
+  up/mesh/nodes -> final uninstall. This proves the single-machine baseline and rebuildable install path
+  are still green after adding the Phantom bootstrap fallback.
 
 ## ▶ CURRENT FOCUS (2026-06-21) — finish Phase 1 of the two-phase plan
 Spec: `docs/specs/2026-06-20-two-phase-real-tests-design.md` + `docs/specs/2026-06-20-ensemble-mcp-design.md`.
