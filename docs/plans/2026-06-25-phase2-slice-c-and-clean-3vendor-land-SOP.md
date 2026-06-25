@@ -102,6 +102,15 @@ pwsh scripts/phase2-fleet.ps1 -InitSample -Manifest phase2-fleet.local.json
 
 `phase2-fleet.local.json` 已列入 `.gitignore`，不要提交內部路徑或機器名稱。
 
+編輯後先做 goal-shape 檢查，這一步只驗 manifest 形狀，不會寫入專案：
+
+```bash
+pwsh scripts/phase2-goal-shape.ps1 -Manifest phase2-fleet.local.json
+```
+
+通過條件：剛好 5 個 fleet nodes、conductor 在 nodes 內、主專案有 `codex`/`claude`/`agy`
+routes 且都指向 fleet nodes、剛好 4 個 satellite projects，且 satellite 的 name/team/watch 不重複。
+
 每台機器依自己的角色 materialize：
 
 ```bash
@@ -221,6 +230,7 @@ ensemble run "<可驗證的小任務>" --crew .ensemble/phase2-fleet/crew-main.g
 git pull --ff-only && cargo build --release && cargo install --path . --force
 ensemble doctor
 # 1.5) 產生本機角色 crew + 指令（第一次先 -InitSample 並編輯 manifest；Node 改成本機 alias）
+pwsh scripts/phase2-goal-shape.ps1 -Manifest phase2-fleet.local.json
 pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Materialize -PlanOnly
 # 2) 起節點
 ensemble up           # 背景/新終端

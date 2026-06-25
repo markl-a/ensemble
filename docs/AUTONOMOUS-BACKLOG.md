@@ -161,6 +161,14 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-25 — **Phase 2 Slice C now has a manifest goal-shape preflight.**
+  Added `scripts/phase2-goal-shape.ps1` to validate the real fleet manifest before operators
+  touch the five machines: exactly 5 nodes, conductor included, main codex/claude/agy routes
+  pointing at fleet nodes, exactly 4 satellites, and unique satellite name/team/watch values.
+  This catches the most likely no-manual-routing mistakes before `phase2-fleet.ps1 -Materialize`.
+  Verified with `phase2-goal-shape.ps1 -SelfTest`, `phase2-goal-shape.ps1 -Manifest
+  examples/phase2-fleet.sample.json`, and the existing `phase2-fleet.ps1 -SelfTest`.
+  Real m1~m5 `ensemble up` + main/satellite runs remain the next operator/fleet step.
 - 2026-06-25 — **Phase 2 single-machine baseline and clean reinstall passed on Windows.**
   A current release `ensemble.exe` passed `scripts/acceptance-single-machine.ps1 -NoBuild`,
   covering team status/say/inbox, watch/steer/abort, controlled codex/agy launch paths,

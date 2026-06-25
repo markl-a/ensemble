@@ -90,16 +90,18 @@ pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo <repo> -Crew <generated-cr
 - `ensemble mesh`
 - `ensemble nodes`
 - 檢查 `ensemble mesh` 中有預期 remote peers（可用 `-ExpectedFleetNodes m1,m2,m3,m4,m5 -LocalFleetNode m1`；本機 conductor 會被跳過，因為 tailnet peer discovery 不列自己）
+- `pwsh scripts\phase2-goal-shape.ps1 -Manifest phase2-fleet.local.json` 可在上機前檢查 manifest 是否符合 Phase 2 形狀：5 nodes、1 main project、4 satellites、main codex/claude/agy routes 都指向 fleet nodes
 - 若已有 `phase2-fleet.local.json`，可直接讓 verifier 印出同一份 manifest 的 Slice C plan：`-FleetManifest phase2-fleet.local.json -FleetNode m1`
 - 若要從 manifest.nodes 自動檢查 expected peers，加 `-CheckFleetManifestNodes`；本機節點可用 `-FleetNode <this-node>` 或 `-LocalFleetNode <this-node>` 排除，因為 `mesh/nodes` 不列自己
 
 手動（每台主機）：
 
-1. 所有機器：可先用 `ensemble up` 前景啟動；若要常駐，改用同一份 manifest 執行 `pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <this-node> -Service install-print -RunService` 預覽，確認後執行 `-Service install -RunService`
-2. m1 執行 `ensemble mesh` / `ensemble nodes`
-3. 每台依角色先預覽與產生 crew：`pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <m1..m5> -Materialize -PlanOnly`
-4. 確認 plan 正確後，該節點直接跑被選中的任務：`pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <m1..m5> -Materialize -RunSelected`（`-RunSelected` 必須指定非 `all` 的 `-Node`）
-5. 監控：`ensemble watch <watch-name> --follow`
+1. 編輯 manifest 後先跑 `pwsh scripts\phase2-goal-shape.ps1 -Manifest phase2-fleet.local.json`
+2. 所有機器：可先用 `ensemble up` 前景啟動；若要常駐，改用同一份 manifest 執行 `pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <this-node> -Service install-print -RunService` 預覽，確認後執行 `-Service install -RunService`
+3. m1 執行 `ensemble mesh` / `ensemble nodes`
+4. 每台依角色先預覽與產生 crew：`pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <m1..m5> -Materialize -PlanOnly`
+5. 確認 plan 正確後，該節點直接跑被選中的任務：`pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <m1..m5> -Materialize -RunSelected`（`-RunSelected` 必須指定非 `all` 的 `-Node`）
+6. 監控：`ensemble watch <watch-name> --follow`
 
 ## Slice D：clean reinstall + smoke 重建
 
@@ -124,6 +126,7 @@ pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo D:\Projects\ensemble -Skip
 ## 目前 `main` 對應腳本
 
 - `scripts/phase2-verify.ps1`（本文件對應自動切片）
+- `scripts/phase2-goal-shape.ps1`（檢查 5-node + 4 satellites manifest 形狀）
 - `docs/plans/2026-06-24-phase2-goal.md`（目標定義）
 
 若你要放進 `/goal`，可直接使用該 goal 檔中的
