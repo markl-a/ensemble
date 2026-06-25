@@ -161,6 +161,17 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-25 — **Phase 2 single-machine baseline and clean reinstall passed on Windows.**
+  A current release `ensemble.exe` passed `scripts/acceptance-single-machine.ps1 -NoBuild`,
+  covering team status/say/inbox, watch/steer/abort, controlled codex/agy launch paths,
+  bounded agy visibility, and MCP team/control tools. The governed local smoke
+  `scripts/smoke.ps1 -NoBuild -TimeoutSecs 240 -AgyTimeoutSecs 5` drove real
+  `codex -> test gate -> claude -> LANDED -> merge`, with `supervise` returning `on_track`.
+  Slice D also passed through `scripts/phase2-verify.ps1 -SkipSliceA -SkipSliceB -SkipSliceC`:
+  uninstall baseline, install, service install/uninstall dry-run, smoke, `up`, `mesh`, `nodes`,
+  and final uninstall. Post-run checks confirmed no installed `ensemble.exe` and no User PATH
+  ensemble entry remained. This proves the local baseline and clean reinstall path on this host;
+  it still does not prove the real m1~m5 Slice B/C fleet run.
 - 2026-06-25 — **Phase 2 Slice B now has hermetic remote-governance coverage.**
   `tests/cross_machine.rs` starts in-process `ensemble serve` nodes and drives the conductor
   through `RemoteAdapter` for the HTTP/git-sync path. Positive coverage proves a remote codex

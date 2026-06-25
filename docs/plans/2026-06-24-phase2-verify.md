@@ -14,6 +14,15 @@ pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo D:\Projects\ensemble
 - `git` 可用
 - `crew-main.toml`（或你自己的 `--crew`）可用於 `ensemble run`；若尚未產生，Slice B 會退回本機範例 `examples/crew-phase2.toml`
 
+## 目前已驗證的本機證據（2026-06-25）
+
+- `cargo build --release --bin ensemble --target-dir <tmp-target>` 通過
+- `scripts\acceptance-single-machine.ps1 -NoBuild -TargetDir <tmp-target> -AgyTimeoutSecs 1` 通過，覆蓋 team status/say/inbox、watch/steer/abort、MCP team/control tools、controlled codex/agy launcher、bounded agy 可見 result/flake
+- `scripts\smoke.ps1 -NoBuild -TargetDir <tmp-target> -TimeoutSecs 240 -AgyTimeoutSecs 5` 通過，實際跑出 `codex -> test gate -> claude -> LANDED -> merge`，且 `supervise` 回傳 `on_track`
+- `scripts\phase2-verify.ps1 -TargetDir <tmp-target> -SkipSliceA -SkipSliceB -SkipSliceC -UpBind 127.0.0.1:0` 通過 Slice D：baseline uninstall、install、service dry-run、smoke、up、mesh、nodes、final uninstall；結束後本機 install binary 與 User PATH entry 都已清掉
+
+這些證據只證明本機 baseline 與 clean reinstall path；真實 5-node Slice B/C 仍需在 m1~m5 fleet 上跑。
+
 ## Slice A：控制面（控制 plane）
 
 必要項：
