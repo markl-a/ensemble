@@ -161,6 +161,20 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-25 — **Phase 2 local regression + clean reinstall slice reverified on Windows.**
+  Current branch `phase2-verify-fixes` passed deterministic single-machine acceptance and the
+  local Phase 2 verifier slice: `pwsh -NoProfile -File scripts\acceptance-single-machine.ps1
+  -SmokeRoot D:\tmp\ensemble-acceptance-phase2-regression -TargetDir
+  D:\tmp\ensemble-phase2-regression-target -AgyTimeoutSecs 1` passed, including team board,
+  controlled codex/claude/opencode config previews, controlled agy launch, visible agy
+  bounded-turn `flake`, MCP team/control tools, watch, steer, and abort. Then
+  `pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo D:\Projects\ensemble -TargetDir
+  D:\tmp\ensemble-phase2-regression-target -SmokeRoot D:\tmp\ensemble-phase2-clean-smoke
+  -SkipSliceB -SkipSliceC -UpBind 127.0.0.1:0 -SmokeTimeoutSecs 180` passed Slice A and
+  Slice D: clean uninstall/install, service install/uninstall dry-run, `ensemble up`,
+  `mesh`, `nodes`, and a real codex→claude governed smoke that LANDED with supervisor
+  `on_track`. This proves the local baseline and rebuildability path after tick C; the
+  remaining Phase 2 evidence is the real 5-node Slice B/C/D run on m1~m5.
 - 2026-06-25 — **OSS onboarding tick C service install implemented on `phase2-verify-fixes`.**
   `ensemble serve --install-service|--uninstall-service` now supports Windows Task Scheduler
   (`schtasks` logon task), macOS launchd user agents, and Linux systemd user units. Install/update
