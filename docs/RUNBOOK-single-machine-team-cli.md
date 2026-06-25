@@ -283,6 +283,22 @@ previews, a controlled fake `codex` launcher, controlled `agy` launch via
 stdio tools, `watch`, `steer`, and `abort`. It does not prove that a vendor UI
 visibly exposes MCP tools; that still requires the manual terminal pass below.
 
+If Phantom Mesh is installed on the same machine, run the bridge check before
+moving to Phase 2. It verifies the path Phantom -> shell tool -> ensemble agent
+`--node local` -> local AI CLI:
+
+```powershell
+pwsh scripts\phantom-single-machine.ps1 -Repo D:\Projects\ensemble -TargetDir D:\tmp\ensemble-acceptance-phase1-target -NoBuild
+```
+
+The verifier requires both the direct ensemble call and the Phantom shell call to
+return JSON with `ok:true` and `node:"local"`. It uses a temporary `.cmd` shim
+because the current `phantom tool shell` command is sensitive to nested quotes.
+For this bridge check, keep `-Repo`, the temporary shim path, and `-Prompt`
+limited to simple shell-safe characters (`A-Z`, `a-z`, `0-9`, `_`, `.`, `/`,
+`:`, `@`, `\`, `=`, `-`); the script fails clearly if a value cannot be passed
+through that simple shell bridge.
+
 Use a scratch repo for the first personal test:
 
 ```powershell

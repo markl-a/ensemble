@@ -161,6 +161,13 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-25 — **Phantom single-machine bridge verifier added.**
+  `scripts/phantom-single-machine.ps1` checks the bridge between Phase 1 manual local testing and Phase 2
+  fleet testing: direct `ensemble agent <agent> PONG --node local --json` must return `ok:true` and
+  `node:"local"`, then `phantom tool shell` must invoke the same ensemble binary through a temporary
+  `.cmd` shim and return the same local-node JSON shape. The script deliberately fails on non-shell-safe
+  repo/prompt/shim arguments because the current Phantom shell bridge is sensitive to nested quotes. Verified
+  on this host with the release binary from `D:\tmp\ensemble-acceptance-phase1-target`.
 - 2026-06-25 — **`ensemble agent --node local` now forces the local adapter.**
   This closes an integration trap found while checking Phantom Mesh single-machine invocation:
   `ensemble agent codex ... --node local` previously tried `http://local:7878` and flaked instead

@@ -20,6 +20,7 @@ pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo D:\Projects\ensemble
 - `scripts\acceptance-single-machine.ps1 -NoBuild -TargetDir <tmp-target> -AgyTimeoutSecs 1` 通過，覆蓋 team status/say/inbox、watch/steer/abort、MCP team/control tools、controlled codex/agy launcher、bounded agy 可見 result/flake
 - `scripts\smoke.ps1 -NoBuild -TargetDir <tmp-target> -TimeoutSecs 240 -AgyTimeoutSecs 5` 通過，實際跑出 `codex -> test gate -> claude -> LANDED -> merge`，且 `supervise` 回傳 `on_track`
 - `scripts\phase2-verify.ps1 -TargetDir <tmp-target> -SkipSliceA -SkipSliceB -SkipSliceC -UpBind 127.0.0.1:0` 通過 Slice D：baseline uninstall、install、service dry-run、smoke、up、mesh、nodes、final uninstall；結束後本機 install binary 與 User PATH entry 都已清掉
+- `scripts\phantom-single-machine.ps1 -Repo D:\Projects\ensemble -TargetDir <tmp-target> -NoBuild` 通過，覆蓋 Phantom -> shell tool -> ensemble `agent --node local` -> local Codex 的單機橋接路徑；這只證明 Phantom 可在單機調用 ensemble，不等於 Phase 2 五機 fleet 已完成
 
 這些證據只證明本機 baseline 與 clean reinstall path；真實 5-node Slice B/C 仍需在 m1~m5 fleet 上跑。
 
@@ -128,6 +129,7 @@ pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo D:\Projects\ensemble -Skip
 - `scripts/phase2-verify.ps1`（本文件對應自動切片）
 - `scripts/phase2-goal-shape.ps1`（檢查 5-node + 4 satellites manifest 形狀）
 - `scripts/phase2-fleet.ps1 -PlanOnly -Json`（輸出機器可讀的 full-fleet project/command plan，供 Slice C verifier 檢查）
+- `scripts/phantom-single-machine.ps1`（在進 Phase 2 前確認 Phantom 可在單機透過 shell tool 調用 ensemble，且 `--node local` 不會誤走遠端）
 - `docs/plans/2026-06-24-phase2-goal.md`（目標定義）
 
 若你要放進 `/goal`，可直接使用該 goal 檔中的
