@@ -161,6 +161,14 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-25 — **`ensemble agent --node local` now forces the local adapter.**
+  This closes an integration trap found while checking Phantom Mesh single-machine invocation:
+  `ensemble agent codex ... --node local` previously tried `http://local:7878` and flaked instead
+  of bypassing remote routing. The fix keeps bare hosts such as `ayaneo` routed remotely, while
+  exact lowercase `local` is the explicit local escape hatch. Verified with the new bin regression test, full
+  `cargo test --bin ensemble`, `cargo test --test cross_machine`, `cargo fmt --check`, deterministic
+  single-machine acceptance, a live release-binary `agent codex PONG --node local --json` call, a
+  Phantom `tool shell` call into that release binary, and Phase 2 Slice A verifier.
 - 2026-06-25 — **Phase 2 Slice C now validates the generated full-fleet run/watch plan.**
   `scripts/phase2-fleet.ps1 -PlanOnly -Json` emits a machine-readable plan with nodes,
   projects, run/watch/service commands, team names, watch names, repos, and crew paths. Slice C

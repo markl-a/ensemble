@@ -2988,16 +2988,19 @@ fn adapters_for(crew: &CrewConfig, discover: bool) -> HashMap<String, Box<dyn Ad
 }
 
 /// Resolve a SINGLE agent to an adapter + a label for the ACTUAL target it resolved to (for
-/// `ensemble agent`). Priority: an explicit node (a full URL used verbatim, or a bare host →
-/// `http://<host>:7878`) > a discovered tailnet host (when `discover`) > the local CLI by name
-/// (label `"local"`). `None` if nothing resolves. Returning the label keeps the JSON `node` field
-/// consistent with the resolution actually performed.
+/// `ensemble agent`). Priority: an explicit node (exact `local` forces the local CLI, a full URL is
+/// used verbatim, or a bare host becomes `http://<host>:7878`) > a discovered tailnet host (when
+/// `discover`) > the local CLI by name (label `"local"`). `None` if nothing resolves. Returning the
+/// label keeps the JSON `node` field consistent with the resolution actually performed.
 fn resolve_one(
     name: &str,
     explicit_node: Option<&str>,
     discover: bool,
 ) -> Option<(Box<dyn Adapter>, String)> {
     if let Some(node) = explicit_node {
+        if is_agent_local_escape(node) {
+            return local_agent_adapter(name).map(|adapter| (adapter, "local".to_string()));
+        }
         let url = if node.starts_with("http://") || node.starts_with("https://") {
             node.to_string()
         } else {
@@ -3010,6 +3013,14 @@ fn resolve_one(
             return Some((Box::new(RemoteAdapter::new(name, url)), url.clone()));
         }
     }
+    local_agent_adapter(name).map(|adapter| (adapter, "local".to_string()))
+}
+
+fn is_agent_local_escape(node: &str) -> bool {
+    node == "local"
+}
+
+fn local_agent_adapter(name: &str) -> Option<Box<dyn Adapter>> {
     let local: Box<dyn Adapter> = match name {
         "codex" => Box::new(ExecAdapter::codex()),
         "claude" => Box::new(ExecAdapter::claude()),
@@ -3017,7 +3028,7 @@ fn resolve_one(
         "agy" => Box::new(AgyAdapter::new()),
         _ => return None,
     };
-    Some((local, "local".to_string()))
+    Some(local)
 }
 
 /// If `flag` is present in `args`, its next token must be a real value (not another `--flag`).
@@ -3064,6 +3075,7 @@ fn agent_cmd(args: &[String]) {
             // No adapter resolved — report the target we ATTEMPTED (same scheme rules as resolve_one).
             let attempted = match &explicit {
                 Some(n) if n.starts_with("http://") || n.starts_with("https://") => n.to_string(),
+                Some(n) if is_agent_local_escape(n) => "local".to_string(),
                 Some(n) => format!("http://{n}:7878"),
                 None if discover => "auto".to_string(),
                 None => "local".to_string(),
@@ -4638,6 +4650,25 @@ node = "http://m2:7878"
         // a bare host that merely starts with "http" is still a bare host (not a URL)
         let (_b, label2) = resolve_one("claude", Some("httpbox"), false).unwrap();
         assert_eq!(label2, "http://httpbox:7878");
+    }
+
+    #[test]
+    fn resolve_one_explicit_node_local_forces_local_adapter() {
+        // `--node local` is the explicit escape hatch for integrations that want to
+        // bypass discovery/remote routing and force the local CLI.
+        let (a, label) = resolve_one("codex", Some("local"), false).unwrap();
+        assert_eq!(a.name(), "codex");
+        assert_eq!(label, "local");
+    }
+
+    #[test]
+    fn resolve_one_agent_local_escape_is_exact() {
+        // For `ensemble agent`, only the exact lowercase value `local` is the local
+        // escape hatch; every other explicit node value stays an HTTP remote target.
+        let (_a, upper) = resolve_one("codex", Some("LOCAL"), false).unwrap();
+        assert_eq!(upper, "http://LOCAL:7878");
+        let (_b, spaced) = resolve_one("codex", Some(" local"), false).unwrap();
+        assert_eq!(spaced, "http:// local:7878");
     }
 
     #[test]
