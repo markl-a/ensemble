@@ -115,7 +115,7 @@ pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo <repo> -Crew <generated-cr
 - 檢查 `ensemble mesh` 中有預期 remote peers（可用 `-ExpectedFleetNodes m1,m2,m3,m4,m5 -LocalFleetNode m1`；本機 conductor 會被跳過，因為 tailnet peer discovery 不列自己）
 - `pwsh scripts\phase2-goal-shape.ps1 -Manifest phase2-fleet.local.json` 可在上機前檢查 manifest 是否符合 Phase 2 形狀：5 nodes、1 main project、4 satellites、main codex/claude/agy routes 都指向 fleet nodes
 - 若已有 `phase2-fleet.local.json`，可直接讓 verifier 驗證同一份 manifest 會生成完整 fleet plan（5 nodes、1 main run、4 satellite runs、對應 watch/service commands，且每個 generated project 都揭露 `min_approvals >= 2` 與足夠 distinct reviewers），並印出指定節點的 Slice C plan：`-FleetManifest phase2-fleet.local.json -FleetNode m1`
-- `scripts\phase2-fleet.ps1 -RunSelected -VerifyEvidence -RepeatCount 2` 會在每個 selected run 前自動抓 team/watch/control cursor，並用同一指令重跑驗證可重複性，run 後自動呼叫 `phase2-run-evidence.ps1 -ExpectTerminal <landed|escalated>`；非零 `ESCALATED` 預設仍會讓腳本失敗，若本次驗收接受 escalate 作為明確終局，需顯式加 `-AllowEscalatedRun`；若該 run 有實際介入，額外加 `-RequireControlEvidence`、`-RequireSteerEvidence` 或 `-RequireAbortEvidence`
+- `scripts\phase2-fleet.ps1 -RunSelected -VerifyEvidence -RepeatCount 2` 會先清除 selected projects 的舊 acceptance reports，再在每個 selected run 前自動抓 team/watch/control cursor，並用同一指令重跑驗證可重複性，run 後自動呼叫 `phase2-run-evidence.ps1 -ExpectTerminal <landed|escalated>`；全部 repeat 通過後，會在 generated crew 旁寫出 `<repo>/.ensemble/phase2-fleet/acceptance-<project>-<node>.json`，內容包含每次 repeat 的 terminal、exit code、cursor 與 evidence verification 結果；失敗或未驗證成功時 report 應缺席；非零 `ESCALATED` 預設仍會讓腳本失敗，若本次驗收接受 escalate 作為明確終局，需顯式加 `-AllowEscalatedRun`；若該 run 有實際介入，額外加 `-RequireControlEvidence`、`-RequireSteerEvidence` 或 `-RequireAbortEvidence`
 - 若要從 manifest.nodes 自動檢查 expected peers，加 `-CheckFleetManifestNodes`；本機節點可用 `-FleetNode <this-node>` 或 `-LocalFleetNode <this-node>` 排除，因為 `mesh/nodes` 不列自己
 
 手動（每台主機）：
@@ -124,7 +124,7 @@ pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo <repo> -Crew <generated-cr
 2. 所有機器：可先用 `ensemble up` 前景啟動；若要常駐，改用同一份 manifest 執行 `pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <this-node> -Service install-print -RunService` 預覽，確認後執行 `-Service install -RunService`
 3. m1 執行 `ensemble mesh` / `ensemble nodes`
 4. 每台依角色先預覽與產生 crew：`pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <m1..m5> -Materialize -PlanOnly`
-5. 確認 plan 正確後，該節點直接跑被選中的任務並自動收斂 evidence：`pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <m1..m5> -Materialize -RunSelected -VerifyEvidence -RepeatCount 2`（`-RunSelected` 必須指定非 `all` 的 `-Node`；`-RepeatCount 2` 是正式 Slice C rerun 驗收）
+5. 確認 plan 正確後，該節點直接跑被選中的任務並自動收斂 evidence：`pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <m1..m5> -Materialize -RunSelected -VerifyEvidence -RepeatCount 2`（`-RunSelected` 必須指定非 `all` 的 `-Node`；`-RepeatCount 2` 是正式 Slice C rerun 驗收；成功後檢查 `.ensemble/phase2-fleet/acceptance-<project>-<node>.json`）
 6. 監控：`ensemble watch <watch-name> --follow`
 
 ## Slice D：clean reinstall + smoke 重建
@@ -153,7 +153,7 @@ pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo D:\Projects\ensemble -Skip
 - `scripts/phase2-local-ready.ps1`（上五機前的本機 readiness wrapper；預設不跑 clean reinstall）
 - `scripts/phase2-run-evidence.ps1`（單一主/衛星 run 完成後，檢查 team/watch/control 證據與 board/watch 的 `LANDED` 或 `escalated: ...` 終局）
 - `scripts/phase2-goal-shape.ps1`（檢查 5-node + 4 satellites manifest 形狀）
-- `scripts/phase2-fleet.ps1 -PlanOnly -Json`（輸出機器可讀的 full-fleet project/command plan，供 Slice C verifier 檢查）
+- `scripts/phase2-fleet.ps1 -PlanOnly -Json`（輸出機器可讀的 full-fleet project/command plan，供 Slice C verifier 檢查）；`-RunSelected -VerifyEvidence -RepeatCount 2` 另會寫出 per-project acceptance report
 - `scripts/phantom-single-machine.ps1`（在進 Phase 2 前確認 Phantom 可在單機透過 shell tool 調用 ensemble，且 `--node local` 不會誤走遠端）
 - `docs/plans/2026-06-24-phase2-goal.md`（目標定義）
 

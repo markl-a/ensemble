@@ -161,6 +161,15 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-25 — **Phase 2 fleet selected runs now write acceptance reports.**
+  `scripts/phase2-fleet.ps1 -RunSelected -VerifyEvidence -RepeatCount 2` now writes
+  `<repo>/.ensemble/phase2-fleet/acceptance-<project>-<node>.json` next to the generated
+  crew after all repeats pass. The report records the selected project, node, quorum metadata,
+  repeat count, terminal result, exit code, team/watch/control cursors, and evidence-verifier
+  status for each run. Selected runs clear old acceptance reports up front, so a later failed
+  run cannot leave a stale green report behind. This gives the real m1~m5 Slice C pass a
+  machine-readable handoff artifact instead of relying on terminal scrollback. Verified with
+  `phase2-fleet.ps1 -SelfTest`.
 - 2026-06-25 — **Phase 2 fleet selected runs can now verify rerunability.**
   `scripts/phase2-fleet.ps1 -RunSelected` now accepts `-RepeatCount <n>` (default 1).
   Formal Slice C commands use `-VerifyEvidence -RepeatCount 2`, so the same selected main or

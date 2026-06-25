@@ -605,17 +605,76 @@ function Invoke-RunEvidenceVerifier($Project, $Cursors, [string]$ExpectedTermina
     }
 }
 
-function Invoke-SelectedRuns($Plan) {
-    if (-not (Get-Command ensemble -ErrorAction SilentlyContinue)) {
-        Fail "ensemble is not on PATH; install first"
+function Convert-ToReportFilePart([string]$Value) {
+    $part = [regex]::Replace($Value.ToLowerInvariant(), '[^a-z0-9._-]+', '-').Trim('-')
+    $part = [regex]::Replace($part, '^[.]+|[.]+$', '')
+    if ([string]::IsNullOrWhiteSpace($part)) {
+        return "unnamed"
     }
+    return $part
+}
+
+function Get-AcceptanceReportPath($Project) {
+    $dir = Split-Path -Parent $Project.Crew
+    $projectPart = Convert-ToReportFilePart $Project.Name
+    $nodePart = Convert-ToReportFilePart $Project.Node
+    return Join-Path $dir ("acceptance-{0}-{1}.json" -f $projectPart, $nodePart)
+}
+
+function Clear-AcceptanceReport($Project) {
+    $path = Get-AcceptanceReportPath $Project
+    if (Test-Path -LiteralPath $path -PathType Leaf) {
+        Remove-Item -LiteralPath $path -Force
+    }
+}
+
+function Write-AcceptanceReport($Project, [object[]]$Runs) {
+    $path = Get-AcceptanceReportPath $Project
+    $dir = Split-Path -Parent $path
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $report = [pscustomobject]@{
+        ok = $true
+        generatedAtUtc = [DateTimeOffset]::UtcNow.ToString("o")
+        node = $Project.Node
+        repeatCount = [int]$RepeatCount
+        verifyEvidence = [bool]$VerifyEvidence
+        allowEscalatedRun = [bool]$AllowEscalatedRun
+        requireControlEvidence = [bool]$RequireControlEvidence
+        requireSteerEvidence = [bool]$RequireSteerEvidence
+        requireAbortEvidence = [bool]$RequireAbortEvidence
+        project = [pscustomobject]@{
+            kind = $Project.Kind
+            name = $Project.Name
+            repo = $Project.Repo
+            team = $Project.Team
+            watch = $Project.Watch
+            crew = $Project.Crew
+            merge = [bool]$Project.Merge
+            minApprovals = [int]$Project.MinApprovals
+            reviewerAgents = @($Project.ReviewerAgents)
+        }
+        runs = @($Runs)
+    }
+    $report | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $path -Encoding utf8NoBOM
+    Write-Host "wrote acceptance report: $path"
+}
+
+function Invoke-SelectedRuns($Plan) {
     $projects = @($Plan.Projects | Where-Object { $_.Selected })
     if ($projects.Count -eq 0) {
         Fail "no selected run commands for node '$Node'"
     }
     foreach ($project in $projects) {
+        Clear-AcceptanceReport $project
+    }
+    if (-not (Get-Command ensemble -ErrorAction SilentlyContinue)) {
+        Fail "ensemble is not on PATH; install first"
+    }
+    $acceptanceReports = @()
+    foreach ($project in $projects) {
         $runArgs = New-RunArgs $project.Task $project.Crew $project.Repo $project.Team $project.Watch ([bool]$project.Merge)
         $cmdText = Format-Command $runArgs
+        $runReports = @()
         for ($iteration = 1; $iteration -le $RepeatCount; $iteration++) {
             Write-Host ""
             if ($RepeatCount -gt 1) {
@@ -647,13 +706,37 @@ function Invoke-SelectedRuns($Plan) {
             }
             $terminal = Get-RunTerminal $runText
             Invoke-RunEvidenceVerifier $project $cursors $terminal
+            $allowedEscalated = $false
             if ($code -ne 0) {
                 if ($terminal -eq "escalated" -and $AllowEscalatedRun) {
+                    $allowedEscalated = $true
                     Write-Host "  run escalated; continuing by design because -AllowEscalatedRun is set." -ForegroundColor Yellow
                 } else {
                     Fail "selected run failed on node '$($project.Node)' with exit code $code"
                 }
             }
+            $runReports += [pscustomobject]@{
+                iteration = [int]$iteration
+                command = $cmdText
+                exitCode = [int]$code
+                terminal = $terminal
+                evidenceVerified = $true
+                allowedEscalated = $allowedEscalated
+                teamSince = [int]$cursors.Team
+                watchSince = [int]$cursors.Watch
+                controlSince = [int]$cursors.Control
+            }
+        }
+        if ($VerifyEvidence) {
+            $acceptanceReports += [pscustomobject]@{
+                Project = $project
+                Runs    = @($runReports)
+            }
+        }
+    }
+    if ($VerifyEvidence) {
+        foreach ($report in $acceptanceReports) {
+            Write-AcceptanceReport -Project $report.Project -Runs @($report.Runs)
         }
     }
 }
@@ -960,6 +1043,236 @@ function Invoke-SelfTest {
     }
     if ($evidenceOut -notmatch '-Team sat-a') {
         Fail "self-test expected verifier to receive the selected satellite team"
+    }
+    $acceptanceReport = Join-Path (Split-Path -Parent $sat.Crew) "acceptance-sat-a-m2.json"
+    if (-not (Test-Path -LiteralPath $acceptanceReport -PathType Leaf)) {
+        Fail "self-test expected -RunSelected -VerifyEvidence -RepeatCount 2 to write a per-project acceptance report"
+    }
+    $report = Get-Content -Raw -LiteralPath $acceptanceReport | ConvertFrom-Json
+    if ($report.ok -ne $true) {
+        Fail "self-test expected acceptance report ok=true"
+    }
+    if ([int]$report.repeatCount -ne 2) {
+        Fail "self-test expected acceptance report to record repeatCount=2"
+    }
+    if (@($report.runs).Count -ne 2) {
+        Fail "self-test expected acceptance report to record both repeated runs"
+    }
+    if (@($report.runs | Where-Object { $_.terminal -eq "landed" -and $_.evidenceVerified -eq $true }).Count -ne 2) {
+        Fail "self-test expected acceptance report to record verified landed terminals"
+    }
+    if ($report.project.name -ne "sat-a" -or $report.node -ne "m2") {
+        Fail "self-test expected acceptance report to identify the selected project and node"
+    }
+    Set-Content -LiteralPath $acceptanceReport -Encoding utf8NoBOM -Value '{"ok":true,"stale":true}'
+    $fakeEvidenceFail = Join-Path $root "fake-evidence-fail.ps1"
+    Set-Content -LiteralPath $fakeEvidenceFail -Encoding utf8NoBOM -Value @(
+        "exit 42"
+    )
+    $oldPath = $env:PATH
+    $oldFakeLog = $env:ENSEMBLE_FAKE_LOG
+    $oldEvidenceScript = $env:ENSEMBLE_PHASE2_EVIDENCE_SCRIPT
+    $env:PATH = "$fakeBin$([System.IO.Path]::PathSeparator)$oldPath"
+    $env:ENSEMBLE_FAKE_LOG = $fakeLog
+    $env:ENSEMBLE_PHASE2_EVIDENCE_SCRIPT = $fakeEvidenceFail
+    try {
+        $scriptPath = if ([string]::IsNullOrWhiteSpace($PSCommandPath)) { Join-Path $PSScriptRoot "phase2-fleet.ps1" } else { $PSCommandPath }
+        $childOut = & pwsh -NoProfile -File $scriptPath -Manifest $manifestPath -Node m2 -Materialize -RunSelected -VerifyEvidence 2>&1
+        $childCode = $LASTEXITCODE
+        if ($null -eq $childCode) {
+            $childCode = 0
+        }
+        if ($childCode -eq 0) {
+            Fail "self-test expected failing evidence verifier child run to exit nonzero`n$($childOut | Out-String)"
+        }
+        if (Test-Path -LiteralPath $acceptanceReport -PathType Leaf) {
+            Fail "self-test expected failing evidence verifier child run to remove the stale acceptance report"
+        }
+    }
+    finally {
+        $env:PATH = $oldPath
+        if ($null -eq $oldFakeLog) { Remove-Item Env:\ENSEMBLE_FAKE_LOG -ErrorAction SilentlyContinue } else { $env:ENSEMBLE_FAKE_LOG = $oldFakeLog }
+        if ($null -eq $oldEvidenceScript) { Remove-Item Env:\ENSEMBLE_PHASE2_EVIDENCE_SCRIPT -ErrorAction SilentlyContinue } else { $env:ENSEMBLE_PHASE2_EVIDENCE_SCRIPT = $oldEvidenceScript }
+    }
+    $multiJson = @{
+        nodes      = @("m2")
+        conductor  = "m2"
+        main       = @{
+            repo   = $mainRepo
+            test   = "echo main"
+            routes = @{
+                codex  = "m2"
+                claude = "m2"
+                agy    = "m2"
+            }
+        }
+        satellites = @(
+            @{
+                name = "sat-a"
+                repo = $satRepo
+                node = "m2"
+                test = "echo sat"
+            }
+        )
+    } | ConvertTo-Json -Depth 6
+    $multiManifestPath = Join-Path $root "fleet-multi-selected.json"
+    Set-Content -LiteralPath $multiManifestPath -Value $multiJson -Encoding utf8NoBOM
+    $oldNodeForMulti = $script:Node
+    $script:Node = "m2"
+    try {
+        $multiPlan = New-FleetPlan (Read-FleetManifest $multiManifestPath) $root
+    }
+    finally {
+        $script:Node = $oldNodeForMulti
+    }
+    $multiReports = @($multiPlan.Projects | Where-Object { $_.Selected } | ForEach-Object { Get-AcceptanceReportPath $_ })
+    if ($multiReports.Count -ne 2) {
+        Fail "self-test expected multi-selected manifest to select two projects on m2"
+    }
+    foreach ($staleReport in $multiReports) {
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $staleReport) | Out-Null
+        Set-Content -LiteralPath $staleReport -Encoding utf8NoBOM -Value '{"ok":true,"stale":true}'
+    }
+    $emptyPath = Join-Path $root "empty-path"
+    New-Item -ItemType Directory -Force -Path $emptyPath | Out-Null
+    $pwshExe = (Get-Command pwsh -ErrorAction Stop).Source
+    $oldPath = $env:PATH
+    $env:PATH = $emptyPath
+    try {
+        $scriptPath = if ([string]::IsNullOrWhiteSpace($PSCommandPath)) { Join-Path $PSScriptRoot "phase2-fleet.ps1" } else { $PSCommandPath }
+        $childOut = & $pwshExe -NoProfile -File $scriptPath -Manifest $multiManifestPath -Node m2 -Materialize -RunSelected -VerifyEvidence 2>&1
+        $childCode = $LASTEXITCODE
+        if ($null -eq $childCode) {
+            $childCode = 0
+        }
+        if ($childCode -eq 0) {
+            Fail "self-test expected missing ensemble child run to exit nonzero`n$($childOut | Out-String)"
+        }
+        foreach ($staleReport in $multiReports) {
+            if (Test-Path -LiteralPath $staleReport -PathType Leaf) {
+                Fail "self-test expected missing ensemble preflight to remove every selected stale acceptance report"
+            }
+        }
+    }
+    finally {
+        $env:PATH = $oldPath
+    }
+    foreach ($staleReport in $multiReports) {
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $staleReport) | Out-Null
+        Set-Content -LiteralPath $staleReport -Encoding utf8NoBOM -Value '{"ok":true,"stale":true}'
+    }
+    if ($IsWindows) {
+        Set-Content -LiteralPath $fakeExe -Encoding ascii -Value @(
+            "@echo off",
+            'if "%1"=="team" (',
+            '  echo {"messages":[],"next":0}',
+            '  exit /b 0',
+            ')',
+            'echo %*>>"%ENSEMBLE_FAKE_LOG%"',
+            'exit /b 9'
+        )
+    }
+    else {
+        Set-Content -LiteralPath $fakeExe -Encoding ascii -Value @(
+            "#!/bin/sh",
+            'if [ "$1" = "team" ]; then printf ''{"messages":[],"next":0}\n''; exit 0; fi',
+            'printf ''%s\n'' "$*" >> "$ENSEMBLE_FAKE_LOG"',
+            "exit 9"
+        )
+        & chmod +x $fakeExe
+    }
+    $oldPath = $env:PATH
+    $oldFakeLog = $env:ENSEMBLE_FAKE_LOG
+    $env:PATH = "$fakeBin$([System.IO.Path]::PathSeparator)$oldPath"
+    $env:ENSEMBLE_FAKE_LOG = $fakeLog
+    try {
+        $scriptPath = if ([string]::IsNullOrWhiteSpace($PSCommandPath)) { Join-Path $PSScriptRoot "phase2-fleet.ps1" } else { $PSCommandPath }
+        $childOut = & pwsh -NoProfile -File $scriptPath -Manifest $multiManifestPath -Node m2 -Materialize -RunSelected -VerifyEvidence 2>&1
+        $childCode = $LASTEXITCODE
+        if ($null -eq $childCode) {
+            $childCode = 0
+        }
+        if ($childCode -eq 0) {
+            Fail "self-test expected multi-selected failing run child to exit nonzero`n$($childOut | Out-String)"
+        }
+        foreach ($staleReport in $multiReports) {
+            if (Test-Path -LiteralPath $staleReport -PathType Leaf) {
+                Fail "self-test expected multi-selected failing run to remove every selected stale acceptance report"
+            }
+        }
+    }
+    finally {
+        $env:PATH = $oldPath
+        if ($null -eq $oldFakeLog) { Remove-Item Env:\ENSEMBLE_FAKE_LOG -ErrorAction SilentlyContinue } else { $env:ENSEMBLE_FAKE_LOG = $oldFakeLog }
+    }
+    foreach ($staleReport in $multiReports) {
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $staleReport) | Out-Null
+        Set-Content -LiteralPath $staleReport -Encoding utf8NoBOM -Value '{"ok":true,"stale":true}'
+    }
+    $fakeRunCount = Join-Path $root "fake-run-count.txt"
+    Remove-Item -LiteralPath $fakeRunCount -ErrorAction SilentlyContinue
+    if ($IsWindows) {
+        Set-Content -LiteralPath $fakeExe -Encoding ascii -Value @(
+            "@echo off",
+            'if "%1"=="team" (',
+            '  echo {"messages":[],"next":0}',
+            '  exit /b 0',
+            ')',
+            'set count=0',
+            'if exist "%ENSEMBLE_FAKE_RUN_COUNT%" set /p count=<"%ENSEMBLE_FAKE_RUN_COUNT%"',
+            'set /a count=%count%+1',
+            '> "%ENSEMBLE_FAKE_RUN_COUNT%" echo %count%',
+            'echo %*>>"%ENSEMBLE_FAKE_LOG%"',
+            'if "%count%"=="1" (',
+            '  echo LANDED after 1 round(s)',
+            '  exit /b 0',
+            ')',
+            'exit /b 9'
+        )
+    }
+    else {
+        Set-Content -LiteralPath $fakeExe -Encoding ascii -Value @(
+            "#!/bin/sh",
+            'if [ "$1" = "team" ]; then printf ''{"messages":[],"next":0}\n''; exit 0; fi',
+            'count=0',
+            'if [ -f "$ENSEMBLE_FAKE_RUN_COUNT" ]; then count=$(cat "$ENSEMBLE_FAKE_RUN_COUNT"); fi',
+            'count=$((count + 1))',
+            'printf ''%s\n'' "$count" > "$ENSEMBLE_FAKE_RUN_COUNT"',
+            'printf ''%s\n'' "$*" >> "$ENSEMBLE_FAKE_LOG"',
+            'if [ "$count" = "1" ]; then printf ''LANDED after 1 round(s)\n''; exit 0; fi',
+            'exit 9'
+        )
+        & chmod +x $fakeExe
+    }
+    $oldPath = $env:PATH
+    $oldFakeLog = $env:ENSEMBLE_FAKE_LOG
+    $oldEvidenceScript = $env:ENSEMBLE_PHASE2_EVIDENCE_SCRIPT
+    $oldFakeRunCount = $env:ENSEMBLE_FAKE_RUN_COUNT
+    $env:PATH = "$fakeBin$([System.IO.Path]::PathSeparator)$oldPath"
+    $env:ENSEMBLE_FAKE_LOG = $fakeLog
+    $env:ENSEMBLE_PHASE2_EVIDENCE_SCRIPT = $fakeEvidence
+    $env:ENSEMBLE_FAKE_RUN_COUNT = $fakeRunCount
+    try {
+        $scriptPath = if ([string]::IsNullOrWhiteSpace($PSCommandPath)) { Join-Path $PSScriptRoot "phase2-fleet.ps1" } else { $PSCommandPath }
+        $childOut = & pwsh -NoProfile -File $scriptPath -Manifest $multiManifestPath -Node m2 -Materialize -RunSelected -VerifyEvidence 2>&1
+        $childCode = $LASTEXITCODE
+        if ($null -eq $childCode) {
+            $childCode = 0
+        }
+        if ($childCode -eq 0) {
+            Fail "self-test expected later selected project failure child to exit nonzero`n$($childOut | Out-String)"
+        }
+        foreach ($staleReport in $multiReports) {
+            if (Test-Path -LiteralPath $staleReport -PathType Leaf) {
+                Fail "self-test expected later selected project failure to leave no acceptance reports"
+            }
+        }
+    }
+    finally {
+        $env:PATH = $oldPath
+        if ($null -eq $oldFakeLog) { Remove-Item Env:\ENSEMBLE_FAKE_LOG -ErrorAction SilentlyContinue } else { $env:ENSEMBLE_FAKE_LOG = $oldFakeLog }
+        if ($null -eq $oldEvidenceScript) { Remove-Item Env:\ENSEMBLE_PHASE2_EVIDENCE_SCRIPT -ErrorAction SilentlyContinue } else { $env:ENSEMBLE_PHASE2_EVIDENCE_SCRIPT = $oldEvidenceScript }
+        if ($null -eq $oldFakeRunCount) { Remove-Item Env:\ENSEMBLE_FAKE_RUN_COUNT -ErrorAction SilentlyContinue } else { $env:ENSEMBLE_FAKE_RUN_COUNT = $oldFakeRunCount }
     }
 
     if ($IsWindows) {
