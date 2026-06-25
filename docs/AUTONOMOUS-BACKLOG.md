@@ -161,6 +161,13 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-25 — **Phase 2 verifier now does a loopback remote-control smoke for Slice A.**
+  `scripts/phase2-verify.ps1` starts a temporary loopback `ensemble serve` with an ephemeral port/token
+  during Slice A, then drives the real CLI through `--node http://127.0.0.1:<port>`.
+  It verifies remote `team status`, token-protected `team say`, token-free `team inbox`, remote `watch`,
+  and token-protected `steer`; it also checks `team --node local` and explicit `team/watch --node auto`
+  failure paths. This does not prove the real m1~m5 fleet is up, but it upgrades the cross-machine
+  control-plane evidence from unit tests to a repeatable end-to-end CLI/HTTP smoke on one machine.
 - 2026-06-25 — **Phase 2 verifier now understands the fleet manifest path.**
   `scripts/phase2-verify.ps1` accepts `-FleetManifest`, `-FleetNode`, and
   `-CheckFleetManifestNodes` for Slice C. With a manifest it now prints the same selected-node

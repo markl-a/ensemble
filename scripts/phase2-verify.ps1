@@ -103,6 +103,31 @@ function Expand-NodeList([string[]]$Nodes) {
     return $expanded
 }
 
+function Get-FreeLoopbackPort {
+    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+    $listener.Start()
+    try {
+        return ([System.Net.IPEndPoint]$listener.LocalEndpoint).Port
+    } finally {
+        $listener.Stop()
+    }
+}
+
+function Wait-HttpHealth([string]$BaseUrl, [int]$TimeoutSec = 10) {
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    $healthUrl = "$BaseUrl/health"
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $resp = Invoke-WebRequest -Uri $healthUrl -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
+            if ($resp.StatusCode -eq 200 -and ([string]$resp.Content) -match '"ok"\s*:\s*true') {
+                return
+            }
+        } catch { }
+        Start-Sleep -Milliseconds 200
+    }
+    Fail "loopback remote control serve did not become healthy at $healthUrl"
+}
+
 function Resolve-VerifyPath([string]$Path) {
     if ([System.IO.Path]::IsPathRooted($Path)) {
         return [System.IO.Path]::GetFullPath($Path)
@@ -379,6 +404,31 @@ function Run-SliceA {
                 Fail "team status reported '$($teamStatus.team)' not '$Team'"
             }
 
+            $localNodeStatus = Invoke-EnsembleCapture @(
+                "team", "status",
+                "--repo", ".",
+                "--team", $Team,
+                "--node", "local",
+                "--json"
+            ) "team status --node local" -TimeoutSec 20
+            $localNodeJson = Parse-JsonOrFail $localNodeStatus.Stdout "team status --node local"
+            if ($localNodeJson.team -ne $Team) {
+                Fail "team status --node local reported '$($localNodeJson.team)' not '$Team'"
+            }
+
+            $teamAutoErr = Invoke-EnsembleCapture @(
+                "team", "status",
+                "--repo", ".",
+                "--team", $Team,
+                "--node", "auto",
+                "--json"
+            ) "team explicit --node auto error path" -TimeoutSec 20 -AllowedExitCodes @(1, 2, 3) -AllowFailure
+            if ($teamAutoErr.Code -eq 0) {
+                Fail "team status with --node auto should fail explicitly"
+            }
+            $teamAutoText = "$($teamAutoErr.Stdout)`n$($teamAutoErr.Stderr)"
+            Assert-Contains $teamAutoText "auto is not supported" "team invalid --node"
+
             $nodesOut = Invoke-EnsembleCapture @("nodes") "nodes" -TimeoutSec 20
             Assert-NotEmpty $nodesOut.Stdout "nodes"
 
@@ -407,6 +457,143 @@ function Run-SliceA {
             }
             $autoNodeText = "$($autoNodeErr.Stdout)`n$($autoNodeErr.Stderr)"
             Assert-Contains $autoNodeText "auto is not supported" "invalid --node"
+
+            $repoRoot = (Get-Location).Path
+            $port = Get-FreeLoopbackPort
+            $bind = "127.0.0.1:$port"
+            $nodeUrl = "http://$bind"
+            $remoteToken = "phase2-loopback-token-$PID"
+            $remoteTeam = "phase2-loopback-$PID"
+            $remoteStream = "phase2-loopback-stream-$PID"
+            $remoteControl = "phase2-loopback-control-$PID"
+            $remoteTeamRoot = Join-Path $repoRoot ".ensemble/teams/$remoteTeam"
+            $serveLog = Join-Path $env:TEMP "ensemble-phase2-control-serve-$PID.log"
+            $streamFile = $null
+            $controlPath = $null
+            $serveAttempt = Start-EnsembleUp -EnsembleArgs @(
+                "serve", "--bind", $bind, "--token", $remoteToken
+            ) -WarmupSeconds 2 -Log $serveLog
+            if (-not $serveAttempt.Started) {
+                foreach ($artifact in @($serveLog, "$serveLog.err")) {
+                    if (Test-Path -LiteralPath $artifact) {
+                        Remove-Item -LiteralPath $artifact -Force -ErrorAction SilentlyContinue
+                    }
+                }
+                Fail "loopback remote control serve exited before warmup window"
+            }
+            $serveProc = $serveAttempt.Proc
+            try {
+                Wait-HttpHealth $nodeUrl 10
+
+                $remoteStatus = Invoke-EnsembleCapture @(
+                    "team", "status",
+                    "--repo", ".",
+                    "--team", $remoteTeam,
+                    "--node", $nodeUrl,
+                    "--json"
+                ) "remote team status over loopback" -TimeoutSec 20
+                $remoteStatusJson = Parse-JsonOrFail $remoteStatus.Stdout "remote team status"
+                if ($remoteStatusJson.team -ne $remoteTeam) {
+                    Fail "remote team status reported '$($remoteStatusJson.team)' not '$remoteTeam'"
+                }
+
+                $badToken = Invoke-EnsembleCapture @(
+                    "team", "say", "remote mutation with wrong token",
+                    "--repo", ".",
+                    "--team", $remoteTeam,
+                    "--node", $nodeUrl,
+                    "--token", "wrong-token"
+                ) "remote team say wrong token" -TimeoutSec 20 -AllowedExitCodes @(1, 2, 3) -AllowFailure
+                if ($badToken.Code -eq 0) {
+                    Fail "remote team say with a wrong token should fail explicitly"
+                }
+                $badTokenText = "$($badToken.Stdout)`n$($badToken.Stderr)"
+                Assert-Contains $badTokenText "Unauthorized" "remote wrong-token failure"
+
+                $remoteSay = Invoke-EnsembleCapture @(
+                    "team", "say", "remote loopback hello",
+                    "--repo", ".",
+                    "--team", $remoteTeam,
+                    "--node", $nodeUrl,
+                    "--token", $remoteToken
+                ) "remote team say with token" -TimeoutSec 20
+                Assert-Contains $remoteSay.Stdout "next=1" "remote authorized team say"
+
+                $remoteInbox = Invoke-EnsembleCapture @(
+                    "team", "inbox",
+                    "--repo", ".",
+                    "--team", $remoteTeam,
+                    "--node", $nodeUrl,
+                    "--json"
+                ) "remote team inbox over loopback" -TimeoutSec 20
+                $remoteInboxJson = Parse-JsonOrFail $remoteInbox.Stdout "remote team inbox"
+                $remoteBodies = @($remoteInboxJson.messages | ForEach-Object { [string]$_.body })
+                if ($remoteBodies -contains "remote mutation with wrong token") {
+                    Fail "remote wrong-token team say unexpectedly appeared in inbox"
+                }
+                if ($remoteBodies -notcontains "remote loopback hello") {
+                    Fail "remote team inbox did not include the token-authorized loopback message"
+                }
+
+                $streamDir = Join-Path $repoRoot ".ensemble/stream"
+                New-Item -ItemType Directory -Force -Path $streamDir | Out-Null
+                $streamFile = Join-Path $streamDir "$remoteStream.ndjson"
+                '{"from":"codex@loopback","kind":"result","body":"remote loopback stream smoke"}' |
+                    Add-Content -LiteralPath $streamFile -Encoding utf8NoBOM
+                $remoteWatch = Invoke-EnsembleCapture @(
+                    "watch", $remoteStream,
+                    "--repo", ".",
+                    "--team", $remoteTeam,
+                    "--node", $nodeUrl,
+                    "--since", "0",
+                    "--json"
+                ) "remote watch over loopback" -TimeoutSec 20
+                Assert-Contains $remoteWatch.Stdout "remote loopback stream smoke" "remote watch output"
+
+                $controlPath = Join-Path $repoRoot ".ensemble/control/$remoteControl.ndjson"
+                $badSteer = Invoke-EnsembleCapture @(
+                    "steer", $remoteControl, "remote wrong-token steer",
+                    "--repo", ".",
+                    "--node", $nodeUrl,
+                    "--token", "wrong-token"
+                ) "remote steer wrong token" -TimeoutSec 20 -AllowedExitCodes @(1, 2, 3) -AllowFailure
+                if ($badSteer.Code -eq 0) {
+                    Fail "remote steer with a wrong token should fail explicitly"
+                }
+                $badSteerText = "$($badSteer.Stdout)`n$($badSteer.Stderr)"
+                Assert-Contains $badSteerText "Unauthorized" "remote wrong-token steer failure"
+                $badSteerWritten = (Test-Path -LiteralPath $controlPath) -and `
+                    ((Get-Content -LiteralPath $controlPath -Raw) -match [regex]::Escape("remote wrong-token steer"))
+                if ($badSteerWritten) {
+                    Fail "remote wrong-token steer unexpectedly appeared in control feed"
+                }
+
+                Invoke-EnsembleCapture @(
+                    "steer", $remoteControl, "remote loopback steer",
+                    "--repo", ".",
+                    "--node", $nodeUrl,
+                    "--token", $remoteToken
+                ) "remote steer with token" -TimeoutSec 20 | Out-Null
+                if (-not (Test-Path -LiteralPath $controlPath -PathType Leaf)) {
+                    Fail "remote steer did not create expected control feed: $controlPath"
+                }
+                $controlText = Get-Content -LiteralPath $controlPath -Raw
+                Assert-Contains $controlText '"cmd":"steer"' "remote steer control feed"
+                Assert-Contains $controlText "remote loopback steer" "remote steer control feed"
+            } finally {
+                if ($serveProc) {
+                    Stop-Process -Id $serveProc.Id -Force -ErrorAction SilentlyContinue
+                    $serveProc.WaitForExit(3000) | Out-Null
+                }
+                foreach ($artifact in @($streamFile, $controlPath, $serveLog, "$serveLog.err")) {
+                    if ($artifact -and (Test-Path -LiteralPath $artifact)) {
+                        Remove-Item -LiteralPath $artifact -Force -ErrorAction SilentlyContinue
+                    }
+                }
+                if ($remoteTeamRoot -and (Test-Path -LiteralPath $remoteTeamRoot)) {
+                    Remove-Item -LiteralPath $remoteTeamRoot -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
             Write-Host "Slice A checks passed." -ForegroundColor Green
         } finally {
             Pop-Location

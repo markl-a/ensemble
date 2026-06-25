@@ -25,7 +25,13 @@ pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo D:\Projects\ensemble
 自動驗證：
 
 - `scripts/phase2-verify.ps1` 會先執行 `team status/watch/nodes`，並驗證 watch 的錯誤路由：
+  - `team status --node local` 必須強制使用本機 file-backed control plane
+  - `team status --node auto` 必須**非零失敗**，並回傳明確訊息（`--node auto is not supported`）
   - `watch codex@auto --node auto` 必須**非零失敗**，並回傳明確訊息（`--node auto is not supported`）
+- 同一個 Slice A 會啟動暫時的 loopback remote control server：
+  - `ensemble serve --bind 127.0.0.1:<free-port> --token <ephemeral>`
+  - 經由 `--node http://127.0.0.1:<port>` 驗證 remote `team status/say/inbox`、`watch`、`steer`
+  - mutation（`team say`、`steer`）必須帶正確 token；錯 token 必須明確非零失敗且包含 `Unauthorized`
 - 跨機時，若要測 `member@node`，請設定 `-RemoteNode <node>`
 
 ```powershell
