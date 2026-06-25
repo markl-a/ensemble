@@ -303,6 +303,9 @@ pub fn parse_watch_args(args: &[String]) -> WatchArgs {
                 out.team = args.get(i + 1).cloned();
                 i += 2;
             }
+            "--port" => {
+                i += 2;
+            }
             "--token" => {
                 i += 2;
             }
@@ -627,6 +630,12 @@ mod tests {
         let w = parse_watch_args(&argv(&["ensemble", "watch", "--node", "macbook"]));
         assert_eq!(w.member, None);
         assert_eq!(w.node.as_deref(), Some("macbook"));
+    }
+
+    #[test]
+    fn parse_watch_args_port_value_is_not_a_member() {
+        let w = parse_watch_args(&argv(&["ensemble", "watch", "--port", "8788", "codex@m1"]));
+        assert_eq!(w.member.as_deref(), Some("codex@m1"));
     }
 
     #[test]

@@ -42,6 +42,7 @@ pwsh -NoProfile -File scripts\phase2-local-ready.ps1 -Repo D:\Projects\ensemble
 - `ensemble team status --team <team> --json`
 - `ensemble nodes`
 - `ensemble watch <member[@node]> --team <team> --since 0`
+- 若 fleet manifest 設定 `service.port`（例如 `8788`），裸 host 與 `member@node` 控制面命令需同時加 `--port <service.port>`；explicit URL 或 `host:port` 仍以 URL/host 內的 port 為準。
 
 自動驗證：
 
@@ -49,6 +50,7 @@ pwsh -NoProfile -File scripts\phase2-local-ready.ps1 -Repo D:\Projects\ensemble
   - `team status --node local` 必須強制使用本機 file-backed control plane
   - `team status --node auto` 必須**非零失敗**，並回傳明確訊息（`--node auto is not supported`）
   - `watch codex@auto --node auto` 必須**非零失敗**，並回傳明確訊息（`--node auto is not supported`）
+  - `--port <n>` 必須套用到裸 host 與 `member@node` discovery，不可仍打預設 `7878`
 - 同一個 Slice A 會啟動暫時的 loopback remote control server：
   - `ensemble serve --bind 127.0.0.1:<free-port> --token <ephemeral>`
   - 經由 `--node http://127.0.0.1:<port>` 驗證 remote `team status/say/inbox`、`watch`、`steer`、`abort`
@@ -57,7 +59,7 @@ pwsh -NoProfile -File scripts\phase2-local-ready.ps1 -Repo D:\Projects\ensemble
 - 跨機時，若要測 `member@node`，請設定 `-RemoteNode <node>`
 
 ```powershell
-pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo D:\Projects\ensemble -Team main -RemoteNode m1
+pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo D:\Projects\ensemble -Team main -RemoteNode m1 -ServicePort 8788
 ```
 
 ## Slice B：跨機 run + intervention
@@ -115,7 +117,7 @@ pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo <repo> -Crew <generated-cr
 
 - `ensemble mesh`
 - `ensemble nodes`
-- 若 manifest 設了非預設 `service.port`（例如 Phantom 已佔用 7878 時用 8788），手動檢查需改跑 `ensemble mesh --port <port>` / `ensemble nodes --port <port>`；`phase2-fleet.ps1 -CheckNodes` 會自動使用 manifest 的 `service.port`
+- 若 manifest 設了非預設 `service.port`（例如 Phantom 已佔用 7878 時用 8788），手動檢查需改跑 `ensemble mesh --port <port>` / `ensemble nodes --port <port>`，控制面檢查也要對裸 host 或 `member@node` 加 `--port <port>`；`phase2-fleet.ps1 -CheckNodes` 與 `phase2-verify.ps1 -FleetManifest <manifest>` 會自動使用 manifest 的 `service.port`
 - 檢查 `ensemble mesh` 中有預期 remote peers（可用 `-ExpectedFleetNodes m1,m2,m3,m4,m5 -LocalFleetNode m1`；本機 conductor 會被跳過，因為 tailnet peer discovery 不列自己）
 - `pwsh scripts\phase2-goal-shape.ps1 -Manifest phase2-fleet.local.json` 可在上機前檢查 manifest 是否符合 Phase 2 形狀：5 nodes、1 main project、4 satellites、main codex/claude/agy routes 都指向 fleet nodes
 - 若已有 `phase2-fleet.local.json`，可直接讓 verifier 驗證同一份 manifest 會生成完整 fleet plan（5 nodes、1 main run、4 satellite runs、對應 watch/service commands，且每個 generated project 都揭露 `min_approvals >= 2` 與足夠 distinct reviewers），並印出指定節點的 Slice C plan：`-FleetManifest phase2-fleet.local.json -FleetNode m1`
@@ -141,7 +143,7 @@ pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo <repo> -Crew <generated-cr
 2. `install.ps1`
 3. `ensemble serve --install-service --print` 與 `ensemble serve --uninstall-service --print`（service plan dry-run，不改系統）
 4. `ensemble up`（背景執行，確認可啟動且不立即結束）
-5. `ensemble mesh`、`ensemble nodes`
+5. `ensemble mesh [--port <service.port>]`、`ensemble nodes [--port <service.port>]`
 6. `smoke.ps1 -Reviewers claude -AllowEscalatedRun`
 7. `uninstall.ps1`
 

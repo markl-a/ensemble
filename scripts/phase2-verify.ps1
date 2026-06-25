@@ -38,6 +38,7 @@ param(
     [switch]$SkipSliceD,
     [switch]$SliceBPreflightOnly,
     [switch]$SkipCleanSmoke,
+    [int]$ServicePort = 0,
     [string]$UpBind = ""
 
 )
@@ -166,11 +167,47 @@ function Read-FleetManifestInfo([string]$Path) {
     } else {
         [string]$nodes[0]
     }
-    return [pscustomobject]@{
-        Path      = $manifestPath
-        Nodes     = $nodes
-        Conductor = $conductor
+    $servicePort = 7878
+    $serviceProp = $manifest.PSObject.Properties["service"]
+    if ($null -ne $serviceProp -and $null -ne $serviceProp.Value) {
+        $portProp = $serviceProp.Value.PSObject.Properties["port"]
+        if ($null -ne $portProp -and -not [string]::IsNullOrWhiteSpace([string]$portProp.Value)) {
+            try {
+                $servicePort = [int]$portProp.Value
+            } catch {
+                Fail "fleet manifest service.port must be an integer from 1 to 65535"
+            }
+            if ($servicePort -lt 1 -or $servicePort -gt 65535) {
+                Fail "fleet manifest service.port must be an integer from 1 to 65535"
+            }
+        }
     }
+    return [pscustomobject]@{
+        Path        = $manifestPath
+        Nodes       = $nodes
+        Conductor   = $conductor
+        ServicePort = $servicePort
+    }
+}
+
+function Resolve-ServicePort {
+    if ($ServicePort -ne 0) {
+        if ($ServicePort -lt 1 -or $ServicePort -gt 65535) {
+            Fail "-ServicePort must be an integer from 1 to 65535"
+        }
+        return $ServicePort
+    }
+    if (-not [string]::IsNullOrWhiteSpace($FleetManifest)) {
+        return (Read-FleetManifestInfo $FleetManifest).ServicePort
+    }
+    return 7878
+}
+
+function New-ServicePortArgs {
+    if ($script:Phase2ServicePort -eq 7878) {
+        return @()
+    }
+    return @("--port", "$script:Phase2ServicePort")
 }
 
 function Get-JsonProp($Object, [string]$Name, $Default = $null) {
@@ -229,6 +266,8 @@ function Test-JsonCommandArgsEqual($Command, [string[]]$Expected) {
 
 function Assert-Phase2FleetGeneratedPlanShape($Plan) {
     $nodes = @(Get-JsonArray (Get-JsonProp $Plan "nodes" @()) | ForEach-Object { [string]$_ })
+    $servicePort = [int](Get-JsonProp $Plan "service_port" 7878)
+    $expectedServiceArgs = if ($servicePort -eq 7878) { @("up") } else { @("up", "--port", "$servicePort") }
     if ($nodes.Count -ne 5) {
         Fail "Phase 2 Slice C generated fleet plan must contain exactly 5 nodes; got $($nodes.Count)"
     }
@@ -254,8 +293,8 @@ function Assert-Phase2FleetGeneratedPlanShape($Plan) {
         $nodeServices = @($serviceCommands | Where-Object {
                 ([string](Get-JsonProp $_ "node" "")).Equals($fleetNode, [System.StringComparison]::OrdinalIgnoreCase)
             })
-        if ($nodeServices.Count -ne 1 -or -not (Test-JsonCommandArgsEqual $nodeServices[0] @("up"))) {
-            Fail "Phase 2 Slice C generated fleet plan must contain exactly one 'ensemble up' service command for node '$fleetNode'; got $($nodeServices.Count)"
+        if ($nodeServices.Count -ne 1 -or -not (Test-JsonCommandArgsEqual $nodeServices[0] $expectedServiceArgs)) {
+            Fail "Phase 2 Slice C generated fleet plan must contain exactly one service command '$($expectedServiceArgs -join ' ')' for node '$fleetNode'; got $($nodeServices.Count)"
         }
     }
     if ($runCommands.Count -ne 5) {
@@ -607,7 +646,8 @@ function Run-SliceA {
         Require-Tool git
         Push-Location $Repo
         try {
-        $status = Invoke-EnsembleCapture @(
+            $portArgs = @(New-ServicePortArgs)
+            $status = Invoke-EnsembleCapture @(
                 "team", "status",
                 "--repo", ".",
                 "--team", $Team,
@@ -631,20 +671,21 @@ function Run-SliceA {
                 Fail "team status --node local reported '$($localNodeJson.team)' not '$Team'"
             }
 
-            $teamAutoErr = Invoke-EnsembleCapture @(
+            $teamAutoArgs = @(
                 "team", "status",
                 "--repo", ".",
                 "--team", $Team,
                 "--node", "auto",
                 "--json"
-            ) "team explicit --node auto error path" -TimeoutSec 20 -AllowedExitCodes @(1, 2, 3) -AllowFailure
+            ) + $portArgs
+            $teamAutoErr = Invoke-EnsembleCapture $teamAutoArgs "team explicit --node auto error path" -TimeoutSec 20 -AllowedExitCodes @(1, 2, 3) -AllowFailure
             if ($teamAutoErr.Code -eq 0) {
                 Fail "team status with --node auto should fail explicitly"
             }
             $teamAutoText = "$($teamAutoErr.Stdout)`n$($teamAutoErr.Stderr)"
             Assert-Contains $teamAutoText "auto is not supported" "team invalid --node"
 
-            $nodesOut = Invoke-EnsembleCapture @("nodes") "nodes" -TimeoutSec 20
+            $nodesOut = Invoke-EnsembleCapture (@("nodes") + $portArgs) "nodes" -TimeoutSec 20
             Assert-NotEmpty $nodesOut.Stdout "nodes"
 
             $member = if ($RemoteNode) { "codex@$RemoteNode" } else { "codex@local" }
@@ -654,19 +695,21 @@ function Run-SliceA {
             } else {
                 $watchArgs += @("--node", "local")
             }
+            $watchArgs += $portArgs
             $watchResult = Invoke-EnsembleCapture $watchArgs "watch baseline" -TimeoutSec 20
             if ($watchResult.Code -ne 0) {
                 Fail "watch baseline failed (code $($watchResult.Code))"
             }
 
-            $autoNodeErr = Invoke-EnsembleCapture @(
+            $autoNodeArgs = @(
                 "watch",
                 "codex@auto",
                 "--repo", ".",
                 "--team", $Team,
                 "--since", "0",
                 "--node", "auto"
-            ) "watch explicit --node auto error path" -TimeoutSec 20 -AllowedExitCodes @(1, 2, 3) -AllowFailure
+            ) + $portArgs
+            $autoNodeErr = Invoke-EnsembleCapture $autoNodeArgs "watch explicit --node auto error path" -TimeoutSec 20 -AllowedExitCodes @(1, 2, 3) -AllowFailure
             if ($autoNodeErr.Code -eq 0) {
                 Fail "watch with --node auto should fail explicitly"
             }
@@ -687,6 +730,7 @@ function Run-SliceA {
             $serveLog = Join-Path $env:TEMP "ensemble-phase2-control-serve-$PID.log"
             $streamFile = $null
             $remoteAtStreamFile = $null
+            $remoteBareAtStreamFile = $null
             $controlPath = $null
             $remoteAtControlPath = $null
             $serveAttempt = Start-EnsembleUp -EnsembleArgs @(
@@ -781,6 +825,20 @@ function Run-SliceA {
                     "--json"
                 ) "remote watch through member@node suffix" -TimeoutSec 20
                 Assert-Contains $remoteAtWatch.Stdout "remote member-at-node stream smoke" "remote member@node watch output"
+
+                $remoteBareAtStream = "$remoteStream@$loopbackHost"
+                $remoteBareAtStreamFile = Get-StreamFeedPath $repoRoot $remoteBareAtStream
+                '{"from":"codex@loopback","kind":"result","body":"remote member-at-bare-node port smoke"}' |
+                    Add-Content -LiteralPath $remoteBareAtStreamFile -Encoding utf8NoBOM
+                $remoteBareAtWatch = Invoke-EnsembleCapture @(
+                    "watch", $remoteBareAtStream,
+                    "--repo", ".",
+                    "--team", $remoteTeam,
+                    "--since", "0",
+                    "--port", "$port",
+                    "--json"
+                ) "remote watch through member@bare-node plus --port" -TimeoutSec 20
+                Assert-Contains $remoteBareAtWatch.Stdout "remote member-at-bare-node port smoke" "remote member@bare-node --port watch output"
 
                 $controlPath = Join-Path $repoRoot ".ensemble/control/$remoteControl.ndjson"
                 $badSteer = Invoke-EnsembleCapture @(
@@ -901,7 +959,7 @@ function Run-SliceA {
                     Stop-Process -Id $serveProc.Id -Force -ErrorAction SilentlyContinue
                     $serveProc.WaitForExit(3000) | Out-Null
                 }
-                foreach ($artifact in @($streamFile, $remoteAtStreamFile, $controlPath, $remoteAtControlPath, $serveLog, "$serveLog.err")) {
+                foreach ($artifact in @($streamFile, $remoteAtStreamFile, $remoteBareAtStreamFile, $controlPath, $remoteAtControlPath, $serveLog, "$serveLog.err")) {
                     if ($artifact -and (Test-Path -LiteralPath $artifact)) {
                         Remove-Item -LiteralPath $artifact -Force -ErrorAction SilentlyContinue
                     }
@@ -1054,11 +1112,12 @@ function Run-SliceB {
 
 function Run-SliceC {
     Step "Slice C: fleet visibility check" {
-        $mesh = Invoke-EnsembleCapture @("mesh") "mesh" -TimeoutSec 20
+        $portArgs = @(New-ServicePortArgs)
+        $mesh = Invoke-EnsembleCapture (@("mesh") + $portArgs) "mesh" -TimeoutSec 20
         if ($mesh.Code -ne 0) {
             Fail "mesh failed"
         }
-        $nodes = Invoke-EnsembleCapture @("nodes") "nodes" -TimeoutSec 20
+        $nodes = Invoke-EnsembleCapture (@("nodes") + $portArgs) "nodes" -TimeoutSec 20
         if ($nodes.Code -ne 0) {
             Fail "nodes failed"
         }
@@ -1102,7 +1161,8 @@ function Run-SliceC {
             }
         }
         Write-Host "Slice C note: full 5-node restart/run loop still needs per-host terminal execution." -ForegroundColor Yellow
-        Write-Host "  m1~m5: run 'ensemble up'; confirm m1 local CLIs and remote peers via mesh, with nodes as an agent-route helper." -ForegroundColor Yellow
+        $upHint = if ($script:Phase2ServicePort -eq 7878) { "ensemble up" } else { "ensemble up --port $script:Phase2ServicePort" }
+        Write-Host "  m1~m5: run '$upHint'; confirm m1 local CLIs and remote peers via mesh, with nodes as an agent-route helper." -ForegroundColor Yellow
         Write-Host "Slice C local checks passed (mesh/nodes runnable)." -ForegroundColor Green
     }
 }
@@ -1158,7 +1218,8 @@ function Run-SliceD {
         }
 
         Write-Host "-> service install/uninstall dry-run" -ForegroundColor DarkGray
-        Invoke-EnsembleCapture @("serve", "--install-service", "--print") "serve service install plan" -TimeoutSec 20 | Out-Null
+        $portArgs = @(New-ServicePortArgs)
+        Invoke-EnsembleCapture (@("serve", "--install-service") + $portArgs + @("--print")) "serve service install plan" -TimeoutSec 20 | Out-Null
         Invoke-EnsembleCapture @("serve", "--uninstall-service", "--print") "serve service uninstall plan" -TimeoutSec 20 | Out-Null
 
         Write-Host "-> smoke preflight using installed command" -ForegroundColor DarkGray
@@ -1196,8 +1257,11 @@ function Run-SliceD {
         Write-Host "-> up reachability check" -ForegroundColor DarkGray
         $upLog = Join-Path $SmokeRoot "ensemble-up.log"
 
-        $upArgs = @("up")
+        $upArgs = @("up") + $portArgs
         if ($UpBind) {
+            if ($portArgs.Count -gt 0) {
+                Fail "-UpBind cannot be combined with a non-default service port; pass a full bind or omit -ServicePort/FleetManifest for this Slice D run"
+            }
             $upArgs += @("--bind", $UpBind)
         }
 
@@ -1224,8 +1288,8 @@ function Run-SliceD {
         Stop-Process -Id $upProc.Id -Force -ErrorAction SilentlyContinue
         $upProc.WaitForExit(3000) | Out-Null
 
-        Invoke-EnsembleCapture @("mesh") "mesh (post-reinstall)" -TimeoutSec 20 | Out-Null
-        Invoke-EnsembleCapture @("nodes") "nodes (post-reinstall)" -TimeoutSec 20 | Out-Null
+        Invoke-EnsembleCapture (@("mesh") + $portArgs) "mesh (post-reinstall)" -TimeoutSec 20 | Out-Null
+        Invoke-EnsembleCapture (@("nodes") + $portArgs) "nodes (post-reinstall)" -TimeoutSec 20 | Out-Null
 
         Write-Host "-> uninstall again" -ForegroundColor DarkGray
         pwsh -NoProfile -File $uninstallScript
@@ -1243,6 +1307,11 @@ if (-not (Test-Path -LiteralPath (Join-Path $Repo ".") )) {
 $resolvedEnsemble = Get-EnsembleCmd
 if (-not $resolvedEnsemble) {
     Write-Host "warning: ensemble not yet on PATH; this script can still proceed with slice D using install scripts." -ForegroundColor Yellow
+}
+
+$script:Phase2ServicePort = Resolve-ServicePort
+if ($script:Phase2ServicePort -ne 7878) {
+    Write-Host "Phase 2 verifier using ensemble service port $script:Phase2ServicePort" -ForegroundColor DarkGray
 }
 
 if (-not $SkipSliceA) { Run-SliceA }

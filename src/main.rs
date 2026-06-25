@@ -34,11 +34,11 @@ const USAGE: &str = "usage:\n  \
     ensemble mcp [--repo <path>] [--team <name>] [--name <agent>] [--crew <crew.toml>]   (stdio MCP server: make a LIVE CLI a crew member — mesh + board + queue + worktree + merge + run)\n  \
     ensemble mcp install --client <claude|codex|opencode> [--repo <p>] [--team <name>] [--name <id>] [--exe <p>] [--crew <p>] [--config <p>] [--print]   (one-click: register `ensemble mcp` into that CLI's config)\n  \
     ensemble mcp uninstall --client <claude|codex|opencode> [--repo <p>] [--config <p>] [--print]   (remove ensemble's MCP entry from that CLI's config)\n  \
-    ensemble team <status|say|inbox> [--repo <path>] [--team <name>] [--node <host|url>] [--token <token>] [--json]   (inspect and post to the team board)\n  \
-    ensemble watch <member[@node]> [--repo <path>] [--node <host|url>] [--team <name>] [--token <token>] [--since <n>] [--follow] [--json]   (tail a live member's stream feed)\n  \
+  ensemble team <status|say|inbox> [--repo <path>] [--team <name>] [--node <host|url>] [--port <n>] [--token <token>] [--json]   (inspect and post to the team board)\n  \
+  ensemble watch <member[@node]> [--repo <path>] [--node <host|url>] [--port <n>] [--team <name>] [--token <token>] [--since <n>] [--follow] [--json]   (tail a live member's stream feed)\n  \
     ensemble supervise <name> [--repo <path>] [--team <name>] [--agent claude] [--since <n>] [--json] [--apply-steer] [--abort-on-critical]   (ask an AI to inspect recent team/run evidence)\n  \
-    ensemble steer <name[@node]> \"<prompt>\" [--repo <path>] [--node <host|url>] [--token <token>]   (inject a redirect into a live --watch run's next round)\n  \
-    ensemble abort <name[@node]> [--hard] [--repo <path>] [--node <host|url>] [--token <token>]   (stop a live --watch run; --hard kills the running CLI now)\n  \
+  ensemble steer <name[@node]> \"<prompt>\" [--repo <path>] [--node <host|url>] [--port <n>] [--token <token>]   (inject a redirect into a live --watch run's next round)\n  \
+  ensemble abort <name[@node]> [--hard] [--repo <path>] [--node <host|url>] [--port <n>] [--token <token>]   (stop a live --watch run; --hard kills the running CLI now)\n  \
     ensemble all \"<prompt>\" [--repo <path>] [--no-discover] [--json]   (COUNCIL: fan one prompt to EVERY reachable CLI, side-by-side replies)\n\n\
     run/run-many/dispatch auto-discover tailnet `serve` hosts for any agent without an explicit\n  \
     [agents.<n>] node = ... in crew.toml; pass --no-discover to stay local.";
@@ -732,25 +732,27 @@ fn command_output_text(output: &std::process::Output) -> String {
 fn watch_cmd(args: &[String]) {
     require_value_if_present(args, "--repo");
     require_value_if_present(args, "--node");
+    require_value_if_present(args, "--port");
     require_value_if_present(args, "--team");
     require_value_if_present(args, "--token");
     require_value_if_present(args, "--since");
+    let port = parse_control_port_or_exit(args);
     let w = ensemble::parse_watch_args(args);
     let member = match w.member {
         Some(m) => m,
         None => {
             eprintln!(
-                "usage: ensemble watch <member> [--repo <p>] [--node <host|url>] [--team <name>] [--since <n>] [--follow] [--json]"
+                "usage: ensemble watch <member> [--repo <p>] [--node <host|url>] [--port <n>] [--team <name>] [--since <n>] [--follow] [--json]"
             );
             std::process::exit(2);
         }
     };
-    let routed = route_control_member_discovering(&member, w.node.as_deref());
+    let routed = route_control_member_discovering(&member, w.node.as_deref(), port);
     let repo = w.repo.map(std::path::PathBuf::from).unwrap_or_else(|| {
         std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
     });
     let token = control_token(args);
-    let plane = control_plane(routed.node.as_deref(), token.as_deref()).unwrap_or_else(|e| {
+    let plane = control_plane(routed.node.as_deref(), token.as_deref(), port).unwrap_or_else(|e| {
         eprintln!("ensemble watch: {e}");
         std::process::exit(2);
     });
@@ -992,7 +994,7 @@ fn supervise_cmd(args: &[String]) {
         ensemble::control_action_for_report(&report, supervise_apply_mode(&parsed), "supervisor");
     let control_next = action
         .as_ref()
-        .map(|cmd| append_control_direct(&repo, None, None, &parsed.name, cmd))
+        .map(|cmd| append_control_direct(&repo, None, None, DEFAULT_SERVE_PORT, &parsed.name, cmd))
         .transpose()
         .unwrap_or_else(|e| {
             eprintln!("ensemble supervise: {e}");
@@ -1034,13 +1036,14 @@ fn supervise_cmd(args: &[String]) {
 fn steer_cmd(args: &[String]) {
     require_value_if_present(args, "--repo");
     require_value_if_present(args, "--node");
+    require_value_if_present(args, "--port");
     require_value_if_present(args, "--token");
     require_value_if_present(args, "--from");
     let (name, prompt) = match positional_tasks(args).as_slice() {
         [name, prompt] => (name.clone(), prompt.clone()),
         _ => {
             eprintln!(
-                "usage: ensemble steer <name> \"<prompt>\" [--repo <p>] [--node <host|url>] [--from <id>]"
+                "usage: ensemble steer <name> \"<prompt>\" [--repo <p>] [--node <host|url>] [--port <n>] [--from <id>]"
             );
             std::process::exit(2);
         }
@@ -1055,13 +1058,14 @@ fn steer_cmd(args: &[String]) {
 fn abort_cmd(args: &[String]) {
     require_value_if_present(args, "--repo");
     require_value_if_present(args, "--node");
+    require_value_if_present(args, "--port");
     require_value_if_present(args, "--token");
     require_value_if_present(args, "--from");
     let name = match positional_tasks(args).first() {
         Some(n) => n.clone(),
         None => {
             eprintln!(
-                "usage: ensemble abort <name> [--hard] [--repo <p>] [--node <host|url>] [--from <id>]"
+                "usage: ensemble abort <name> [--hard] [--repo <p>] [--node <host|url>] [--port <n>] [--from <id>]"
             );
             std::process::exit(2);
         }
@@ -1076,12 +1080,14 @@ fn abort_cmd(args: &[String]) {
 fn append_control(args: &[String], name: &str, cmd: &ensemble::ControlCmd) {
     let repo = parse_flag(args, "--repo").unwrap_or_else(|| ".".to_string());
     let explicit_node = parse_flag(args, "--node");
-    let routed = route_control_member_discovering(name, explicit_node.as_deref());
+    let port = parse_control_port_or_exit(args);
+    let routed = route_control_member_discovering(name, explicit_node.as_deref(), port);
     let token = control_token(args);
     if let Err(e) = append_control_direct(
         Path::new(&repo),
         routed.node.as_deref(),
         token.as_deref(),
+        port,
         &routed.member,
         cmd,
     ) {
@@ -1114,11 +1120,12 @@ fn route_control_member(
 fn route_control_member_discovering(
     member: &str,
     explicit_node: Option<&str>,
+    port: u16,
 ) -> RoutedControlMember {
     let raw_host = raw_hostname();
     let mesh =
         if explicit_node.is_none() && inferred_member_node(member, raw_host.as_deref()).is_some() {
-            ensemble::discover_mesh(7878)
+            ensemble::discover_mesh(port)
         } else {
             Vec::new()
         };
@@ -1195,10 +1202,11 @@ fn append_control_direct(
     repo: &Path,
     node: Option<&str>,
     token: Option<&str>,
+    port: u16,
     name: &str,
     cmd: &ensemble::ControlCmd,
 ) -> Result<usize, String> {
-    let plane = control_plane(node, token)?;
+    let plane = control_plane(node, token, port)?;
     let target = control_control_target(repo, name, node);
     plane
         .append_control(repo, name, cmd)
@@ -1208,13 +1216,14 @@ fn append_control_direct(
 fn control_plane(
     node: Option<&str>,
     token: Option<&str>,
+    port: u16,
 ) -> Result<Box<dyn ensemble::ControlPlane>, String> {
     match node {
         Some(node) if is_local_control_escape(node) => {
             Ok(Box::new(ensemble::LocalControlPlane::new()))
         }
         Some(node) => {
-            let url = control_node_url(node)?;
+            let url = control_node_url(node, port)?;
             if let Some(token) = token {
                 Ok(Box::new(ensemble::RemoteControlPlane::with_token(
                     &url, token,
@@ -1253,7 +1262,7 @@ fn normalize_control_token(token: String) -> Option<String> {
     }
 }
 
-fn control_node_url(raw: &str) -> Result<String, String> {
+fn control_node_url(raw: &str, port: u16) -> Result<String, String> {
     let node = raw.trim();
     if node.is_empty() {
         return Err("--node requires a non-empty value".to_string());
@@ -1273,18 +1282,18 @@ fn control_node_url(raw: &str) -> Result<String, String> {
         if node.contains("]:") {
             Ok(format!("http://{node}"))
         } else {
-            Ok(format!("http://{node}:7878"))
+            Ok(format!("http://{node}:{port}"))
         }
-    } else if let Some((host, port)) = node.rsplit_once(':') {
+    } else if let Some((host, raw_port)) = node.rsplit_once(':') {
         let has_single_colon = !host.contains(':');
-        let has_port = !host.is_empty() && port.chars().all(|c| c.is_ascii_digit());
+        let has_port = !host.is_empty() && raw_port.chars().all(|c| c.is_ascii_digit());
         if has_single_colon && has_port {
             Ok(format!("http://{node}"))
         } else {
-            Ok(format!("http://[{node}]:7878"))
+            Ok(format!("http://[{node}]:{port}"))
         }
     } else {
-        Ok(format!("http://{node}:7878"))
+        Ok(format!("http://{node}:{port}"))
     }
 }
 
@@ -1376,7 +1385,7 @@ fn all_cmd(args: &[String]) {
 fn team_cmd(args: &[String]) {
     let parsed = parse_team_cmd_args(args).unwrap_or_else(|e| {
         eprintln!(
-            "ensemble team: {e}\nusage: ensemble team <status|say|inbox> [--repo <p>] [--team <name>] [--node <host|url>] [--token <token>] [--json]"
+            "ensemble team: {e}\nusage: ensemble team <status|say|inbox> [--repo <p>] [--team <name>] [--node <host|url>] [--port <n>] [--token <token>] [--json]"
         );
         std::process::exit(2);
     });
@@ -1389,10 +1398,11 @@ fn team_cmd(args: &[String]) {
         None,
     );
     let token = control_token_from_sources(parsed.token.clone(), control_token_env());
-    let plane = control_plane(parsed.node.as_deref(), token.as_deref()).unwrap_or_else(|e| {
-        eprintln!("ensemble team: {e}");
-        std::process::exit(2);
-    });
+    let plane = control_plane(parsed.node.as_deref(), token.as_deref(), parsed.port)
+        .unwrap_or_else(|e| {
+            eprintln!("ensemble team: {e}");
+            std::process::exit(2);
+        });
 
     match parsed.action {
         TeamCliAction::Status => {
@@ -1435,6 +1445,7 @@ struct TeamCliArgs {
     repo: String,
     team: Option<String>,
     node: Option<String>,
+    port: u16,
     token: Option<String>,
     json: bool,
 }
@@ -1454,6 +1465,7 @@ fn parse_team_cmd_args(args: &[String]) -> Result<TeamCliArgs, String> {
     let mut repo = ".".to_string();
     let mut team = None;
     let mut node = None;
+    let mut port = DEFAULT_SERVE_PORT;
     let mut token = None;
     let mut from = None;
     let mut since = None;
@@ -1470,6 +1482,10 @@ fn parse_team_cmd_args(args: &[String]) -> Result<TeamCliArgs, String> {
             }
             "--node" => {
                 node = Some(take_team_flag_value(args, &mut i, "--node")?);
+            }
+            "--port" => {
+                let raw = take_team_flag_value(args, &mut i, "--port")?;
+                port = parse_control_port_value(&raw)?;
             }
             "--token" => {
                 token = Some(take_team_flag_value(args, &mut i, "--token")?);
@@ -1549,6 +1565,7 @@ fn parse_team_cmd_args(args: &[String]) -> Result<TeamCliArgs, String> {
         repo,
         team,
         node,
+        port,
         token,
         json,
     })
@@ -3289,7 +3306,7 @@ impl ensemble::mcp::SupervisorRunner for McpSupervisorRunner {
         };
         let control_next = ensemble::control_action_for_report(&report, apply, caller)
             .as_ref()
-            .map(|cmd| append_control_direct(repo, None, None, &req.name, cmd))
+            .map(|cmd| append_control_direct(repo, None, None, DEFAULT_SERVE_PORT, &req.name, cmd))
             .transpose()?;
         Ok(ensemble::mcp::SuperviseSummary {
             name: req.name,
@@ -3810,13 +3827,17 @@ fn parse_discovery_port(args: &[String]) -> Result<Option<u16>, String> {
     let Some(raw) = parse_flag(args, "--port") else {
         return Ok(None);
     };
+    parse_control_port_value(&raw).map(Some)
+}
+
+fn parse_control_port_value(raw: &str) -> Result<u16, String> {
     let port: u16 = raw
         .parse()
         .map_err(|_| format!("--port must be an integer from 1 to 65535, got `{raw}`"))?;
     if port == 0 {
         return Err("--port must be an integer from 1 to 65535, got `0`".to_string());
     }
-    Ok(Some(port))
+    Ok(port)
 }
 
 fn parse_discovery_port_or_exit(args: &[String]) -> u16 {
@@ -3828,6 +3849,10 @@ fn parse_discovery_port_or_exit(args: &[String]) -> u16 {
             std::process::exit(2);
         }
     }
+}
+
+fn parse_control_port_or_exit(args: &[String]) -> u16 {
+    parse_discovery_port_or_exit(args)
 }
 
 fn reject_bind_and_port(args: &[String]) -> Result<(), String> {
@@ -4060,6 +4085,18 @@ node = "http://m2:7878"
         assert_eq!(parsed.repo, "/r");
         assert_eq!(parsed.team.as_deref(), Some("ops"));
         assert_eq!(parsed.node.as_deref(), Some("macbook"));
+        assert_eq!(parsed.port, DEFAULT_SERVE_PORT);
+    }
+
+    #[test]
+    fn team_parser_accepts_port_for_remote_control_plane() {
+        let parsed = parse_team_cmd_args(&argv(&[
+            "ensemble", "team", "status", "--node", "macbook", "--port", "8788",
+        ]))
+        .unwrap();
+
+        assert_eq!(parsed.node.as_deref(), Some("macbook"));
+        assert_eq!(parsed.port, 8788);
     }
 
     #[test]
@@ -4096,6 +4133,8 @@ node = "http://m2:7878"
                 "focus",
                 "--node",
                 "macbook",
+                "--port",
+                "8788",
             ])),
             vec!["codex@mac".to_string(), "focus".to_string()]
         );
@@ -4107,6 +4146,8 @@ node = "http://m2:7878"
                 "--hard",
                 "--node",
                 "macbook",
+                "--port",
+                "8788",
             ])),
             vec!["codex@mac".to_string()]
         );
@@ -4831,20 +4872,31 @@ node = "http://m2:7878"
 
     #[test]
     fn control_node_url_bare_host_maps_to_default_port() {
-        assert_eq!(control_node_url("macbook").unwrap(), "http://macbook:7878");
+        assert_eq!(
+            control_node_url("macbook", DEFAULT_SERVE_PORT).unwrap(),
+            "http://macbook:7878"
+        );
+    }
+
+    #[test]
+    fn control_node_url_bare_host_uses_selected_control_port() {
+        assert_eq!(
+            control_node_url("macbook", 8788).unwrap(),
+            "http://macbook:8788"
+        );
     }
 
     #[test]
     fn control_node_url_explicit_url_is_used_without_trailing_slash() {
         assert_eq!(
-            control_node_url("https://node.example:9000/").unwrap(),
+            control_node_url("https://node.example:9000/", 8788).unwrap(),
             "https://node.example:9000"
         );
     }
 
     #[test]
     fn control_node_url_rejects_auto_until_discovery_routing_exists() {
-        let err = control_node_url("auto").unwrap_err();
+        let err = control_node_url("auto", 8788).unwrap_err();
         assert!(err.contains("--node auto is not supported"));
     }
 
@@ -4867,15 +4919,30 @@ node = "http://m2:7878"
     #[test]
     fn control_node_url_loopback_hosts_still_use_remote_http() {
         assert_eq!(
-            control_node_url("localhost").unwrap(),
-            "http://localhost:7878"
+            control_node_url("localhost", 8788).unwrap(),
+            "http://localhost:8788"
         );
         assert_eq!(
-            control_node_url("127.0.0.1").unwrap(),
-            "http://127.0.0.1:7878"
+            control_node_url("127.0.0.1", 8788).unwrap(),
+            "http://127.0.0.1:8788"
         );
-        assert_eq!(control_node_url("::1").unwrap(), "http://[::1]:7878");
-        assert_eq!(control_node_url("[::1]").unwrap(), "http://[::1]:7878");
+        assert_eq!(control_node_url("::1", 8788).unwrap(), "http://[::1]:8788");
+        assert_eq!(
+            control_node_url("[::1]", 8788).unwrap(),
+            "http://[::1]:8788"
+        );
+    }
+
+    #[test]
+    fn control_node_url_preserves_explicit_host_port_when_control_port_is_set() {
+        assert_eq!(
+            control_node_url("localhost:9000", 8788).unwrap(),
+            "http://localhost:9000"
+        );
+        assert_eq!(
+            control_node_url("[::1]:9000", 8788).unwrap(),
+            "http://[::1]:9000"
+        );
     }
 
     #[test]
@@ -4975,11 +5042,11 @@ node = "http://m2:7878"
     #[test]
     fn control_node_url_preserves_host_port_nodes() {
         assert_eq!(
-            control_node_url("127.0.0.2:60315").unwrap(),
+            control_node_url("127.0.0.2:60315", 8788).unwrap(),
             "http://127.0.0.2:60315"
         );
         assert_eq!(
-            control_node_url("phase2-loopback:60315").unwrap(),
+            control_node_url("phase2-loopback:60315", 8788).unwrap(),
             "http://phase2-loopback:60315"
         );
     }
@@ -4992,6 +5059,7 @@ node = "http://m2:7878"
             tmp.path(),
             Some("local"),
             None,
+            DEFAULT_SERVE_PORT,
             "reviewer@work",
             &ensemble::ControlCmd::Abort {
                 from: "operator".into(),
@@ -5036,7 +5104,7 @@ node = "http://m2:7878"
             req.respond(tiny_http::Response::from_string(resp)).unwrap();
         });
 
-        let cp = control_plane(Some(&url), Some("secret")).unwrap();
+        let cp = control_plane(Some(&url), Some("secret"), DEFAULT_SERVE_PORT).unwrap();
         let next = cp
             .append_control(
                 Path::new("remote-repo"),
@@ -5072,7 +5140,7 @@ node = "http://m2:7878"
             req.respond(tiny_http::Response::from_string(resp)).unwrap();
         });
 
-        let cp = control_plane(Some(&url), Some("secret")).unwrap();
+        let cp = control_plane(Some(&url), Some("secret"), DEFAULT_SERVE_PORT).unwrap();
         let next = cp
             .append_control(
                 Path::new("remote-repo"),

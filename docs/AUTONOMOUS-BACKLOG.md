@@ -126,6 +126,10 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
    re-gate (codex from an EMPTY temp cwd — see lesson @f1811f8) caught 3 real bugs — IPv6 URL brackets, unbounded
    reap, dropped exit-status gate — all fixed before landing. **Follow-up landed 2026-06-26:** `mesh`/`nodes`
    and `serve`/`up` now accept `--port`, and the Phase 2 fleet manifest can set `service.port`.
+   **Follow-up in progress 2026-06-26:** the Phase 2 control plane (`team`, `watch`, `steer`, `abort`) also accepts
+   `--port`, so bare `--node <host>` and `member@node` routes can target the same non-default service port used by
+   `serve`/`mesh`/`nodes` (for example `8788` when another local service owns `7878`). `phase2-verify.ps1` now reads
+   `service.port` from the fleet manifest and passes it through Slice A/C/D checks.
 8. [x] **`ensemble doctor`** — env-readiness check ✅@fab543e (codex+claude LGTM). Pure core
    `check_tools`/`is_ready` (hermetic, 5 tests) + thin IO `run_checks` (PATH probe via `where`/`command -v`,
    git-repo via reused `repo_sync::is_git_worktree`); `ensemble doctor` prints a report, exits non-zero when
