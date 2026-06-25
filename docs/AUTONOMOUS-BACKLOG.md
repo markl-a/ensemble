@@ -161,6 +161,16 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-25 — **Phase 2 Slice C now validates the generated full-fleet run/watch plan.**
+  `scripts/phase2-fleet.ps1 -PlanOnly -Json` emits a machine-readable plan with nodes,
+  projects, run/watch/service commands, team names, watch names, repos, and crew paths. Slice C
+  in `scripts/phase2-verify.ps1` now consumes that JSON for `-FleetManifest` and verifies the
+  manifest generates exactly 5 nodes, 1 main project, 4 satellites, 5 service/up commands, 5 run
+  commands, and 5 watch commands, with each project matched to its generated run/watch command.
+  Verified with `phase2-fleet.ps1 -SelfTest`, `phase2-fleet.ps1 -Manifest
+  examples\phase2-fleet.sample.json -Node all -PlanOnly -Json`, `phase2-goal-shape.ps1
+  -Manifest examples\phase2-fleet.sample.json`, and `phase2-verify.ps1 -SkipSliceA
+  -SkipSliceB -SkipSliceD -FleetManifest examples\phase2-fleet.sample.json -FleetNode m1`.
 - 2026-06-25 — **Phase 2 Slice A loopback now verifies remote abort.**
   `scripts/phase2-verify.ps1` already covered remote `team status/say/inbox`, `watch`, `steer`,
   explicit `--node auto` failures, and wrong-token mutation failures. It now also sends

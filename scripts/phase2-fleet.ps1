@@ -16,6 +16,7 @@ param(
     [switch]$CheckNodes,
     [switch]$RunSelected,
     [switch]$PlanOnly,
+    [switch]$Json,
     [string]$Service = "none",
     [switch]$RunService,
     [switch]$SelfTest
@@ -328,6 +329,8 @@ function New-FleetPlan($Fleet, [string]$ManifestDir) {
         Node     = $conductor
         Repo     = $mainRepo
         Crew     = $mainCrew
+        Team     = $mainTeam
+        Watch    = $mainWatch
         Text     = New-MainCrewText $main
         Selected = $mainSelected
     }
@@ -353,6 +356,8 @@ function New-FleetPlan($Fleet, [string]$ManifestDir) {
             Node     = $satNode
             Repo     = $satRepo
             Crew     = $satCrew
+            Team     = $satTeam
+            Watch    = $satWatch
             Text     = New-SatelliteCrewText $sat
             Selected = $satSelected
         }
@@ -391,6 +396,37 @@ function Write-Plan($Plan) {
     foreach ($cmd in $Plan.Commands) {
         Write-Host ("[{0}] {1}" -f $cmd.Node, $cmd.Text)
     }
+}
+
+function Convert-PlanForJson($Plan) {
+    return [pscustomobject]@{
+        nodes     = @($Plan.Nodes)
+        conductor = $Plan.Conductor
+        projects  = @($Plan.Projects | ForEach-Object {
+                [pscustomobject]@{
+                    kind     = $_.Kind
+                    name     = $_.Name
+                    node     = $_.Node
+                    repo     = $_.Repo
+                    crew     = $_.Crew
+                    team     = $_.Team
+                    watch    = $_.Watch
+                    selected = [bool]$_.Selected
+                }
+            })
+        commands  = @($Plan.Commands | ForEach-Object {
+                [pscustomobject]@{
+                    node = $_.Node
+                    kind = $_.Kind
+                    args = @($_.Args)
+                    text = $_.Text
+                }
+            })
+    }
+}
+
+function Write-PlanJson($Plan) {
+    Convert-PlanForJson $Plan | ConvertTo-Json -Depth 12
 }
 
 function Materialize-Plan($Plan) {
@@ -586,6 +622,19 @@ function Invoke-SelfTest {
     Set-Content -LiteralPath $manifestPath -Value $json -Encoding utf8NoBOM
     $fleet = Read-FleetManifest $manifestPath
     $plan = New-FleetPlan $fleet $root
+    $jsonPlan = Convert-PlanForJson $plan | ConvertTo-Json -Depth 12 | ConvertFrom-Json
+    if (@($jsonPlan.projects).Count -ne 2) {
+        Fail "self-test expected JSON plan to include main plus one satellite project"
+    }
+    if (@($jsonPlan.commands | Where-Object { $_.kind -eq "service" }).Count -ne 2) {
+        Fail "self-test expected JSON plan to include one service command per node"
+    }
+    if (@($jsonPlan.commands | Where-Object { $_.kind -eq "run" }).Count -ne 2) {
+        Fail "self-test expected JSON plan to include one run command per project"
+    }
+    if (@($jsonPlan.commands | Where-Object { $_.kind -eq "watch" }).Count -ne 2) {
+        Fail "self-test expected JSON plan to include one watch command per project"
+    }
     $main = @($plan.Projects | Where-Object { $_.Kind -eq "main" })[0]
     if ($main.Text -notmatch 'node = "http://m1:7878"') {
         Fail "self-test expected main codex route to be normalized"
@@ -747,5 +796,9 @@ if ($RunSelected) {
     Invoke-SelectedRuns $plan
 }
 if ($PlanOnly -or (-not $Materialize -and -not $CheckNodes -and -not $RunSelected -and -not $RunService)) {
-    Write-Plan $plan
+    if ($Json) {
+        Write-PlanJson $plan
+    } else {
+        Write-Plan $plan
+    }
 }

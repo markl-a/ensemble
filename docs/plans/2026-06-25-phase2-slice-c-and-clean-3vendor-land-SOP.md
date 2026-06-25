@@ -126,6 +126,12 @@ pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m2 -Materi
 - 產生 `.ensemble/phase2-fleet/crew-<sat>.generated.toml`（對應衛星機）。
 - 列出該節點要跑的 `ensemble up`、`ensemble run`、`ensemble watch` 指令。
 
+需要機器可讀的完整 fleet plan 時，用 JSON 輸出；這會列出 5 個節點、5 個 project run、5 個 watch，以及每台的 service/up command：
+
+```bash
+pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node all -PlanOnly -Json
+```
+
 確認 plan 正確後，也可以讓腳本直接執行該節點被選中的 `ensemble run`（只跑 `run`，不會自動跑 `up` 或 `watch`）。`-RunSelected` 必須搭配明確的 `-Node <host>`，不接受預設的 `all`。service bootstrap 則用 `-Service install-print|install|uninstall-print|uninstall -RunService`，同樣必須指定明確節點：
 
 ```bash

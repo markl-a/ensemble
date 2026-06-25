@@ -168,6 +168,134 @@ function Read-FleetManifestInfo([string]$Path) {
     }
 }
 
+function Get-JsonProp($Object, [string]$Name, $Default = $null) {
+    if ($null -eq $Object) {
+        return $Default
+    }
+    $prop = $Object.PSObject.Properties[$Name]
+    if ($null -eq $prop) {
+        return $Default
+    }
+    return $prop.Value
+}
+
+function Get-JsonArray($Value) {
+    if ($null -eq $Value) {
+        return @()
+    }
+    return @($Value)
+}
+
+function Get-JsonArgs($Command) {
+    return @(Get-JsonArray (Get-JsonProp $Command "args" @()) | ForEach-Object { [string]$_ })
+}
+
+function Get-JsonFlagValue($Command, [string]$Flag) {
+    $argList = @(Get-JsonArgs $Command)
+    for ($i = 0; $i -lt ($argList.Count - 1); $i++) {
+        if ($argList[$i] -eq $Flag) {
+            return $argList[$i + 1]
+        }
+    }
+    return $null
+}
+
+function Test-JsonCommandStartsWith($Command, [string]$Verb) {
+    $argList = @(Get-JsonArgs $Command)
+    return $argList.Count -gt 0 -and $argList[0] -eq $Verb
+}
+
+function Test-JsonCommandHasArg($Command, [string]$Needle) {
+    return @(Get-JsonArgs $Command) -contains $Needle
+}
+
+function Test-JsonCommandArgsEqual($Command, [string[]]$Expected) {
+    $argList = @(Get-JsonArgs $Command)
+    if ($argList.Count -ne $Expected.Count) {
+        return $false
+    }
+    for ($i = 0; $i -lt $Expected.Count; $i++) {
+        if ($argList[$i] -ne $Expected[$i]) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Assert-Phase2FleetGeneratedPlanShape($Plan) {
+    $nodes = @(Get-JsonArray (Get-JsonProp $Plan "nodes" @()) | ForEach-Object { [string]$_ })
+    if ($nodes.Count -ne 5) {
+        Fail "Phase 2 Slice C generated fleet plan must contain exactly 5 nodes; got $($nodes.Count)"
+    }
+
+    $projects = @(Get-JsonArray (Get-JsonProp $Plan "projects" @()))
+    $mainProjects = @($projects | Where-Object { ([string](Get-JsonProp $_ "kind" "")) -eq "main" })
+    $satelliteProjects = @($projects | Where-Object { ([string](Get-JsonProp $_ "kind" "")) -eq "satellite" })
+    if ($mainProjects.Count -ne 1) {
+        Fail "Phase 2 Slice C generated fleet plan must contain exactly 1 main project; got $($mainProjects.Count)"
+    }
+    if ($satelliteProjects.Count -ne 4) {
+        Fail "Phase 2 Slice C generated fleet plan must contain exactly 4 satellite projects; got $($satelliteProjects.Count)"
+    }
+
+    $commands = @(Get-JsonArray (Get-JsonProp $Plan "commands" @()))
+    $serviceCommands = @($commands | Where-Object { ([string](Get-JsonProp $_ "kind" "")) -eq "service" })
+    $runCommands = @($commands | Where-Object { ([string](Get-JsonProp $_ "kind" "")) -eq "run" })
+    $watchCommands = @($commands | Where-Object { ([string](Get-JsonProp $_ "kind" "")) -eq "watch" })
+    if ($serviceCommands.Count -ne 5) {
+        Fail "Phase 2 Slice C generated fleet plan must contain one service command per node; got $($serviceCommands.Count)"
+    }
+    foreach ($fleetNode in $nodes) {
+        $nodeServices = @($serviceCommands | Where-Object {
+                ([string](Get-JsonProp $_ "node" "")).Equals($fleetNode, [System.StringComparison]::OrdinalIgnoreCase)
+            })
+        if ($nodeServices.Count -ne 1 -or -not (Test-JsonCommandArgsEqual $nodeServices[0] @("up"))) {
+            Fail "Phase 2 Slice C generated fleet plan must contain exactly one 'ensemble up' service command for node '$fleetNode'; got $($nodeServices.Count)"
+        }
+    }
+    if ($runCommands.Count -ne 5) {
+        Fail "Phase 2 Slice C generated fleet plan must contain one run command per project; got $($runCommands.Count)"
+    }
+    if ($watchCommands.Count -ne 5) {
+        Fail "Phase 2 Slice C generated fleet plan must contain one watch command per project; got $($watchCommands.Count)"
+    }
+
+    foreach ($project in $projects) {
+        $name = [string](Get-JsonProp $project "name" "")
+        $node = [string](Get-JsonProp $project "node" "")
+        $repo = [string](Get-JsonProp $project "repo" "")
+        $crew = [string](Get-JsonProp $project "crew" "")
+        $team = [string](Get-JsonProp $project "team" "")
+        $watch = [string](Get-JsonProp $project "watch" "")
+        $runMatch = @($runCommands | Where-Object {
+                $cmdNode = [string](Get-JsonProp $_ "node" "")
+                $cmdNode.Equals($node, [System.StringComparison]::OrdinalIgnoreCase) -and
+                (Test-JsonCommandStartsWith $_ "run") -and
+                (Get-JsonFlagValue $_ "--crew") -eq $crew -and
+                (Get-JsonFlagValue $_ "--repo") -eq $repo -and
+                (Get-JsonFlagValue $_ "--team") -eq $team -and
+                (Get-JsonFlagValue $_ "--watch") -eq $watch
+            })
+        if ($runMatch.Count -ne 1) {
+            Fail "Phase 2 Slice C generated fleet plan must contain exactly one run command for project '$name'; got $($runMatch.Count)"
+        }
+        $watchMatch = @($watchCommands | Where-Object {
+                $cmdNode = [string](Get-JsonProp $_ "node" "")
+                $argList = @(Get-JsonArgs $_)
+                $cmdNode.Equals($node, [System.StringComparison]::OrdinalIgnoreCase) -and
+                $argList.Count -ge 2 -and
+                $argList[0] -eq "watch" -and
+                $argList[1] -eq $watch -and
+                (Get-JsonFlagValue $_ "--repo") -eq $repo -and
+                (Get-JsonFlagValue $_ "--team") -eq $team -and
+                (Test-JsonCommandHasArg $_ "--follow")
+            })
+        if ($watchMatch.Count -ne 1) {
+            Fail "Phase 2 Slice C generated fleet plan must contain exactly one watch command for project '$name'; got $($watchMatch.Count)"
+        }
+    }
+}
+
 function Invoke-FleetManifestPlan([string]$Path, [string]$NodeName) {
     if ([string]::IsNullOrWhiteSpace($Path)) {
         return $null
@@ -177,6 +305,19 @@ function Invoke-FleetManifestPlan([string]$Path, [string]$NodeName) {
     if (-not (Test-Path -LiteralPath $fleetScript -PathType Leaf)) {
         Fail "phase2 fleet script missing: $fleetScript"
     }
+    Write-Host "== fleet manifest generated plan shape (all nodes) ==" -ForegroundColor DarkGray
+    $jsonOut = pwsh -NoProfile -File $fleetScript -Manifest $info.Path -Node all -PlanOnly -Json 2>&1
+    $jsonCode = $LASTEXITCODE
+    $jsonText = ($jsonOut | Out-String).Trim()
+    if ($jsonCode -ne 0) {
+        if (-not [string]::IsNullOrWhiteSpace($jsonText)) {
+            Write-Host $jsonText
+        }
+        Fail "phase2-fleet JSON plan failed for manifest $($info.Path)"
+    }
+    $jsonPlan = Parse-JsonOrFail $jsonText "phase2-fleet JSON plan"
+    Assert-Phase2FleetGeneratedPlanShape $jsonPlan
+    Write-Host "fleet generated plan shape passed: 5 nodes, 1 main run, 4 satellite runs." -ForegroundColor DarkGray
     $nodeArg = if ([string]::IsNullOrWhiteSpace($NodeName)) {
         "all"
     } else {
