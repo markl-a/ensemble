@@ -15,6 +15,11 @@ param(
     [switch]$Materialize,
     [switch]$CheckNodes,
     [switch]$RunSelected,
+    [switch]$VerifyEvidence,
+    [switch]$AllowEscalatedRun,
+    [switch]$RequireControlEvidence,
+    [switch]$RequireSteerEvidence,
+    [switch]$RequireAbortEvidence,
     [switch]$PlanOnly,
     [switch]$Json,
     [string]$Service = "none",
@@ -89,6 +94,54 @@ function New-CommandSpec([string]$NodeName, [string]$Kind, [string[]]$ArgList) {
     }
 }
 
+function Count-NonEmptyFileLines([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return 0
+    }
+    return @((Get-Content -LiteralPath $Path) | Where-Object { ([string]$_).Trim().Length -gt 0 }).Count
+}
+
+function Parse-JsonOrFail([string]$Title, [string]$Text) {
+    try {
+        return $Text | ConvertFrom-Json
+    } catch {
+        Fail "$Title did not return valid JSON: $($_.Exception.Message)`n$Text"
+    }
+}
+
+function Get-RunTerminal([string]$Text) {
+    $landed = [regex]::Matches($Text, '(?m)^\s*LANDED after \d+ round\(s\)')
+    $escalated = [regex]::Matches($Text, '(?m)^\s*ESCALATED after \d+ round\(s\):')
+    if ($landed.Count -gt 0 -and $escalated.Count -gt 0) {
+        Fail "selected run produced ambiguous LANDED and ESCALATED terminal states"
+    }
+    if ($landed.Count -eq 1) {
+        return "landed"
+    }
+    if ($escalated.Count -eq 1) {
+        return "escalated"
+    }
+    if ($landed.Count -gt 1 -or $escalated.Count -gt 1) {
+        Fail "selected run produced multiple terminal state lines"
+    }
+    Fail "selected run did not produce a terminal LANDED or ESCALATED state"
+}
+
+function Resolve-EvidenceScript {
+    $override = $env:ENSEMBLE_PHASE2_EVIDENCE_SCRIPT
+    if (-not [string]::IsNullOrWhiteSpace($override)) {
+        return [System.IO.Path]::GetFullPath($override)
+    }
+    return [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "phase2-run-evidence.ps1"))
+}
+
+function Get-ControlFeedPath([string]$Repo, [string]$Watch) {
+    return Join-Path $Repo ".ensemble/control/$Watch.ndjson"
+}
+
+function Get-WatchFeedPath([string]$Repo, [string]$Watch) {
+    return Join-Path $Repo ".ensemble/stream/$Watch.ndjson"
+}
 function Normalize-ServiceAction([string]$Action) {
     if ([string]::IsNullOrWhiteSpace($Action)) {
         return "none"
@@ -331,6 +384,8 @@ function New-FleetPlan($Fleet, [string]$ManifestDir) {
         Crew     = $mainCrew
         Team     = $mainTeam
         Watch    = $mainWatch
+        Task     = $mainTask
+        Merge    = $mainMerge
         Text     = New-MainCrewText $main
         Selected = $mainSelected
     }
@@ -358,6 +413,8 @@ function New-FleetPlan($Fleet, [string]$ManifestDir) {
             Crew     = $satCrew
             Team     = $satTeam
             Watch    = $satWatch
+            Task     = $satTask
+            Merge    = $false
             Text     = New-SatelliteCrewText $sat
             Selected = $satSelected
         }
@@ -411,6 +468,8 @@ function Convert-PlanForJson($Plan) {
                     crew     = $_.Crew
                     team     = $_.Team
                     watch    = $_.Watch
+                    task     = $_.Task
+                    merge    = [bool]$_.Merge
                     selected = [bool]$_.Selected
                 }
             })
@@ -478,24 +537,103 @@ function Check-FleetNodes($Plan) {
     Write-Host "fleet node check passed (remote peers: $($expectedRemoteNodes -join ', '); local conductor skipped: $($Plan.Conductor))"
 }
 
+function Capture-RunEvidenceCursors($Project) {
+    $inboxOut = & ensemble team inbox --repo $Project.Repo --team $Project.Team --json 2>&1
+    $inboxCode = $LASTEXITCODE
+    if ($null -eq $inboxCode) {
+        $inboxCode = 0
+    }
+    $inboxText = ($inboxOut | Out-String).Trim()
+    if ($inboxCode -ne 0) {
+        Fail "team inbox cursor capture failed for '$($Project.Name)' with exit code $inboxCode`n$inboxText"
+    }
+    $inbox = Parse-JsonOrFail "team inbox cursor capture for '$($Project.Name)'" $inboxText
+    return [pscustomobject]@{
+        Team    = [int]$inbox.next
+        Watch   = Count-NonEmptyFileLines (Get-WatchFeedPath $Project.Repo $Project.Watch)
+        Control = Count-NonEmptyFileLines (Get-ControlFeedPath $Project.Repo $Project.Watch)
+    }
+}
+
+function Invoke-RunEvidenceVerifier($Project, $Cursors, [string]$ExpectedTerminal) {
+    $evidenceScript = Resolve-EvidenceScript
+    if (-not (Test-Path -LiteralPath $evidenceScript -PathType Leaf)) {
+        Fail "phase2 run evidence verifier not found: $evidenceScript"
+    }
+    $args = @(
+        "-NoProfile", "-File", $evidenceScript,
+        "-Repo", $Project.Repo,
+        "-Team", $Project.Team,
+        "-Watch", $Project.Watch,
+        "-TeamSince", "$($Cursors.Team)",
+        "-WatchSince", "$($Cursors.Watch)",
+        "-ControlSince", "$($Cursors.Control)",
+        "-ExpectTerminal", $ExpectedTerminal,
+        "-NoBuild"
+    )
+    if ($RequireControlEvidence) {
+        $args += "-RequireControl"
+    }
+    if ($RequireSteerEvidence) {
+        $args += "-RequireSteer"
+    }
+    if ($RequireAbortEvidence) {
+        $args += "-RequireAbort"
+    }
+    Write-Host ("verifying evidence [{0}] {1}/{2} since team={3} watch={4} control={5}" -f $Project.Node, $Project.Team, $Project.Watch, $Cursors.Team, $Cursors.Watch, $Cursors.Control) -ForegroundColor Cyan
+    & pwsh @args
+    $code = $LASTEXITCODE
+    if ($null -eq $code) {
+        $code = 0
+    }
+    if ($code -ne 0) {
+        Fail "phase2 run evidence verifier failed for '$($Project.Name)' with exit code $code"
+    }
+}
+
 function Invoke-SelectedRuns($Plan) {
     if (-not (Get-Command ensemble -ErrorAction SilentlyContinue)) {
         Fail "ensemble is not on PATH; install first"
     }
-    $runs = @($Plan.Commands | Where-Object { $_.Kind -eq "run" })
-    if ($runs.Count -eq 0) {
+    $projects = @($Plan.Projects | Where-Object { $_.Selected })
+    if ($projects.Count -eq 0) {
         Fail "no selected run commands for node '$Node'"
     }
-    foreach ($cmd in $runs) {
+    foreach ($project in $projects) {
+        $runArgs = New-RunArgs $project.Task $project.Crew $project.Repo $project.Team $project.Watch ([bool]$project.Merge)
+        $cmdText = Format-Command $runArgs
         Write-Host ""
-        Write-Host ("running [{0}] {1}" -f $cmd.Node, $cmd.Text)
-        & ensemble @($cmd.Args)
+        Write-Host ("running [{0}] {1}" -f $project.Node, $cmdText)
+        if (-not $VerifyEvidence) {
+            & ensemble @runArgs
+            $code = $LASTEXITCODE
+            if ($null -eq $code) {
+                $code = 0
+            }
+            if ($code -ne 0) {
+                Fail "selected run failed on node '$($project.Node)' with exit code $code"
+            }
+            continue
+        }
+
+        $cursors = Capture-RunEvidenceCursors $project
+        $runOut = & ensemble @runArgs 2>&1
         $code = $LASTEXITCODE
         if ($null -eq $code) {
             $code = 0
         }
+        $runText = ($runOut | Out-String)
+        if (-not [string]::IsNullOrWhiteSpace($runText)) {
+            Write-Host $runText.TrimEnd()
+        }
+        $terminal = Get-RunTerminal $runText
+        Invoke-RunEvidenceVerifier $project $cursors $terminal
         if ($code -ne 0) {
-            Fail "selected run failed on node '$($cmd.Node)' with exit code $code"
+            if ($terminal -eq "escalated" -and $AllowEscalatedRun) {
+                Write-Host "  run escalated; continuing by design because -AllowEscalatedRun is set." -ForegroundColor Yellow
+            } else {
+                Fail "selected run failed on node '$($project.Node)' with exit code $code"
+            }
         }
     }
 }
@@ -651,6 +789,12 @@ function Invoke-SelfTest {
     if (Test-HostPresent "m1" @("m10.tail.ts.net")) {
         Fail "self-test expected m1 not to match m10"
     }
+    if ((Get-RunTerminal "reviewer mentioned ESCALATED`nLANDED after 1 round(s)(s)") -ne "landed") {
+        Fail "self-test expected terminal parser to use the explicit LANDED terminal line"
+    }
+    if ((Get-RunTerminal "notes mention LANDED`nESCALATED after 2 round(s): max rounds reached") -ne "escalated") {
+        Fail "self-test expected terminal parser to use the explicit ESCALATED terminal line"
+    }
     $script:Node = "m2"
     $nodePlan = New-FleetPlan $fleet $root
     $sat = @($nodePlan.Projects | Where-Object { $_.Name -eq "sat-a" })[0]
@@ -710,6 +854,93 @@ function Invoke-SelfTest {
     if ($fakeLines[0] -match '^(watch|up)(\s|$)') {
         Fail "self-test expected -RunSelected to execute run commands only"
     }
+
+    Set-Content -LiteralPath $fakeLog -Encoding utf8NoBOM -Value ""
+    $evidenceLog = Join-Path $root "fake-evidence.log"
+    $fakeEvidence = Join-Path $root "fake-evidence.ps1"
+    Set-Content -LiteralPath $fakeEvidence -Encoding utf8NoBOM -Value @(
+        '$text = $args -join '' ''',
+        "Set-Content -LiteralPath `$env:ENSEMBLE_FAKE_EVIDENCE_LOG -Encoding utf8NoBOM -Value `$text",
+        "if (`$text -notmatch '-ExpectTerminal landed') { exit 42 }",
+        "if (`$text -notmatch '-TeamSince 0') { exit 43 }",
+        "if (`$text -notmatch '-WatchSince 0') { exit 44 }",
+        "exit 0"
+    )
+    if ($IsWindows) {
+        Set-Content -LiteralPath $fakeExe -Encoding ascii -Value @(
+            "@echo off",
+            'if "%1"=="team" (',
+            '  echo {"messages":[],"next":0}',
+            '  exit /b 0',
+            ')',
+            'if "%1"=="watch" (',
+            '  exit /b 0',
+            ')',
+            'echo %*>>"%ENSEMBLE_FAKE_LOG%"',
+            'echo LANDED after 1 round(s)',
+            'exit /b 0'
+        )
+    }
+    else {
+        Set-Content -LiteralPath $fakeExe -Encoding ascii -Value @(
+            "#!/bin/sh",
+            'if [ "$1" = "team" ]; then printf ''{"messages":[],"next":0}\n''; exit 0; fi',
+            'if [ "$1" = "watch" ]; then exit 0; fi',
+            'printf ''%s\n'' "$*" >> "$ENSEMBLE_FAKE_LOG"',
+            'printf ''LANDED after 1 round(s)\n''',
+            'exit 0'
+        )
+        & chmod +x $fakeExe
+    }
+    $oldPath = $env:PATH
+    $oldFakeLog = $env:ENSEMBLE_FAKE_LOG
+    $oldEvidenceScript = $env:ENSEMBLE_PHASE2_EVIDENCE_SCRIPT
+    $oldEvidenceLog = $env:ENSEMBLE_FAKE_EVIDENCE_LOG
+    $oldVerifyEvidence = $script:VerifyEvidence
+    $env:PATH = "$fakeBin$([System.IO.Path]::PathSeparator)$oldPath"
+    $env:ENSEMBLE_FAKE_LOG = $fakeLog
+    $env:ENSEMBLE_PHASE2_EVIDENCE_SCRIPT = $fakeEvidence
+    $env:ENSEMBLE_FAKE_EVIDENCE_LOG = $evidenceLog
+    $script:VerifyEvidence = $true
+    try {
+        Invoke-SelectedRuns $nodePlan
+    }
+    finally {
+        $env:PATH = $oldPath
+        $script:VerifyEvidence = $oldVerifyEvidence
+        if ($null -eq $oldFakeLog) { Remove-Item Env:\ENSEMBLE_FAKE_LOG -ErrorAction SilentlyContinue } else { $env:ENSEMBLE_FAKE_LOG = $oldFakeLog }
+        if ($null -eq $oldEvidenceScript) { Remove-Item Env:\ENSEMBLE_PHASE2_EVIDENCE_SCRIPT -ErrorAction SilentlyContinue } else { $env:ENSEMBLE_PHASE2_EVIDENCE_SCRIPT = $oldEvidenceScript }
+        if ($null -eq $oldEvidenceLog) { Remove-Item Env:\ENSEMBLE_FAKE_EVIDENCE_LOG -ErrorAction SilentlyContinue } else { $env:ENSEMBLE_FAKE_EVIDENCE_LOG = $oldEvidenceLog }
+    }
+    $verifyFakeOut = Get-Content -Raw -LiteralPath $fakeLog
+    $verifyFakeLines = @($verifyFakeOut -split "`r?`n" | Where-Object { $_.Trim().Length -gt 0 })
+    if ($verifyFakeLines.Count -ne 1) {
+        Fail "self-test expected -RunSelected -VerifyEvidence to execute exactly one selected run"
+    }
+    $evidenceOut = Get-Content -Raw -LiteralPath $evidenceLog
+    if ($evidenceOut -notmatch '-Repo .+sat-a') {
+        Fail "self-test expected verifier to receive the selected satellite repo"
+    }
+    if ($evidenceOut -notmatch '-Team sat-a') {
+        Fail "self-test expected verifier to receive the selected satellite team"
+    }
+
+    if ($IsWindows) {
+        Set-Content -LiteralPath $fakeExe -Encoding ascii -Value @(
+            "@echo off",
+            'echo %*>>"%ENSEMBLE_FAKE_LOG%"',
+            "exit /b 0"
+        )
+    }
+    else {
+        Set-Content -LiteralPath $fakeExe -Encoding ascii -Value @(
+            "#!/bin/sh",
+            'printf ''%s\n'' "$*" >> "$ENSEMBLE_FAKE_LOG"',
+            "exit 0"
+        )
+        & chmod +x $fakeExe
+    }
+
     $script:Service = "install-print"
     $servicePlan = New-FleetPlan $fleet $root
     $serviceCommands = @($servicePlan.Commands | Where-Object { $_.Kind -eq "service" })
@@ -765,6 +996,12 @@ $fleet = Read-FleetManifest $manifestPath
 $plan = New-FleetPlan $fleet $manifestDir
 $serviceAction = Normalize-ServiceAction $Service
 
+if ($AllowEscalatedRun -and -not $VerifyEvidence) {
+    Fail "-AllowEscalatedRun requires -VerifyEvidence"
+}
+if (($RequireControlEvidence -or $RequireSteerEvidence -or $RequireAbortEvidence) -and -not $VerifyEvidence) {
+    Fail "-RequireControlEvidence/-RequireSteerEvidence/-RequireAbortEvidence require -VerifyEvidence"
+}
 if ($RunSelected -and $PlanOnly) {
     Fail "-RunSelected cannot be combined with -PlanOnly"
 }

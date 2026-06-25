@@ -161,6 +161,19 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-25 — **Phase 2 fleet RunSelected can now verify run evidence automatically.**
+  `scripts/phase2-fleet.ps1 -RunSelected -VerifyEvidence` now captures team/watch/control cursors
+  before each selected manifest run, derives the run terminal (`landed` or `escalated`) from the
+  actual `ensemble run` output, and invokes `scripts/phase2-run-evidence.ps1 -ExpectTerminal ...`
+  afterward. Nonzero escalated runs still fail unless the operator explicitly adds
+  `-AllowEscalatedRun`. This removes a manual Slice C error source: operators no longer need to
+  hand-count cursors before using the manifest-driven fleet runner. Added
+  `-RequireControlEvidence`, `-RequireSteerEvidence`, and `-RequireAbortEvidence` for runs where
+  intervention happened.
+  Verified with `phase2-fleet.ps1 -SelfTest`, `phase2-fleet.ps1 -Manifest
+  examples\phase2-fleet.sample.json -Node all -PlanOnly -Json`, `phase2-goal-shape.ps1
+  -Manifest examples\phase2-fleet.sample.json`, and `phase2-verify.ps1 -SkipSliceA
+  -SkipSliceB -SkipSliceD -FleetManifest examples\phase2-fleet.sample.json -FleetNode m1`.
 - 2026-06-25 — **Phase 2 smoke now verifies real run team/watch evidence.**
   `scripts/smoke.ps1` now runs the governed smoke with `--team <team>`, captures pre-run
   team/watch/control cursors, and invokes `scripts/phase2-run-evidence.ps1` after the run. This closes
