@@ -71,10 +71,11 @@ pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo D:\Projects\ensemble -Team
 
 1. `uninstall.ps1 -RemoveMcpConfig -Repo <repo> -Clients codex,claude,opencode`
 2. `install.ps1`
-3. `ensemble up`（背景執行，確認可啟動且不立即結束）
-4. `ensemble mesh`、`ensemble nodes`
-5. `smoke.ps1 -Reviewers claude -AllowEscalatedRun`
-6. `uninstall.ps1`
+3. `ensemble serve --install-service --print` 與 `ensemble serve --uninstall-service --print`（service plan dry-run，不改系統）
+4. `ensemble up`（背景執行，確認可啟動且不立即結束）
+5. `ensemble mesh`、`ensemble nodes`
+6. `smoke.ps1 -Reviewers claude -AllowEscalatedRun`
+7. `uninstall.ps1`
 
 對應腳本入口：
 

@@ -58,6 +58,24 @@ ensemble doctor      # 期待四個 CLI + tailscale + git-repo 都 [ok]
 ensemble up          # 前景常駐；可放背景終端 / Start-Job / tmux
 ```
 
+若要把節點變成登入/開機後可重建的常駐服務，先預覽 OS service plan：
+
+```bash
+ensemble serve --install-service --print
+ensemble serve --uninstall-service --print
+```
+
+確認內容正確後，拿掉 `--print` 進行實際安裝或移除：
+
+```bash
+ensemble serve --install-service
+ensemble serve --uninstall-service
+```
+
+實際 install 會建立/更新並立即啟動或重啟 `serve`；uninstall 會先停止再移除 service 設定。
+
+`--install-service` 預設執行 `ensemble serve`，所以會繼承 `serve` 的安全 bind 行為（有 tailnet IP 則綁 tailnet，否則 loopback）。若你要固定 bind，可加 `--bind <addr>`；若要讓遠端 mutation 需要 token，可明確加 `--token <token>`，但這會寫入系統 service 設定。
+
 在 **m1** 確認整個 fleet：
 ```bash
 ensemble mesh        # 期待 local CLIs + remote peers（m2~m5）
@@ -188,6 +206,7 @@ ensemble run "<可驗證的小任務>" --crew .ensemble/phase2-fleet/crew-main.g
 | 把 `opencode` 當自動 reviewer 卡住 | opencode headless 會 hang，**別放進自動角色**；互動式 `ensemble agent`/MCP 不受限 |
 | `ensemble merge` 拒絕：worktree not clean | 跑 run 的 repo 要 `.gitignore` 掉 `.ensemble/`，且 `crew.toml` 放 repo 外或 ignore |
 | codex `rate-limited … no backup` | 確認 crew 有設 `backup`（本 repo 的 crew 已設 agy）；本版已修「backup adapter 沒被建」的 bug |
+| service install plan 看起來不對 | 先用 `ensemble serve --install-service --print` 檢查；路徑不對時加 `--exe <path>` |
 | 重裝 | Windows：`pwsh scripts\uninstall.ps1` → `install.ps1`；macOS：`cargo install --path . --force` 覆蓋 |
 
 ---
@@ -203,6 +222,8 @@ ensemble doctor
 pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Materialize -PlanOnly
 # 2) 起節點
 ensemble up           # 背景/新終端
+# 或常駐服務：先 preview，再去掉 --print
+ensemble serve --install-service --print
 # 3) m1 看 fleet
 ensemble mesh && ensemble nodes
 # 4) 主專案（m1）

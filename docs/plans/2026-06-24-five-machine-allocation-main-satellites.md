@@ -78,6 +78,22 @@ roles，因為既有測試顯示它的 headless reviewer 容易 hang。
 ensemble up
 ```
 
+若希望節點在登入/開機後自動提供 `serve`，先 dry-run 檢查 OS service plan，再實際安裝：
+
+```powershell
+ensemble serve --install-service --print
+ensemble serve --install-service
+```
+
+實際 install 會建立/更新並立即啟動或重啟 `serve`；uninstall 會先停止再移除 service 設定。
+
+移除時同樣先 preview：
+
+```powershell
+ensemble serve --uninstall-service --print
+ensemble serve --uninstall-service
+```
+
 確認 fleet 與能力：
 ```powershell
 ensemble mesh
@@ -165,14 +181,14 @@ ensemble run "衛星任務" --crew .ensemble/phase2-fleet/crew-sat-a.generated.t
 - 單一 `crew.toml` 對同一 agent 只能指定單一節點；若想在同一時間把同一角色分散更多機器，需要多個 run / 多個 crew 分割任務。
 - `crew.toml` 的 `[agents.<name>] node` 目前要使用完整 URL（例如 `http://m2:7878`）。日常不要手工改這段，改用 `scripts/phase2-fleet.ps1` 從 manifest 產生，腳本會把 `m2` 這種 host alias 正規化成可用 URL。
 - `ensemble nodes` 是 agent→host 的輔助視圖，且只列 tailnet peers；完整五機可見性請用 `ensemble mesh`，本機 conductor 由 `local CLIs` 區塊確認。
-- 主專案想要「五機都看到、都可介入」的效果，請把所有機器都先 `ensemble up` 並保持 `team=main` 一致。
+- 主專案想要「五機都看到、都可介入」的效果，請把所有機器都先 `ensemble up`，或安裝 `ensemble serve --install-service`，並保持 `team=main` 一致。
 - 衛星專案保持最小路由，先用 `min_approvals = 1` 會快；當流程穩定再改 2（至少兩家不同 vendor 時）。
 - `on_flake = "exclude"` 是建議值，避免 flake 被誤算為 approval。
 - 任何 run 前先跑 `ensemble nodes` 與 `ensemble doctor`，確認節點與 CLI 狀態正確。
 
 ## 六、日常作業順序（簡版）
 
-1. 所有節點：`ensemble up`
+1. 所有節點：`ensemble up`；若要常駐則先 `ensemble serve --install-service --print`，確認後 `ensemble serve --install-service`
 2. 全員確認：`ensemble mesh`、`ensemble nodes`、`ensemble doctor`
 3. 每台依角色執行 `pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <m1..m5> -Materialize -PlanOnly`
 4. 確認 plan 正確後，該節點執行 `pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <m1..m5> -Materialize -RunSelected`（`-RunSelected` 必須指定非 `all` 的 `-Node`）

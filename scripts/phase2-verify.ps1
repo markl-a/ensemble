@@ -558,6 +558,10 @@ function Run-SliceD {
             Fail "ensemble command not found after install"
         }
 
+        Write-Host "-> service install/uninstall dry-run" -ForegroundColor DarkGray
+        Invoke-EnsembleCapture @("serve", "--install-service", "--print") "serve service install plan" -TimeoutSec 20 | Out-Null
+        Invoke-EnsembleCapture @("serve", "--uninstall-service", "--print") "serve service uninstall plan" -TimeoutSec 20 | Out-Null
+
         Write-Host "-> smoke preflight using installed command" -ForegroundColor DarkGray
         if (-not $SmokeRoot) {
             if (Test-Path "D:\tmp") {

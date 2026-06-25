@@ -24,6 +24,7 @@ pub mod ndjson;
 pub mod remote_adapter;
 pub mod repo_sync;
 pub mod serve;
+pub mod service;
 pub mod supervise;
 pub mod supervisor;
 pub mod team;
@@ -62,6 +63,11 @@ pub use repo_sync::{
     merge_with_resolver, orphan_scratch, MergeOutcome,
 };
 pub use serve::{resolve_bind, serve, serve_with_token, BindAddr};
+pub use service::{
+    launchd_agent_path, launchd_plist, serve_program_args, systemd_unit, systemd_user_unit_path,
+    windows_end_argv, windows_install_argv, windows_run_argv, windows_uninstall_argv,
+    ServeServiceConfig, LAUNCHD_LABEL, SYSTEMD_UNIT_NAME, WINDOWS_TASK_NAME,
+};
 pub use supervise::{
     drain_control, member_control_path, member_stream_path, parse_watch_args, render_event,
     render_line, ControlCmd, ControlState, FeedObserver, RunObserver, StreamEvent, WatchArgs,

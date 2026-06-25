@@ -26,6 +26,7 @@ const USAGE: &str = "usage:\n  \
     ensemble [--repo <path>] [--team <name>] [--member <member>] [--timeout <secs>] [--confirm-policy ask|approve|deny] [--print-prompt] [--json] agy [vendor args...]   (no prompt: interactive; --prompt/-p: bounded team turn)\n  \
     ensemble merge <branch> [--into <target>] [--repo <path>] [--resolver <agent>]   (land a kept branch; conflict → escalate, or --resolver runs ONE AI round)\n  \
     ensemble serve [--bind <addr>] [--token <token>]   (default: this node's tailnet IP:7878; loopback if no tailnet)\n  \
+    ensemble serve --install-service|--uninstall-service [--bind <addr>] [--token <token>] [--exe <path>] [--print]   (install/remove boot/login-started serve)\n  \
     ensemble up [--bind <addr>] [--token <token>]   (quick start: show the mesh, then serve in the foreground)\n  \
     ensemble mcp [--repo <path>] [--team <name>] [--name <agent>] [--crew <crew.toml>]   (stdio MCP server: make a LIVE CLI a crew member — mesh + board + queue + worktree + merge + run)\n  \
     ensemble mcp install --client <claude|codex|opencode> [--repo <p>] [--team <name>] [--name <id>] [--exe <p>] [--crew <p>] [--config <p>] [--print]   (one-click: register `ensemble mcp` into that CLI's config)\n  \
@@ -98,6 +99,12 @@ fn main() {
 /// (the 4-adapter registry) over `/health` + `/run`. A `RemoteAdapter` on another machine drives
 /// them. Plain HTTP over the tailnet (WireGuard encrypts). Blocks forever.
 fn serve_cmd(args: &[String]) {
+    if has_flag(args, "--install-service") {
+        return serve_install_service_cmd(args);
+    }
+    if has_flag(args, "--uninstall-service") {
+        return serve_uninstall_service_cmd(args);
+    }
     require_value_if_present(args, "--token");
     let explicit = parse_flag(args, "--bind");
     let token = control_token(args);
@@ -154,6 +161,547 @@ fn up_cmd(args: &[String]) {
         eprintln!("serve: {e}");
         std::process::exit(1);
     }
+}
+
+fn build_serve_service_config(
+    args: &[String],
+    default_exe: std::path::PathBuf,
+    cwd: &Path,
+) -> Result<ensemble::ServeServiceConfig, String> {
+    for flag in ["--bind", "--token", "--exe"] {
+        require_value_if_present(args, flag);
+    }
+    if has_flag(args, "--install-service") && has_flag(args, "--uninstall-service") {
+        return Err("--install-service and --uninstall-service are mutually exclusive".to_string());
+    }
+    let exe = parse_flag(args, "--exe")
+        .map(std::path::PathBuf::from)
+        .unwrap_or(default_exe);
+    let exe = absolutize_from(exe, cwd);
+    if !exe.is_absolute() {
+        return Err("--exe did not resolve to an absolute path".to_string());
+    }
+    Ok(ensemble::ServeServiceConfig {
+        exe,
+        bind: parse_flag(args, "--bind"),
+        // Only bake an explicit token into a service definition. The ambient ENSEMBLE_TOKEN for this
+        // install shell may be temporary and should not silently become persistent service state.
+        token: control_token_from_sources(parse_flag(args, "--token"), None),
+    })
+}
+
+fn default_service_config(args: &[String]) -> ensemble::ServeServiceConfig {
+    let default_exe = std::env::current_exe().unwrap_or_else(|e| {
+        eprintln!("ensemble serve --install-service: cannot determine this binary's path ({e}) — pass --exe <path>");
+        std::process::exit(2);
+    });
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    build_serve_service_config(args, default_exe, &cwd).unwrap_or_else(|e| {
+        eprintln!("ensemble serve: {e}");
+        std::process::exit(2);
+    })
+}
+
+fn serve_install_service_cmd(args: &[String]) {
+    let cfg = default_service_config(args);
+    let print = has_flag(args, "--print");
+    if let Err(e) = install_serve_service(&cfg, print) {
+        eprintln!("ensemble serve --install-service: {e}");
+        std::process::exit(1);
+    }
+}
+
+fn serve_uninstall_service_cmd(args: &[String]) {
+    for flag in ["--bind", "--token", "--exe"] {
+        require_value_if_present(args, flag);
+    }
+    if has_flag(args, "--install-service") {
+        eprintln!(
+            "ensemble serve: --install-service and --uninstall-service are mutually exclusive"
+        );
+        std::process::exit(2);
+    }
+    let cfg = default_service_config(args);
+    let print = has_flag(args, "--print");
+    if let Err(e) = uninstall_serve_service(&cfg, print) {
+        eprintln!("ensemble serve --uninstall-service: {e}");
+        std::process::exit(1);
+    }
+}
+
+fn install_serve_service(cfg: &ensemble::ServeServiceConfig, print: bool) -> Result<(), String> {
+    if print {
+        print_service_install_plan(cfg)?;
+        return Ok(());
+    }
+
+    #[cfg(windows)]
+    {
+        end_windows_task_if_present()?;
+        run_command("schtasks", &ensemble::windows_install_argv(cfg))?;
+        return run_command("schtasks", &ensemble::windows_run_argv());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let path = ensemble::launchd_agent_path(&service_home_dir()?);
+        let dir = path
+            .parent()
+            .ok_or_else(|| format!("bad launchd path: {}", path.display()))?;
+        std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+        if path
+            .try_exists()
+            .map_err(|e| format!("stat {}: {e}", path.display()))?
+        {
+            let subject = path.display().to_string();
+            run_command_path_allow_missing(
+                "launchctl",
+                &["unload", "-w"],
+                Some(&path),
+                &[subject.as_str(), ensemble::LAUNCHD_LABEL],
+                &[
+                    "no such file",
+                    "could not find specified service",
+                    "not found",
+                    "not loaded",
+                    "does not exist",
+                ],
+                &[
+                    "no such file",
+                    "could not find specified service",
+                    "not loaded",
+                ],
+            )?;
+        } else {
+            run_command_path_allow_missing(
+                "launchctl",
+                &["remove", ensemble::LAUNCHD_LABEL],
+                None,
+                &[ensemble::LAUNCHD_LABEL],
+                &[
+                    "no such file",
+                    "could not find specified service",
+                    "not found",
+                    "not loaded",
+                    "does not exist",
+                ],
+                &["could not find specified service", "not loaded"],
+            )?;
+        }
+        std::fs::write(&path, ensemble::launchd_plist(cfg))
+            .map_err(|e| format!("write {}: {e}", path.display()))?;
+        return run_command_path("launchctl", &["load", "-w"], Some(&path));
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let path = ensemble::systemd_user_unit_path(&service_home_dir()?);
+        let dir = path
+            .parent()
+            .ok_or_else(|| format!("bad systemd path: {}", path.display()))?;
+        std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+        std::fs::write(&path, ensemble::systemd_unit(cfg))
+            .map_err(|e| format!("write {}: {e}", path.display()))?;
+        run_command("systemctl", &["--user".into(), "daemon-reload".into()])?;
+        run_command(
+            "systemctl",
+            &[
+                "--user".into(),
+                "enable".into(),
+                ensemble::SYSTEMD_UNIT_NAME.into(),
+            ],
+        )?;
+        return run_command(
+            "systemctl",
+            &[
+                "--user".into(),
+                "restart".into(),
+                ensemble::SYSTEMD_UNIT_NAME.into(),
+            ],
+        );
+    }
+    #[allow(unreachable_code)]
+    Err("service install is not supported on this OS".to_string())
+}
+
+fn uninstall_serve_service(cfg: &ensemble::ServeServiceConfig, print: bool) -> Result<(), String> {
+    if print {
+        print_service_uninstall_plan(cfg)?;
+        return Ok(());
+    }
+
+    #[cfg(windows)]
+    {
+        end_windows_task_if_present()?;
+        return run_command_allow_missing(
+            "schtasks",
+            &ensemble::windows_uninstall_argv(),
+            &[ensemble::WINDOWS_TASK_NAME],
+            &[
+                "cannot find",
+                "does not exist",
+                "not found",
+                "不存在",
+                "找不到",
+            ],
+            &[
+                "the system cannot find the file specified",
+                "系統找不到指定的檔案",
+            ],
+        );
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let path = ensemble::launchd_agent_path(&service_home_dir()?);
+        if path
+            .try_exists()
+            .map_err(|e| format!("stat {}: {e}", path.display()))?
+        {
+            let subject = path.display().to_string();
+            run_command_path_allow_missing(
+                "launchctl",
+                &["unload", "-w"],
+                Some(&path),
+                &[subject.as_str(), ensemble::LAUNCHD_LABEL],
+                &[
+                    "no such file",
+                    "could not find specified service",
+                    "not found",
+                    "not loaded",
+                    "does not exist",
+                ],
+                &[
+                    "no such file",
+                    "could not find specified service",
+                    "not loaded",
+                ],
+            )?;
+        } else {
+            run_command_path_allow_missing(
+                "launchctl",
+                &["remove", ensemble::LAUNCHD_LABEL],
+                None,
+                &[ensemble::LAUNCHD_LABEL],
+                &[
+                    "no such file",
+                    "could not find specified service",
+                    "not found",
+                    "not loaded",
+                    "does not exist",
+                ],
+                &["could not find specified service", "not loaded"],
+            )?;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("remove {}: {e}", path.display())),
+        }
+        return Ok(());
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let path = ensemble::systemd_user_unit_path(&service_home_dir()?);
+        run_command_allow_missing(
+            "systemctl",
+            &[
+                "--user".into(),
+                "stop".into(),
+                ensemble::SYSTEMD_UNIT_NAME.into(),
+            ],
+            &[ensemble::SYSTEMD_UNIT_NAME],
+            &["does not exist", "not found", "not loaded", "no such file"],
+            &[],
+        )?;
+        run_command_allow_missing(
+            "systemctl",
+            &[
+                "--user".into(),
+                "disable".into(),
+                ensemble::SYSTEMD_UNIT_NAME.into(),
+            ],
+            &[ensemble::SYSTEMD_UNIT_NAME],
+            &["does not exist", "not found", "not loaded", "no such file"],
+            &[],
+        )?;
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("remove {}: {e}", path.display())),
+        }
+        run_command("systemctl", &["--user".into(), "daemon-reload".into()])?;
+        return Ok(());
+    }
+    #[allow(unreachable_code)]
+    Err("service uninstall is not supported on this OS".to_string())
+}
+
+fn print_service_install_plan(cfg: &ensemble::ServeServiceConfig) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        println!("program: schtasks");
+        for args in [
+            ensemble::windows_end_argv(),
+            ensemble::windows_install_argv(cfg),
+            ensemble::windows_run_argv(),
+        ] {
+            println!("args: {}", args.join(" "));
+        }
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let path = ensemble::launchd_agent_path(&service_home_dir()?);
+        if path
+            .try_exists()
+            .map_err(|e| format!("stat {}: {e}", path.display()))?
+        {
+            println!("command: launchctl unload -w {}", path.display());
+        } else {
+            println!("command: launchctl remove {}", ensemble::LAUNCHD_LABEL);
+        }
+        println!("path: {}", path.display());
+        print!("{}", ensemble::launchd_plist(cfg));
+        println!("command: launchctl load -w {}", path.display());
+        return Ok(());
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let path = ensemble::systemd_user_unit_path(&service_home_dir()?);
+        println!("path: {}", path.display());
+        print!("{}", ensemble::systemd_unit(cfg));
+        println!("command: systemctl --user daemon-reload");
+        println!(
+            "command: systemctl --user enable {}",
+            ensemble::SYSTEMD_UNIT_NAME
+        );
+        println!(
+            "command: systemctl --user restart {}",
+            ensemble::SYSTEMD_UNIT_NAME
+        );
+        return Ok(());
+    }
+    #[allow(unreachable_code)]
+    Err("service install is not supported on this OS".to_string())
+}
+
+fn print_service_uninstall_plan(_cfg: &ensemble::ServeServiceConfig) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        println!("program: schtasks");
+        for args in [
+            ensemble::windows_end_argv(),
+            ensemble::windows_uninstall_argv(),
+        ] {
+            println!("args: {}", args.join(" "));
+        }
+        return Ok(());
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let path = ensemble::launchd_agent_path(&service_home_dir()?);
+        if path
+            .try_exists()
+            .map_err(|e| format!("stat {}: {e}", path.display()))?
+        {
+            println!("command: launchctl unload -w {}", path.display());
+        } else {
+            println!("command: launchctl remove {}", ensemble::LAUNCHD_LABEL);
+        }
+        println!("remove: {}", path.display());
+        return Ok(());
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let path = ensemble::systemd_user_unit_path(&service_home_dir()?);
+        println!(
+            "command: systemctl --user stop {}",
+            ensemble::SYSTEMD_UNIT_NAME
+        );
+        println!(
+            "command: systemctl --user disable {}",
+            ensemble::SYSTEMD_UNIT_NAME
+        );
+        println!("remove: {}", path.display());
+        println!("command: systemctl --user daemon-reload");
+        return Ok(());
+    }
+    #[allow(unreachable_code)]
+    Err("service uninstall is not supported on this OS".to_string())
+}
+
+#[cfg(unix)]
+fn service_home_dir() -> Result<std::path::PathBuf, String> {
+    let home = home_dir();
+    if home.is_absolute() {
+        Ok(home)
+    } else {
+        Err("could not determine an absolute home directory for the user service".to_string())
+    }
+}
+
+#[cfg(windows)]
+fn end_windows_task_if_present() -> Result<(), String> {
+    run_command_allow_missing(
+        "schtasks",
+        &ensemble::windows_end_argv(),
+        &[ensemble::WINDOWS_TASK_NAME],
+        &[
+            "cannot find",
+            "does not exist",
+            "not found",
+            "not currently running",
+            "currently not running",
+            "not running",
+            "不存在",
+            "找不到",
+            "未執行",
+            "沒有執行",
+        ],
+        &[
+            "the system cannot find the file specified",
+            "系統找不到指定的檔案",
+            "the task is not currently running",
+            "工作目前並未執行",
+            "工作未執行",
+        ],
+    )
+}
+
+#[cfg(any(windows, all(unix, not(target_os = "macos"))))]
+fn run_command(program: &str, args: &[String]) -> Result<(), String> {
+    let output = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|e| format!("{program}: {e}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(format_command_failure(program, args, &output))
+}
+
+#[cfg(target_os = "macos")]
+fn run_command_path(program: &str, args: &[&str], path: Option<&Path>) -> Result<(), String> {
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args);
+    if let Some(path) = path {
+        cmd.arg(path);
+    }
+    let output = cmd.output().map_err(|e| format!("{program}: {e}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let mut display_args = args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    if let Some(path) = path {
+        display_args.push(path.display().to_string());
+    }
+    Err(format_command_failure(program, &display_args, &output))
+}
+
+#[cfg(target_os = "macos")]
+fn run_command_path_allow_missing(
+    program: &str,
+    args: &[&str],
+    path: Option<&Path>,
+    expected_subjects: &[&str],
+    missing_markers: &[&str],
+    scoped_missing_markers: &[&str],
+) -> Result<(), String> {
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(args);
+    if let Some(path) = path {
+        cmd.arg(path);
+    }
+    let output = cmd.output().map_err(|e| format!("{program}: {e}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    if output_contains_missing_marker(
+        &output,
+        expected_subjects,
+        missing_markers,
+        scoped_missing_markers,
+    ) {
+        return Ok(());
+    }
+    let mut display_args = args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    if let Some(path) = path {
+        display_args.push(path.display().to_string());
+    }
+    Err(format_command_failure(program, &display_args, &output))
+}
+
+#[cfg(any(windows, all(unix, not(target_os = "macos"))))]
+fn run_command_allow_missing(
+    program: &str,
+    args: &[String],
+    expected_subjects: &[&str],
+    missing_markers: &[&str],
+    scoped_missing_markers: &[&str],
+) -> Result<(), String> {
+    let output = std::process::Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|e| format!("{program}: {e}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    if output_contains_missing_marker(
+        &output,
+        expected_subjects,
+        missing_markers,
+        scoped_missing_markers,
+    ) {
+        return Ok(());
+    }
+    Err(format_command_failure(program, args, &output))
+}
+
+fn output_contains_missing_marker(
+    output: &std::process::Output,
+    expected_subjects: &[&str],
+    missing_markers: &[&str],
+    scoped_missing_markers: &[&str],
+) -> bool {
+    text_contains_missing_marker(
+        &command_output_text(output),
+        expected_subjects,
+        missing_markers,
+        scoped_missing_markers,
+    )
+}
+
+fn text_contains_missing_marker(
+    text: &str,
+    expected_subjects: &[&str],
+    missing_markers: &[&str],
+    scoped_missing_markers: &[&str],
+) -> bool {
+    let text = text.to_lowercase();
+    let subject_matches = expected_subjects
+        .iter()
+        .any(|subject| text.contains(&subject.to_lowercase()));
+    (subject_matches
+        && missing_markers
+            .iter()
+            .any(|marker| text.contains(&marker.to_lowercase())))
+        || scoped_missing_markers
+            .iter()
+            .any(|marker| text.contains(&marker.to_lowercase()))
+}
+
+fn format_command_failure(program: &str, args: &[String], output: &std::process::Output) -> String {
+    format!(
+        "{} {} exited {}: {}",
+        program,
+        args.join(" "),
+        output.status,
+        command_output_text(output).trim()
+    )
+}
+
+fn command_output_text(output: &std::process::Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    format!("{stdout}{stderr}")
 }
 
 /// `ensemble watch <member[@node]> [--repo <p>] [--node <host|url>] [--team <name>] [--token <token>] [--since <n>] [--follow] [--json]` — tail a member's stream feed
@@ -3572,6 +4120,79 @@ backup = "agy"
 
         // The override pins the exact program; PATH resolution of bare `codex` is bypassed.
         assert_eq!(plan.vendor_program, fake.display().to_string());
+    }
+
+    #[test]
+    fn serve_service_config_uses_explicit_exe_bind_and_token() {
+        let cwd = test_abs("cwd");
+        let default_exe = test_abs("bin").join("ensemble");
+        let parsed = build_serve_service_config(
+            &argv(&[
+                "ensemble",
+                "serve",
+                "--install-service",
+                "--exe",
+                "bin/ensemble",
+                "--bind",
+                "100.64.0.1:7878",
+                "--token",
+                " secret ",
+            ]),
+            default_exe,
+            &cwd,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.exe, cwd.join("bin/ensemble"));
+        assert_eq!(parsed.bind.as_deref(), Some("100.64.0.1:7878"));
+        assert_eq!(parsed.token.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn serve_service_config_uses_default_exe_without_baking_env_token() {
+        let cwd = test_abs("cwd");
+        let default_exe = test_abs("bin").join("ensemble");
+        let parsed = build_serve_service_config(
+            &argv(&["ensemble", "serve", "--install-service"]),
+            default_exe.clone(),
+            &cwd,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.exe, default_exe);
+        assert_eq!(parsed.bind, None);
+        assert_eq!(
+            parsed.token, None,
+            "service install should bake only an explicit --token, not the caller's ambient env"
+        );
+    }
+
+    #[test]
+    fn missing_marker_matching_is_case_insensitive_and_specific() {
+        assert!(text_contains_missing_marker(
+            "Unit ENSEMBLE.service is NOT LOADED.",
+            &["ensemble.service"],
+            &["not loaded"],
+            &[]
+        ));
+        assert!(!text_contains_missing_marker(
+            "Failed to disable unit: Permission denied",
+            &["ensemble.service"],
+            &["not loaded", "does not exist"],
+            &[]
+        ));
+        assert!(!text_contains_missing_marker(
+            "Failed to disable dependency.service: not found",
+            &["ensemble.service"],
+            &["not found"],
+            &[]
+        ));
+        assert!(text_contains_missing_marker(
+            "ERROR: The system cannot find the file specified.",
+            &["ensemble-serve"],
+            &["does not exist"],
+            &["the system cannot find the file specified"]
+        ));
     }
 
     #[test]
