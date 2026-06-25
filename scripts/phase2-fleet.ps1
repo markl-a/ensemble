@@ -183,6 +183,24 @@ function Get-ProjectCrewSha256($Project) {
     return Get-StringSha256 ([string]$Project.Text)
 }
 
+function Get-ProjectSpecSha256($Project, [string]$CrewSha256) {
+    $spec = [ordered]@{
+        kind = [string]$Project.Kind
+        name = [string]$Project.Name
+        node = [string]$Project.Node
+        repo = [string]$Project.Repo
+        crew = [string]$Project.Crew
+        team = [string]$Project.Team
+        watch = [string]$Project.Watch
+        task = [string]$Project.Task
+        merge = [bool]$Project.Merge
+        minApprovals = [int]$Project.MinApprovals
+        reviewerAgents = @($Project.ReviewerAgents | ForEach-Object { [string]$_ })
+        crewSha256 = [string]$CrewSha256
+    }
+    return Get-StringSha256 ($spec | ConvertTo-Json -Depth 8 -Compress)
+}
+
 function Assert-GeneratedCrewCurrent($Project) {
     $expected = Get-ProjectCrewSha256 $Project
     $actual = Get-FileSha256 $Project.Crew
@@ -677,6 +695,7 @@ function Clear-AcceptanceReport($Project) {
 
 function Write-AcceptanceReport($Project, [object[]]$Runs) {
     $crewSha256 = Assert-GeneratedCrewCurrent $Project
+    $specSha256 = Get-ProjectSpecSha256 $Project $crewSha256
     $path = Get-AcceptanceReportPath $Project
     $dir = Split-Path -Parent $path
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
@@ -697,7 +716,9 @@ function Write-AcceptanceReport($Project, [object[]]$Runs) {
             team = $Project.Team
             watch = $Project.Watch
             crew = $Project.Crew
+            task = $Project.Task
             crewSha256 = $crewSha256
+            specSha256 = $specSha256
             merge = [bool]$Project.Merge
             minApprovals = [int]$Project.MinApprovals
             reviewerAgents = @($Project.ReviewerAgents)
@@ -755,9 +776,14 @@ function Assert-AcceptanceReport($Project, $Report) {
     $projectTeam = Require-ReportField $projectInfo "team" "$context project"
     $projectWatch = Require-ReportField $projectInfo "watch" "$context project"
     $projectCrewSha256 = Require-ReportField $projectInfo "crewSha256" "$context project"
+    $projectSpecSha256 = Require-ReportField $projectInfo "specSha256" "$context project"
     $expectedCrewSha256 = Assert-GeneratedCrewCurrent $Project
     if ([string]$projectCrewSha256 -ne $expectedCrewSha256) {
         Fail "$context was produced from a stale generated crew hash"
+    }
+    $expectedSpecSha256 = Get-ProjectSpecSha256 $Project $expectedCrewSha256
+    if ([string]$projectSpecSha256 -ne $expectedSpecSha256) {
+        Fail "$context was produced from a stale project spec hash"
     }
     if ($projectName -ne $Project.Name) {
         Fail "acceptance report project name mismatch: got '$projectName', expected '$($Project.Name)'"
@@ -1214,6 +1240,9 @@ function Invoke-SelfTest {
     if ([string]::IsNullOrWhiteSpace([string]$report.project.crewSha256)) {
         Fail "self-test expected acceptance report to bind the generated crew hash"
     }
+    if ([string]::IsNullOrWhiteSpace([string]$report.project.specSha256)) {
+        Fail "self-test expected acceptance report to bind the generated project spec hash"
+    }
     Invoke-AcceptanceReportVerifier $nodePlan
     $scriptPath = if ([string]::IsNullOrWhiteSpace($PSCommandPath)) { Join-Path $PSScriptRoot "phase2-fleet.ps1" } else { $PSCommandPath }
     $childOut = & pwsh -NoProfile -File $scriptPath -Manifest $manifestPath -Node m2 -VerifyReports -RepeatCount 2 2>&1
@@ -1320,6 +1349,43 @@ function Invoke-SelfTest {
     }
     if ($childCode -eq 0) {
         Fail "self-test expected CLI -VerifyReports to reject an acceptance report with a stale generated crew hash`n$($childOut | Out-String)"
+    }
+    $currentCrewHash = Assert-GeneratedCrewCurrent $sat
+    $wrongSpecHashReport = [pscustomobject]@{
+        ok = $true
+        node = "m2"
+        verifyEvidence = $true
+        repeatCount = 2
+        project = [pscustomobject]@{
+            name = "sat-a"
+            team = "sat-a"
+            watch = "sat-a"
+            crewSha256 = $currentCrewHash
+            specSha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+        runs = @(
+            [pscustomobject]@{
+                iteration = 1
+                terminal = "landed"
+                evidenceVerified = $true
+                exitCode = 0
+            },
+            [pscustomobject]@{
+                iteration = 2
+                terminal = "landed"
+                evidenceVerified = $true
+                exitCode = 0
+            }
+        )
+    }
+    $wrongSpecHashReport | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $acceptanceReport -Encoding utf8NoBOM
+    $childOut = & pwsh -NoProfile -File $scriptPath -Manifest $manifestPath -Node m2 -VerifyReports -RepeatCount 2 2>&1
+    $childCode = $LASTEXITCODE
+    if ($null -eq $childCode) {
+        $childCode = 0
+    }
+    if ($childCode -eq 0) {
+        Fail "self-test expected CLI -VerifyReports to reject an acceptance report with a stale project spec hash`n$($childOut | Out-String)"
     }
     Set-Content -LiteralPath $acceptanceReport -Encoding utf8NoBOM -Value '{"ok":true,"stale":true}'
     $fakeEvidenceFail = Join-Path $root "fake-evidence-fail.ps1"
