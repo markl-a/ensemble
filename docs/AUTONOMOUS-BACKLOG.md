@@ -161,6 +161,13 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-25 — **Phase 2 local readiness wrapper added.**
+  `scripts/phase2-local-ready.ps1` chains the existing verifiers needed before moving to the real 5-node
+  fleet: Phase 1 deterministic acceptance, Phantom single-machine bridge, and Phase 2 Slice A +
+  Slice B governance preflight + Slice C local mesh/nodes. Clean reinstall remains opt-in via
+  `-RunCleanReinstall` because it mutates the user-level install. Verified with the full default local-ready
+  path, a faster `-SkipPhase1 -SkipPhantom` Phase 2-only path, and an all-skip negative check that must fail
+  instead of fake-green.
 - 2026-06-25 — **Phantom single-machine bridge verifier added.**
   `scripts/phantom-single-machine.ps1` checks the bridge between Phase 1 manual local testing and Phase 2
   fleet testing: direct `ensemble agent <agent> PONG --node local --json` must return `ok:true` and

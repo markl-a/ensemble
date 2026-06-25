@@ -299,6 +299,17 @@ limited to simple shell-safe characters (`A-Z`, `a-z`, `0-9`, `_`, `.`, `/`,
 `:`, `@`, `\`, `=`, `-`); the script fails clearly if a value cannot be passed
 through that simple shell bridge.
 
+When Phase 1 manual testing and the Phantom bridge look good, run the local
+readiness wrapper before moving to the five-machine Phase 2 pass:
+
+```powershell
+pwsh scripts\phase2-local-ready.ps1 -Repo D:\Projects\ensemble
+```
+
+It chains the deterministic Phase 1 acceptance, Phantom bridge, and the local
+Phase 2 slices that do not require m1~m5 to be online. Add `-RunCleanReinstall`
+only when you intentionally want to exercise the install/uninstall path.
+
 Use a scratch repo for the first personal test:
 
 ```powershell
