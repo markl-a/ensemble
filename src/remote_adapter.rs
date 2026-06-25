@@ -173,12 +173,12 @@ fn map_kind(kind: Option<&str>, msg: String) -> AdapterError {
     match kind {
         Some("Empty") => AdapterError::Empty,
         // Re-parse the wire message so the remote node's reset time survives the round-trip.
-        Some("RateLimited") => AdapterError::RateLimited(
-            detect_rate_limit(&msg).unwrap_or(RateLimitInfo {
+        Some("RateLimited") => {
+            AdapterError::RateLimited(detect_rate_limit(&msg).unwrap_or(RateLimitInfo {
                 reason: msg,
                 retry_at: None,
-            }),
-        ),
+            }))
+        }
         Some("NotInstalled") => AdapterError::NotInstalled(msg),
         _ => AdapterError::Flaked(msg),
     }

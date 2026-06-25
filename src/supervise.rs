@@ -150,6 +150,14 @@ pub trait RunObserver: Send + Sync {
     fn post(&self, m: &crate::blackboard::Message);
 }
 
+impl RunObserver for Vec<Box<dyn RunObserver>> {
+    fn post(&self, m: &crate::blackboard::Message) {
+        for observer in self {
+            observer.post(m);
+        }
+    }
+}
+
 /// The production `RunObserver`: mirrors each blackboard post into an append-only `ndjson::Feed` (one
 /// `Message` JSON per line) for `ensemble watch <name> --follow` to tail. Best-effort — a serialize or
 /// write failure is swallowed so live supervision can NEVER change a governed run's outcome.
@@ -421,6 +429,32 @@ mod tests {
             rendered.contains("codex") && rendered.contains("did the thing"),
             "rendered: {rendered}"
         );
+    }
+
+    #[test]
+    fn run_observer_vec_fans_out_to_every_sink() {
+        use std::sync::{Arc, Mutex};
+
+        struct Rec(Arc<Mutex<Vec<String>>>);
+        impl RunObserver for Rec {
+            fn post(&self, m: &crate::blackboard::Message) {
+                self.0.lock().unwrap().push(m.kind.clone());
+            }
+        }
+
+        let one = Arc::new(Mutex::new(Vec::new()));
+        let two = Arc::new(Mutex::new(Vec::new()));
+        let observers: Vec<Box<dyn RunObserver>> =
+            vec![Box::new(Rec(one.clone())), Box::new(Rec(two.clone()))];
+
+        observers.post(&crate::blackboard::Message {
+            from: "conductor".to_string(),
+            kind: "decision".to_string(),
+            body: "LANDED".to_string(),
+        });
+
+        assert_eq!(one.lock().unwrap().as_slice(), ["decision"]);
+        assert_eq!(two.lock().unwrap().as_slice(), ["decision"]);
     }
 
     #[test]

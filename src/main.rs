@@ -14,7 +14,7 @@ fn abort_flag() -> Arc<AtomicBool> {
 }
 
 const USAGE: &str = "usage:\n  \
-    ensemble run \"<task>\" [--crew <crew.toml>] [--repo <path>] [--merge [--into <target>]] [--watch <name>]\n  \
+    ensemble run \"<task>\" [--crew <crew.toml>] [--repo <path>] [--team <name>] [--merge [--into <target>]] [--watch <name>]\n  \
     ensemble run-many \"<task1>\" \"<task2>\" ... [--crew <crew.toml>] [--repo <path>]\n  \
     ensemble dispatch \"<task1>\" ... --ledger <db> [--crew <crew.toml>] [--repo <path>]   (durable, resumable)\n  \
     ensemble ledger <status|recover> --ledger <db> [--stale-secs N]\n  \
@@ -1992,6 +1992,7 @@ fn council_run_one(
 fn run_single(args: &[String]) {
     require_value_if_present(args, "--into"); // used by --merge; reject a value-less `--into`
     require_value_if_present(args, "--watch"); // S1a live stream name; reject a value-less `--watch`
+    require_value_if_present(args, "--team"); // optional team board mirror for Phase-2 fleet runs
     let task = match positional_tasks(args) {
         tasks if tasks.len() == 1 => tasks[0].clone(),
         _ => {
@@ -2001,23 +2002,27 @@ fn run_single(args: &[String]) {
     };
     let crew = load_crew(args);
     let repo = parse_flag(args, "--repo").unwrap_or_else(|| ".".to_string());
+    let watch_name = parse_flag(args, "--watch");
+    let team = parse_flag(args, "--team");
     let registry = adapters_for(&crew, !has_flag(args, "--no-discover"));
     let mut c = Conductor::new(crew, registry).with_abort(abort_flag());
+    let mut observers: Vec<Box<dyn ensemble::RunObserver>> = Vec::new();
     // S1a/S1b live supervision: --watch <name> opens the stream feed (.ensemble/stream/<name>.ndjson) so
     // the operator can `ensemble watch <name> --follow` the run live, AND the control feed
     // (.ensemble/control/<name>.ndjson) so `ensemble steer/abort <name>` can redirect or stop it.
-    if let Some(name) = parse_flag(args, "--watch") {
+    if let Some(name) = watch_name.as_deref() {
         eprintln!(
             "ensemble run: live `{name}` — watch: ensemble watch {name} --follow | \
              steer: ensemble steer {name} \"...\" | abort: ensemble abort {name} [--hard]"
         );
-        let stream = ensemble::Feed::open(ensemble::member_stream_path(Path::new(&repo), &name));
+        let stream = ensemble::Feed::open(ensemble::member_stream_path(Path::new(&repo), name));
+        observers.push(Box::new(ensemble::FeedObserver::new(stream)));
         // S1b control watcher: feed the ControlState from the control feed. Start the cursor at the END
         // so stale commands from a previous run are ignored. Daemon thread — ends when the process exits.
         let ctrl = std::sync::Arc::new(ensemble::ControlState::default());
         let ctrl_w = ctrl.clone();
         let control_feed =
-            ensemble::Feed::open(ensemble::member_control_path(Path::new(&repo), &name));
+            ensemble::Feed::open(ensemble::member_control_path(Path::new(&repo), name));
         std::thread::spawn(move || {
             let mut cursor = control_feed.len().unwrap_or(0);
             loop {
@@ -2025,9 +2030,16 @@ fn run_single(args: &[String]) {
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
         });
-        c = c
-            .with_stream(Box::new(ensemble::FeedObserver::new(stream)))
-            .with_control(ctrl);
+        c = c.with_control(ctrl);
+    }
+    if let Some(team) = team.as_deref() {
+        let member = watch_name.as_deref().unwrap_or("run");
+        let session =
+            ensemble::resolve_team_session(Path::new(&repo), Some(team), "run", Some(member), None);
+        observers.push(Box::new(ensemble::TeamObserver::new(session)));
+    }
+    if !observers.is_empty() {
+        c = c.with_stream(Box::new(observers));
     }
     let out = c.run_in_repo(&task, Path::new(&repo));
     print_transcript(&out);
@@ -3203,6 +3215,20 @@ backup = "agy"
     fn value_flags_still_consume_their_value() {
         let a = argv(&["ensemble", "run", "--crew", "c.toml", "task", "--repo", "."]);
         assert_eq!(positional_tasks(&a), vec!["task".to_string()]);
+    }
+
+    #[test]
+    fn run_team_and_watch_flags_do_not_become_tasks() {
+        let a = argv(&[
+            "ensemble",
+            "run",
+            "--team",
+            "main",
+            "--watch",
+            "main",
+            "phase2 task",
+        ]);
+        assert_eq!(positional_tasks(&a), vec!["phase2 task".to_string()]);
     }
 
     #[test]

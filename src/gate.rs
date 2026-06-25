@@ -1,5 +1,6 @@
 use crate::crew::GatePolicy;
 use crate::verdict::Verdict;
+use std::collections::HashSet;
 
 /// One reviewer's verdict (excluded/flaked reviewers are simply absent from the slice).
 #[derive(Debug, Clone)]
@@ -23,10 +24,7 @@ pub fn decide(verdicts: &[RoleVerdict], policy: &GatePolicy, round: u32) -> Gate
     if verdicts.is_empty() {
         return GateDecision::Escalate("no reviewers available (all excluded/flaked)".to_string());
     }
-    let approvals = verdicts
-        .iter()
-        .filter(|v| matches!(v.verdict, Verdict::Approve))
-        .count() as u32;
+    let approvals = distinct_vendor_approvals(verdicts);
     if approvals >= policy.min_approvals {
         return GateDecision::Land;
     }
@@ -48,6 +46,17 @@ pub fn decide(verdicts: &[RoleVerdict], policy: &GatePolicy, round: u32) -> Gate
     GateDecision::Iterate(changes)
 }
 
+fn distinct_vendor_approvals(verdicts: &[RoleVerdict]) -> u32 {
+    let mut vendors: HashSet<&str> = HashSet::new();
+    for v in verdicts
+        .iter()
+        .filter(|v| matches!(v.verdict, Verdict::Approve))
+    {
+        vendors.insert(v.agent.as_str());
+    }
+    vendors.len() as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,11 +72,39 @@ mod tests {
             max_task_secs: 0,
         }
     }
+
     fn rv(role: &str, agent: &str, v: Verdict) -> RoleVerdict {
         RoleVerdict {
             role: role.into(),
             agent: agent.into(),
             verdict: v,
+        }
+    }
+
+    #[test]
+    fn dedups_vendor_approvals() {
+        let vs = vec![
+            rv("review", "claude", Verdict::Approve),
+            rv("audit", "claude", Verdict::Approve),
+            rv("security", "opencode", Verdict::Approve),
+        ];
+        assert!(matches!(decide(&vs, &policy(2, 2), 0), GateDecision::Land));
+        assert!(matches!(
+            decide(&vs, &policy(3, 2), 0),
+            GateDecision::Iterate(_)
+        ));
+    }
+
+    #[test]
+    fn distinct_vendor_approvals_counts_change_roles() {
+        let vs = vec![
+            rv("review", "claude", Verdict::Changes("needs fix".into())),
+            rv("audit", "claude", Verdict::Approve),
+            rv("security", "agy", Verdict::Approve),
+        ];
+        match decide(&vs, &policy(2, 2), 0) {
+            GateDecision::Land => {}
+            other => panic!("expected land, got {other:?}"),
         }
     }
 
@@ -79,6 +116,7 @@ mod tests {
         ];
         assert!(matches!(decide(&vs, &policy(2, 2), 0), GateDecision::Land));
     }
+
     #[test]
     fn iterates_with_changes_when_rounds_remain() {
         let vs = vec![
@@ -90,6 +128,7 @@ mod tests {
             other => panic!("expected Iterate, got {other:?}"),
         }
     }
+
     #[test]
     fn escalates_when_rounds_exhausted() {
         let vs = vec![rv("review", "claude", Verdict::Changes("nope".into()))];
@@ -98,6 +137,7 @@ mod tests {
             GateDecision::Escalate(_)
         ));
     }
+
     #[test]
     fn escalates_when_no_reviewers_left() {
         // all reviewers were excluded (flaked) ⇒ empty ⇒ never fake a land

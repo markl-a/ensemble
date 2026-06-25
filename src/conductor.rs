@@ -90,6 +90,22 @@ impl Conductor {
         }
     }
 
+    fn escalated(&self, mut bb: Blackboard, rounds: u32, why: impl Into<String>) -> RunOutcome {
+        let why = why.into();
+        self.note(
+            &mut bb,
+            "conductor",
+            "decision",
+            &format!("escalated: {why}"),
+        );
+        RunOutcome {
+            decision: Decision::Escalated(why),
+            rounds,
+            blackboard: bb,
+            branch: None,
+        }
+    }
+
     /// Whether the operator has aborted (firewall B). A driver loop (e.g. `dispatch`) checks this to
     /// stop claiming new work rather than fail-marking the whole queue.
     pub fn aborted(&self) -> bool {
@@ -197,23 +213,14 @@ impl Conductor {
                     "interrupted",
                     if hard { "hard abort" } else { "abort" },
                 );
-                return RunOutcome {
-                    decision: Decision::Escalated("aborted by operator".to_string()),
-                    rounds: round,
-                    blackboard: bb,
-                    branch: None,
-                };
+                return self.escalated(bb, round, "aborted by operator");
             }
             if over_budget(started.elapsed().as_secs(), self.crew.gate.max_task_secs) {
-                return RunOutcome {
-                    decision: Decision::Escalated(format!(
-                        "timed out after {}s",
-                        self.crew.gate.max_task_secs
-                    )),
-                    rounds: round,
-                    blackboard: bb,
-                    branch: None,
-                };
+                return self.escalated(
+                    bb,
+                    round,
+                    format!("timed out after {}s", self.crew.gate.max_task_secs),
+                );
             }
 
             // 1) implementer — quota-aware: a rate-limited implementer is auto-substituted to its
@@ -227,32 +234,31 @@ impl Conductor {
                 .unwrap_or_default();
             let impl_prompt = build_prompt(task, &bb, &feedback, impl_role, false);
             let impl_text;
-            let (impl_result, _impl_effective) =
-                self.run_role_with_quota_fallback(&mut bb, impl_role, &impl_agent, &impl_prompt, cwd);
+            let (impl_result, _impl_effective) = self.run_role_with_quota_fallback(
+                &mut bb,
+                impl_role,
+                &impl_agent,
+                &impl_prompt,
+                cwd,
+            );
             match impl_result {
                 Some(Ok(out)) => {
                     impl_text = out.text.clone();
                     self.note(&mut bb, &out.agent, "result", &out.text);
                 }
                 Some(Err(e)) => {
-                    return RunOutcome {
-                        decision: Decision::Escalated(format!(
-                            "implementer '{impl_role}' failed: {e}"
-                        )),
-                        rounds: round + 1,
-                        blackboard: bb,
-                        branch: None,
-                    };
+                    return self.escalated(
+                        bb,
+                        round + 1,
+                        format!("implementer '{impl_role}' failed: {e}"),
+                    );
                 }
                 None => {
-                    return RunOutcome {
-                        decision: Decision::Escalated(format!(
-                            "no adapter for implementer role '{impl_role}'"
-                        )),
-                        rounds: round + 1,
-                        blackboard: bb,
-                        branch: None,
-                    };
+                    return self.escalated(
+                        bb,
+                        round + 1,
+                        format!("no adapter for implementer role '{impl_role}'"),
+                    );
                 }
             }
 
@@ -291,29 +297,22 @@ impl Conductor {
             // `.max(2)` so a misconfigured `stall_limit = 1` can't trip at round 0 (the first round
             // has nothing to compare against) — the minimum meaningful value is 2 identical rounds.
             if self.crew.gate.stall_limit > 0 && same >= self.crew.gate.stall_limit.max(2) {
-                return RunOutcome {
-                    decision: Decision::Escalated(format!(
-                        "circuit-broken: no progress across {same} identical rounds"
-                    )),
-                    rounds: round + 1,
-                    blackboard: bb,
-                    branch: None,
-                };
+                return self.escalated(
+                    bb,
+                    round + 1,
+                    format!("circuit-broken: no progress across {same} identical rounds"),
+                );
             }
 
             // test RED → bounce the traceback back to the implementer, skip reviewers this round; a
             // suite that never goes green can NEVER land.
             if !test_passed {
                 if round + 1 >= max {
-                    return RunOutcome {
-                        decision: Decision::Escalated(format!(
-                            "tests never passed after {} round(s)",
-                            round + 1
-                        )),
-                        rounds: round + 1,
-                        blackboard: bb,
-                        branch: None,
-                    };
+                    return self.escalated(
+                        bb,
+                        round + 1,
+                        format!("tests never passed after {} round(s)", round + 1),
+                    );
                 }
                 feedback = vec![format!(
                     "Your changes did not pass the test suite. Fix WITHOUT breaking existing \
@@ -342,8 +341,10 @@ impl Conductor {
                 let (mut result, mut effective_agent) =
                     self.run_role_with_quota_fallback(&mut bb, role, &agent_name, &prompt, cwd);
 
-                let was_quota =
-                    matches!(result, Some(Err(crate::adapter::AdapterError::RateLimited(_))));
+                let was_quota = matches!(
+                    result,
+                    Some(Err(crate::adapter::AdapterError::RateLimited(_)))
+                );
                 if matches!(result, Some(Err(_))) && !was_quota {
                     match self.crew.gate.on_flake {
                         OnFlake::Exclude => {}
@@ -415,12 +416,7 @@ impl Conductor {
                             "interrupted",
                             if hard { "hard abort" } else { "abort" },
                         );
-                        return RunOutcome {
-                            decision: Decision::Escalated("aborted by operator".to_string()),
-                            rounds: round + 1,
-                            blackboard: bb,
-                            branch: None,
-                        };
+                        return self.escalated(bb, round + 1, "aborted by operator");
                     }
                     self.note(&mut bb, "conductor", "decision", "LANDED");
                     return RunOutcome {
@@ -431,36 +427,14 @@ impl Conductor {
                     };
                 }
                 GateDecision::Escalate(why) => {
-                    self.note(
-                        &mut bb,
-                        "conductor",
-                        "decision",
-                        &format!("escalated: {why}"),
-                    );
-                    return RunOutcome {
-                        decision: Decision::Escalated(why),
-                        rounds: round + 1,
-                        blackboard: bb,
-                        branch: None,
-                    };
+                    return self.escalated(bb, round + 1, why);
                 }
                 GateDecision::Iterate(changes) => {
                     feedback = changes;
                 }
             }
         }
-        self.note(
-            &mut bb,
-            "conductor",
-            "decision",
-            "escalated: max rounds reached",
-        );
-        RunOutcome {
-            decision: Decision::Escalated("max rounds reached".to_string()),
-            rounds: max,
-            blackboard: bb,
-            branch: None,
-        }
+        self.escalated(bb, max, "max rounds reached")
     }
 
     /// Run the pipeline for `task` in a fresh git worktree of `repo`, cleaning it up afterward.
@@ -484,14 +458,20 @@ impl Conductor {
                             // so the CLI headline, the process exit code, and `run_many`'s
                             // any-escalated check all reflect that the operator must intervene (the
                             // transcript still records what the agents produced).
-                            out.blackboard.post(
+                            let why = format!("commit failed, work not persisted: {e}");
+                            self.note(
+                                &mut out.blackboard,
                                 "ensemble",
                                 "finding",
                                 &format!("commit failed, work NOT persisted: {e}"),
                             );
-                            out.decision = Decision::Escalated(format!(
-                                "commit failed, work not persisted: {e}"
-                            ));
+                            self.note(
+                                &mut out.blackboard,
+                                "conductor",
+                                "decision",
+                                &format!("escalated: {why}"),
+                            );
+                            out.decision = Decision::Escalated(why);
                         }
                     }
                 }
@@ -513,7 +493,9 @@ impl Conductor {
             }
             Err(e) => {
                 let mut bb = Blackboard::new();
-                bb.post(
+                let why = format!("worktree unavailable: {e}");
+                self.note(
+                    &mut bb,
                     "ensemble",
                     "finding",
                     &format!(
@@ -521,8 +503,14 @@ impl Conductor {
                         repo.display()
                     ),
                 );
+                self.note(
+                    &mut bb,
+                    "conductor",
+                    "decision",
+                    &format!("escalated: {why}"),
+                );
                 RunOutcome {
-                    decision: Decision::Escalated(format!("worktree unavailable: {e}")),
+                    decision: Decision::Escalated(why),
                     rounds: 0,
                     blackboard: bb,
                     branch: None,
@@ -711,6 +699,99 @@ mod tests {
         );
     }
 
+    #[test]
+    fn run_in_repo_streams_worktree_unavailable_escalation() {
+        use super::*;
+        use crate::adapter::Adapter;
+        use crate::blackboard::Message;
+        use crate::supervise::RunObserver;
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        struct Rec(Arc<Mutex<Vec<(String, String, String)>>>);
+        impl RunObserver for Rec {
+            fn post(&self, m: &Message) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((m.from.clone(), m.kind.clone(), m.body.clone()));
+            }
+        }
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let adapters: HashMap<String, Box<dyn Adapter>> = HashMap::new();
+        let c =
+            Conductor::new(impl_review_crew(1), adapters).with_stream(Box::new(Rec(log.clone())));
+        let tmp = tempfile::tempdir().unwrap();
+
+        let out = c.run_in_repo("task that cannot get a worktree", tmp.path());
+
+        assert!(
+            matches!(out.decision, Decision::Escalated(ref why) if why.contains("worktree unavailable")),
+            "expected worktree escalation, got {:?}",
+            out.decision
+        );
+        let seen = log.lock().unwrap();
+        assert!(
+            seen.iter()
+                .any(|(from, kind, _)| from == "ensemble" && kind == "finding"),
+            "early finding streamed: {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|(from, kind, body)| {
+                from == "conductor" && kind == "decision" && body.contains("escalated")
+            }),
+            "early terminal decision streamed: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn implementer_failure_streams_terminal_decision() {
+        use super::*;
+        use crate::adapter::{Adapter, AdapterError, MockAdapter};
+        use crate::blackboard::Message;
+        use crate::supervise::RunObserver;
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+
+        struct Rec(Arc<Mutex<Vec<(String, String, String)>>>);
+        impl RunObserver for Rec {
+            fn post(&self, m: &Message) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((m.from.clone(), m.kind.clone(), m.body.clone()));
+            }
+        }
+
+        let mut adapters: HashMap<String, Box<dyn Adapter>> = HashMap::new();
+        adapters.insert(
+            "impl".to_string(),
+            Box::new(MockAdapter::new(
+                "impl",
+                vec![Err(AdapterError::Flaked("boom".to_string()))],
+            )),
+        );
+
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let c =
+            Conductor::new(impl_review_crew(1), adapters).with_stream(Box::new(Rec(log.clone())));
+        let out = c.run("do the thing", std::path::Path::new("."));
+
+        assert!(
+            matches!(out.decision, Decision::Escalated(ref why) if why.contains("implementer")),
+            "expected implementer escalation, got {:?}",
+            out.decision
+        );
+        let seen = log.lock().unwrap();
+        assert!(
+            seen.iter().any(|(from, kind, body)| {
+                from == "conductor" && kind == "decision" && body.contains("escalated")
+            }),
+            "terminal decision streamed: {seen:?}"
+        );
+    }
+
     // ---- feature 3: quota-aware auto-remediation ----
 
     #[test]
@@ -770,11 +851,17 @@ mod tests {
         );
         adapters.insert(
             "opencode".to_string(),
-            Box::new(MockAdapter::new("opencode", vec![Ok("implemented it".to_string())])),
+            Box::new(MockAdapter::new(
+                "opencode",
+                vec![Ok("implemented it".to_string())],
+            )),
         );
         adapters.insert(
             "claude".to_string(),
-            Box::new(MockAdapter::new("claude", vec![Ok("VERDICT: LGTM".to_string())])),
+            Box::new(MockAdapter::new(
+                "claude",
+                vec![Ok("VERDICT: LGTM".to_string())],
+            )),
         );
 
         let out = Conductor::new(crew, adapters).run("task", std::path::Path::new("."));
@@ -786,12 +873,14 @@ mod tests {
         );
         let msgs = out.blackboard.read_since(0);
         assert!(
-            msgs.iter().any(|m| m.from == "opencode" && m.kind == "result"),
+            msgs.iter()
+                .any(|m| m.from == "opencode" && m.kind == "result"),
             "backup 'opencode' should have produced the implementation: {msgs:?}"
         );
         assert!(
             msgs.iter()
-                .any(|m| m.kind == "finding" && m.body.contains("retry after Jun 25th, 2026 5:33 AM")),
+                .any(|m| m.kind == "finding"
+                    && m.body.contains("retry after Jun 25th, 2026 5:33 AM")),
             "the quota reason + reset time must be logged: {msgs:?}"
         );
     }
@@ -844,7 +933,10 @@ mod tests {
         let mut adapters: HashMap<String, Box<dyn Adapter>> = HashMap::new();
         adapters.insert(
             "codex".to_string(),
-            Box::new(MockAdapter::new("codex", vec![Ok("implemented it".to_string())])),
+            Box::new(MockAdapter::new(
+                "codex",
+                vec![Ok("implemented it".to_string())],
+            )),
         );
         adapters.insert(
             "claude".to_string(),
@@ -855,7 +947,10 @@ mod tests {
         );
         adapters.insert(
             "opencode".to_string(),
-            Box::new(MockAdapter::new("opencode", vec![Ok("VERDICT: LGTM".to_string())])),
+            Box::new(MockAdapter::new(
+                "opencode",
+                vec![Ok("VERDICT: LGTM".to_string())],
+            )),
         );
 
         let out = Conductor::new(crew, adapters).run("task", std::path::Path::new("."));
@@ -866,7 +961,8 @@ mod tests {
         );
         let msgs = out.blackboard.read_since(0);
         assert!(
-            msgs.iter().any(|m| m.from == "opencode" && m.kind == "verdict"),
+            msgs.iter()
+                .any(|m| m.from == "opencode" && m.kind == "verdict"),
             "backup 'opencode' should have cast the approving verdict: {msgs:?}"
         );
     }
@@ -974,13 +1070,13 @@ mod tests {
         use std::sync::atomic::Ordering;
         use std::sync::{Arc, Mutex};
 
-        struct Rec(Arc<Mutex<Vec<(String, String)>>>);
+        struct Rec(Arc<Mutex<Vec<(String, String, String)>>>);
         impl RunObserver for Rec {
             fn post(&self, m: &Message) {
                 self.0
                     .lock()
                     .unwrap()
-                    .push((m.from.clone(), m.kind.clone()));
+                    .push((m.from.clone(), m.kind.clone(), m.body.clone()));
             }
         }
         let mut adapters: HashMap<String, Box<dyn Adapter>> = HashMap::new();
@@ -1011,8 +1107,14 @@ mod tests {
         let seen = log.lock().unwrap();
         assert!(
             seen.iter()
-                .any(|(f, k)| f == "operator" && k == "interrupted"),
+                .any(|(f, k, _)| f == "operator" && k == "interrupted"),
             "interrupted streamed: {seen:?}"
+        );
+        assert!(
+            seen.iter().any(|(from, kind, body)| {
+                from == "conductor" && kind == "decision" && body.contains("escalated")
+            }),
+            "terminal decision streamed: {seen:?}"
         );
     }
 }

@@ -78,13 +78,33 @@ function Invoke-EnsembleCapture(
     [string]$Title,
     [string[]]$CommandArgs,
     [string]$ArtifactName,
-    [switch]$AllowFailure
+    [switch]$AllowFailure,
+    [int]$TimeoutSec = 0
 ) {
     Write-Host "== $Title ==" -ForegroundColor Cyan
     $stdoutPath = Join-Path $ArtifactDir $ArtifactName
     $stderrPath = "$stdoutPath.stderr"
-    & $exe @CommandArgs > $stdoutPath 2> $stderrPath
-    $code = $LASTEXITCODE
+    if ($TimeoutSec -gt 0) {
+        $proc = Start-Process -FilePath $exe -ArgumentList $CommandArgs -NoNewWindow -PassThru `
+            -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -WorkingDirectory $SmokeRoot
+        if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
+            try {
+                if ($IsWindows) {
+                    taskkill /PID $proc.Id /T /F | Out-Null
+                } else {
+                    $proc.Kill()
+                }
+            } catch { }
+            $proc.WaitForExit(3000) | Out-Null
+            $code = 124
+            Add-Content -LiteralPath $stderrPath -Encoding utf8 -Value "$Title timed out after ${TimeoutSec}s"
+        } else {
+            $code = $proc.ExitCode
+        }
+    } else {
+        & $exe @CommandArgs > $stdoutPath 2> $stderrPath
+        $code = $LASTEXITCODE
+    }
     $stdout = Read-TextFile $stdoutPath
     $stderr = Read-TextFile $stderrPath
     if (-not [string]::IsNullOrWhiteSpace($stdout)) {
@@ -446,7 +466,8 @@ $(Toml-AgentTimeouts -Agents $uniqueAgents -Timeout $TimeoutSecs)
             "supervisor advisory json" `
             @("supervise", $Watch, "--repo", ".", "--team", $Team, "--agent", "claude", "--json") `
             "supervisor-advisory.json" `
-            -AllowFailure | Out-Null
+            -AllowFailure `
+            -TimeoutSec $TimeoutSecs | Out-Null
     }
 
     Invoke-EnsembleCapture `

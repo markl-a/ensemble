@@ -54,7 +54,12 @@ fn find_ci(haystack: &str, needle: &str) -> Option<usize> {
     if n.is_empty() || h.len() < n.len() {
         return None;
     }
-    (0..=h.len() - n.len()).find(|&i| h[i..i + n.len()].iter().zip(n).all(|(a, b)| a.eq_ignore_ascii_case(b)))
+    (0..=h.len() - n.len()).find(|&i| {
+        h[i..i + n.len()]
+            .iter()
+            .zip(n)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+    })
 }
 
 /// Markers that identify a rate-limit / quota-exhaustion across vendors (codex, claude, opencode,
@@ -209,14 +214,18 @@ mod tests {
     #[test]
     fn detect_rate_limit_parses_codex_usage_limit_and_reset_time() {
         // The exact line codex prints on quota exhaustion (observed 2026-06-24, M5 native run).
-        let s = "ERROR: You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage \
+        let s =
+            "ERROR: You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage \
                  to purchase more credits or try again at Jun 25th, 2026 5:33 AM.";
         let info = detect_rate_limit(s).expect("usage-limit line must be detected");
         assert!(info.reason.to_lowercase().contains("usage limit"));
         assert_eq!(info.retry_at.as_deref(), Some("Jun 25th, 2026 5:33 AM"));
         // and it surfaces in Display (which flows into the transcript + wire error message).
         let shown = AdapterError::RateLimited(info).to_string();
-        assert!(shown.contains("retry after Jun 25th, 2026 5:33 AM"), "got {shown}");
+        assert!(
+            shown.contains("retry after Jun 25th, 2026 5:33 AM"),
+            "got {shown}"
+        );
     }
 
     #[test]

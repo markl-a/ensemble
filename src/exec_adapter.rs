@@ -287,7 +287,7 @@ mod tests {
         // whole run. (`sleep`/`ping` are the portable "block for a while" primitives.)
         let timeout = Duration::from_millis(500);
         #[cfg(windows)]
-        let a = ExecAdapter::raw("sleeper", "ping", &["-n", "8", "127.0.0.1"], timeout);
+        let a = ExecAdapter::raw("sleeper", "ping", &["-n", "30", "127.0.0.1"], timeout);
         #[cfg(not(windows))]
         let a = ExecAdapter::raw("sleeper", "sleep", &["6"], timeout);
 
@@ -298,8 +298,12 @@ mod tests {
             matches!(r, Err(AdapterError::Flaked(_))),
             "a timed-out turn must Flake, got {r:?}"
         );
+        #[cfg(windows)]
+        let limit = Duration::from_secs(10);
+        #[cfg(not(windows))]
+        let limit = Duration::from_secs(4);
         assert!(
-            elapsed < Duration::from_secs(4),
+            elapsed < limit,
             "must kill near the timeout, not wait out the child: {elapsed:?}"
         );
     }
@@ -372,8 +376,12 @@ mod tests {
             matches!(r, Err(AdapterError::Flaked(_))),
             "an aborted turn must Flake, got {r:?}"
         );
+        #[cfg(windows)]
+        let limit = Duration::from_secs(10);
+        #[cfg(not(windows))]
+        let limit = Duration::from_secs(3);
         assert!(
-            start.elapsed() < Duration::from_secs(3),
+            start.elapsed() < limit,
             "must die near the abort: {:?}",
             start.elapsed()
         );

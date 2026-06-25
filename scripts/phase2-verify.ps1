@@ -241,6 +241,15 @@ function Parse-JsonOrFail([string]$Text, [string]$Label) {
     }
 }
 
+function Stream-Cursor([string]$RepoPath, [string]$Name) {
+    $streamPath = Join-Path $RepoPath ".ensemble/stream/$Name.ndjson"
+    if (-not (Test-Path -LiteralPath $streamPath -PathType Leaf)) {
+        return 0
+    }
+    $lines = @(Get-Content -LiteralPath $streamPath)
+    return $lines.Count
+}
+
 function Run-SliceA {
     Step "Slice A: control plane local + routing checks" {
         Require-Tool git
@@ -313,6 +322,19 @@ function Run-SliceB {
             $runTask = "phase2-verify-$ts"
         }
 
+        $preTeamInbox = Invoke-EnsembleCapture @(
+            "team", "inbox",
+            "--repo", $Repo,
+            "--team", $Team,
+            "--since", "0",
+            "--json"
+        ) "team inbox cursor before run" -TimeoutSec 20
+        $preInboxJson = Parse-JsonOrFail $preTeamInbox.Stdout "team inbox before run"
+        $preInboxCursor = [int]$preInboxJson.next
+
+        $preWatchCursor = Stream-Cursor $Repo $Watch
+        Write-Host "watch cursor before run: $preWatchCursor" -ForegroundColor DarkGray
+
         $runArgs = @(
             "run", $runTask,
             "--crew", $Crew,
@@ -327,15 +349,53 @@ function Run-SliceB {
         if ($runText -notmatch "LANDED|ESCALATED") {
             Fail "ensemble run output did not show LANDED/ESCALATED terminal state"
         }
+        $expectedDecision = if ($runResult.Code -eq 0 -and $runText -match "LANDED") {
+            "LANDED"
+        } elseif ($runResult.Code -ne 0 -and $runText -match "ESCALATED") {
+            "ESCALATED"
+        } else {
+            Fail "ensemble run exit/output mismatch; exit=$($runResult.Code), output did not clearly identify the terminal outcome"
+        }
+
+        $postTeamInbox = Invoke-EnsembleCapture @(
+            "team", "inbox",
+            "--repo", $Repo,
+            "--team", $Team,
+            "--since", "$preInboxCursor",
+            "--json"
+        ) "team inbox events from run" -TimeoutSec 20
+        $postInboxJson = Parse-JsonOrFail $postTeamInbox.Stdout "team inbox after run"
+        $runDecisionMessages = @(
+            $postInboxJson.messages | Where-Object {
+                $_.from -eq "conductor" -and
+                $_.kind -eq "decision"
+            }
+        )
+        if ($runDecisionMessages.Count -lt 1) {
+            Fail "run --team $Team did not write a conductor decision event to the team board"
+        }
+        $lastDecision = $runDecisionMessages[$runDecisionMessages.Count - 1]
+        if ($expectedDecision -eq "LANDED") {
+            if ($lastDecision.body -ne "LANDED") {
+                Fail "last team-board conductor decision was '$($lastDecision.body)', expected LANDED"
+            }
+        } else {
+            if ($lastDecision.body -notmatch "^escalated:") {
+                Fail "last team-board conductor decision was '$($lastDecision.body)', expected escalated"
+            }
+        }
 
         $watchResult = Invoke-EnsembleCapture @(
             "watch", $Watch,
             "--repo", $Repo,
             "--team", $Team,
-            "--since", "0"
+            "--since", "$preWatchCursor"
         ) "watch run trace" -TimeoutSec 20
         if ($watchResult.Code -ne 0) {
             Fail "watch run trace failed"
+        }
+        if ($watchResult.Stdout -notmatch "\[conductor\s*.\s*decision\]") {
+            Fail "watch output from cursor $preWatchCursor did not include a conductor decision from this run"
         }
 
         $steerResult = Invoke-EnsembleCapture @(

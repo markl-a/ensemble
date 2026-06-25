@@ -145,6 +145,24 @@ pub fn team_status(session: &TeamSession) -> io::Result<TeamStatus> {
     LocalControlPlane::new().team_status(session)
 }
 
+#[derive(Debug, Clone)]
+pub struct TeamObserver {
+    session: TeamSession,
+}
+
+impl TeamObserver {
+    pub fn new(session: TeamSession) -> Self {
+        Self { session }
+    }
+}
+
+impl crate::supervise::RunObserver for TeamObserver {
+    fn post(&self, m: &Message) {
+        let _ =
+            LocalControlPlane::new().post_team_message(&self.session, &m.from, &m.kind, &m.body);
+    }
+}
+
 pub fn render_team_inbox(inbox: &TeamInbox) -> String {
     if inbox.messages.is_empty() {
         return format!("no messages (next={})", inbox.next);
@@ -335,5 +353,26 @@ mod tests {
         assert_eq!(v["boardLen"], 1);
         assert_eq!(v["ledgerCounts"]["queued"], 1);
         assert_eq!(v["streams"][0], "codex-host");
+    }
+
+    #[test]
+    fn team_observer_mirrors_run_messages_to_the_team_board() {
+        use crate::supervise::RunObserver;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let s = resolve_team_session(tmp.path(), Some("main"), "run", Some("main"), None);
+        let observer = TeamObserver::new(s.clone());
+
+        observer.post(&Message {
+            from: "conductor".to_string(),
+            kind: "decision".to_string(),
+            body: "LANDED".to_string(),
+        });
+
+        let inbox = read_team_inbox(&s, 0).unwrap();
+        assert_eq!(inbox.next, 1);
+        assert_eq!(inbox.messages[0].from, "conductor");
+        assert_eq!(inbox.messages[0].kind, "decision");
+        assert_eq!(inbox.messages[0].body, "LANDED");
     }
 }
