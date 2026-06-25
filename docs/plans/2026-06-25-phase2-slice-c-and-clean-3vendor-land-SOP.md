@@ -80,6 +80,7 @@ pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <this-node
 ```bash
 ensemble mesh        # 期待 local CLIs + remote peers（m2~m5）
 ensemble nodes       # agent→host 輔助視圖；不列本機 m1
+pwsh scripts/phase2-verify.ps1 -Repo . -SkipSliceA -SkipSliceB -SkipSliceD -FleetManifest phase2-fleet.local.json -FleetNode m1 -CheckFleetManifestNodes
 ```
 > 看不到節點 → 回 Step 0：先關 Surfshark 再 `tailscale up`，並確認每台都已 `ensemble up`。
 
@@ -127,8 +128,9 @@ pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m2 -Materi
 
 ```bash
 pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -CheckNodes -PlanOnly
+pwsh scripts/phase2-verify.ps1 -Repo . -SkipSliceA -SkipSliceB -SkipSliceD -FleetManifest phase2-fleet.local.json -FleetNode m1 -CheckFleetManifestNodes
 ```
-`-CheckNodes` 會用 `ensemble mesh` 檢查 remote peers（m2~m5）；conductor `m1` 是本機，
+`-CheckNodes` / `-CheckFleetManifestNodes` 會用 `ensemble mesh` 檢查 remote peers（m2~m5）；conductor `m1` 是本機，
 不會出現在 tailnet peer 清單中，需由同一次 `mesh` 的 `local CLIs` 區塊確認。
 
 ---

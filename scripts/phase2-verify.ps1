@@ -26,6 +26,9 @@ param(
     [string]$RemoteNode = "",
     [string]$LocalFleetNode = "",
     [string[]]$ExpectedFleetNodes = @(),
+    [string]$FleetManifest = "",
+    [string]$FleetNode = "",
+    [switch]$CheckFleetManifestNodes,
     [string]$SmokeRoot = "",
     [string]$TargetDir = "",
     [switch]$SkipSliceA,
@@ -98,6 +101,71 @@ function Expand-NodeList([string[]]$Nodes) {
         }
     }
     return $expanded
+}
+
+function Resolve-VerifyPath([string]$Path) {
+    if ([System.IO.Path]::IsPathRooted($Path)) {
+        return [System.IO.Path]::GetFullPath($Path)
+    }
+    return [System.IO.Path]::GetFullPath((Join-Path $Repo $Path))
+}
+
+function Read-FleetManifestInfo([string]$Path) {
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $null
+    }
+    $manifestPath = Resolve-VerifyPath $Path
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+        Fail "fleet manifest not found: $manifestPath"
+    }
+    try {
+        $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+    } catch {
+        Fail "fleet manifest is not valid JSON: $manifestPath. $($_.Exception.Message)"
+    }
+    $nodesProp = $manifest.PSObject.Properties["nodes"]
+    if ($null -eq $nodesProp -or @($nodesProp.Value).Count -eq 0) {
+        Fail "fleet manifest must define a non-empty nodes array: $manifestPath"
+    }
+    $nodes = @($nodesProp.Value | ForEach-Object { [string]$_ })
+    $conductorProp = $manifest.PSObject.Properties["conductor"]
+    $conductor = if ($null -ne $conductorProp -and -not [string]::IsNullOrWhiteSpace([string]$conductorProp.Value)) {
+        [string]$conductorProp.Value
+    } else {
+        [string]$nodes[0]
+    }
+    return [pscustomobject]@{
+        Path      = $manifestPath
+        Nodes     = $nodes
+        Conductor = $conductor
+    }
+}
+
+function Invoke-FleetManifestPlan([string]$Path, [string]$NodeName) {
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $null
+    }
+    $info = Read-FleetManifestInfo $Path
+    $fleetScript = Join-Path $PSScriptRoot "phase2-fleet.ps1"
+    if (-not (Test-Path -LiteralPath $fleetScript -PathType Leaf)) {
+        Fail "phase2 fleet script missing: $fleetScript"
+    }
+    $nodeArg = if ([string]::IsNullOrWhiteSpace($NodeName)) {
+        "all"
+    } else {
+        $NodeName
+    }
+    Write-Host "== fleet manifest plan ($nodeArg) ==" -ForegroundColor DarkGray
+    $planOut = pwsh -NoProfile -File $fleetScript -Manifest $info.Path -Node $nodeArg -PlanOnly 2>&1
+    $planCode = $LASTEXITCODE
+    $planText = ($planOut | Out-String).TrimEnd()
+    if (-not [string]::IsNullOrWhiteSpace($planText)) {
+        Write-Host $planText
+    }
+    if ($planCode -ne 0) {
+        Fail "phase2-fleet plan failed for manifest $($info.Path)"
+    }
+    return $info
 }
 
 function Get-EnsembleCmd {
@@ -483,11 +551,30 @@ function Run-SliceC {
             Fail "nodes failed"
         }
 
-        if ($ExpectedFleetNodes.Count -gt 0) {
+        $manifestInfo = Invoke-FleetManifestPlan $FleetManifest $FleetNode
+        $nodesToCheck = @(Expand-NodeList $ExpectedFleetNodes)
+        $localNodeForCheck = $LocalFleetNode
+        if ($CheckFleetManifestNodes) {
+            if ($null -eq $manifestInfo) {
+                Fail "-CheckFleetManifestNodes requires -FleetManifest <path>"
+            }
+            if ($nodesToCheck.Count -gt 0) {
+                Write-Host "-CheckFleetManifestNodes is set; using fleet manifest nodes instead of -ExpectedFleetNodes." -ForegroundColor Yellow
+            }
+            $nodesToCheck = @(Expand-NodeList $manifestInfo.Nodes)
+            if ([string]::IsNullOrWhiteSpace($localNodeForCheck)) {
+                $localNodeForCheck = if (-not [string]::IsNullOrWhiteSpace($FleetNode)) {
+                    $FleetNode
+                } else {
+                    $manifestInfo.Conductor
+                }
+            }
+        }
+
+        if ($nodesToCheck.Count -gt 0) {
             $hosts = @(Get-UrlHosts $mesh.Stdout)
-            $expandedExpected = @(Expand-NodeList $ExpectedFleetNodes)
-            $expectedNodes = @($expandedExpected | Where-Object {
-                    -not ($LocalFleetNode -and ([string]$_).Equals($LocalFleetNode, [System.StringComparison]::OrdinalIgnoreCase))
+            $expectedNodes = @($nodesToCheck | Where-Object {
+                    -not ($localNodeForCheck -and ([string]$_).Equals($localNodeForCheck, [System.StringComparison]::OrdinalIgnoreCase))
                 })
             $missing = New-Object System.Collections.Generic.List[string]
             foreach ($expectedHost in $expectedNodes) {
@@ -498,8 +585,8 @@ function Run-SliceC {
             if ($missing.Count -gt 0) {
                 Fail "expected remote fleet node(s) not found in mesh output: $($missing -join ', ')"
             }
-            if ($LocalFleetNode) {
-                Write-Host "Slice C skipped local fleet node '$LocalFleetNode' because mesh/nodes only list tailnet peers." -ForegroundColor DarkGray
+            if ($localNodeForCheck) {
+                Write-Host "Slice C skipped local fleet node '$localNodeForCheck' because mesh/nodes only list tailnet peers." -ForegroundColor DarkGray
             }
         }
         Write-Host "Slice C note: full 5-node restart/run loop still needs per-host terminal execution." -ForegroundColor Yellow

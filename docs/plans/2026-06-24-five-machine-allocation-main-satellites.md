@@ -98,6 +98,7 @@ pwsh /path/to/ensemble/scripts/phase2-fleet.ps1 -Manifest /path/to/ensemble/phas
 ```powershell
 ensemble mesh
 ensemble nodes
+pwsh /path/to/ensemble/scripts/phase2-verify.ps1 -Repo <repo> -SkipSliceA -SkipSliceB -SkipSliceD -FleetManifest /path/to/ensemble/phase2-fleet.local.json -FleetNode <this-node> -CheckFleetManifestNodes
 ```
 
 啟動主專案治理 run：

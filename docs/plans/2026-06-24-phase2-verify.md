@@ -56,6 +56,8 @@ pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo D:\Projects\ensemble -Team
 - `ensemble mesh`
 - `ensemble nodes`
 - 檢查 `ensemble mesh` 中有預期 remote peers（可用 `-ExpectedFleetNodes m1,m2,m3,m4,m5 -LocalFleetNode m1`；本機 conductor 會被跳過，因為 tailnet peer discovery 不列自己）
+- 若已有 `phase2-fleet.local.json`，可直接讓 verifier 印出同一份 manifest 的 Slice C plan：`-FleetManifest phase2-fleet.local.json -FleetNode m1`
+- 若要從 manifest.nodes 自動檢查 expected peers，加 `-CheckFleetManifestNodes`；本機節點可用 `-FleetNode <this-node>` 或 `-LocalFleetNode <this-node>` 排除，因為 `mesh/nodes` 不列自己
 
 手動（每台主機）：
 
