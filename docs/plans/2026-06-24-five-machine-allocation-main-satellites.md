@@ -196,7 +196,7 @@ ensemble run "衛星任務" --crew .ensemble/phase2-fleet/crew-sat-a.generated.t
 1. 所有節點：`ensemble up`；若要常駐則先 `pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <this-node> -Service install-print -RunService`，確認後改成 `-Service install -RunService`
 2. 全員確認：`ensemble mesh`、`ensemble nodes`、`ensemble doctor`
 3. 每台依角色執行 `pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <m1..m5> -Materialize -PlanOnly`
-4. 確認 plan 正確後，該節點執行 `pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <m1..m5> -Materialize -RunSelected`（`-RunSelected` 必須指定非 `all` 的 `-Node`）
+4. 確認 plan 正確後，該節點執行 `pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node <m1..m5> -Materialize -RunSelected -VerifyEvidence -RepeatCount 2`（`-RunSelected` 必須指定非 `all` 的 `-Node`；正式 Slice C 用 `-RepeatCount 2` 驗重跑）
 5. 主專案與衛星專案都由 manifest 內的 `team` / `watch` / `crew` / `repo` 設定產生，不手工改路由
 6. 監控與介入：`ensemble watch` / `ensemble steer` / `ensemble abort`
 
@@ -251,5 +251,5 @@ ensemble watch <sat-team> --follow
 - `ensemble mesh` 能看到本機 CLIs 與預期 remote peers；`ensemble nodes` 能顯示 agent→host 路由輔助狀態。
 - 每次 run 有可讀取的 `stream/control` 事件。
 - `ensemble run` 末端為 `LANDED` 或 `ESCALATED`（含 `escalated` 就是治理不落盤）。
-- 任務可以重跑一次仍可到達同等終局。
+- 任務由 `-RepeatCount 2` 自動重跑一次，兩次都到達同等終局。
 

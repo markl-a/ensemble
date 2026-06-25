@@ -161,6 +161,12 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-25 — **Phase 2 fleet selected runs can now verify rerunability.**
+  `scripts/phase2-fleet.ps1 -RunSelected` now accepts `-RepeatCount <n>` (default 1).
+  Formal Slice C commands use `-VerifyEvidence -RepeatCount 2`, so the same selected main or
+  satellite run captures fresh team/watch/control cursors, runs, verifies evidence, then repeats
+  once more without relying on the operator to remember a second command. `RepeatCount < 1` is
+  rejected. Verified with `phase2-fleet.ps1 -SelfTest`.
 - 2026-06-25 — **Phase 2 fleet satellite crews now preserve the 2-approval governance invariant.**
   `scripts/phase2-fleet.ps1` no longer generates satellite crews with `min_approvals = 1`, and the legacy root `crew-sat-two-ai.toml` sample was aligned too.
   Satellites still use the minimal codex+claude CLI set requested by the operator, but generated

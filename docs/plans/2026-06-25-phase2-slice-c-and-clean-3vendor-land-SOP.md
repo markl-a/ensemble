@@ -132,11 +132,11 @@ pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m2 -Materi
 pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node all -PlanOnly -Json
 ```
 
-確認 plan 正確後，也可以讓腳本直接執行該節點被選中的 `ensemble run`（只跑 `run`，不會自動跑 `up` 或 `watch`）。實機驗收時建議加 `-VerifyEvidence`，腳本會在 run 前自動抓 team/watch/control cursor，run 後自動呼叫 `phase2-run-evidence.ps1 -ExpectTerminal <landed|escalated>`。非零 `ESCALATED` 預設仍會讓腳本失敗；若本次驗收接受 escalate 作為明確終局，加 `-AllowEscalatedRun`。`-RunSelected` 必須搭配明確的 `-Node <host>`，不接受預設的 `all`。service bootstrap 則用 `-Service install-print|install|uninstall-print|uninstall -RunService`，同樣必須指定明確節點：
+確認 plan 正確後，也可以讓腳本直接執行該節點被選中的 `ensemble run`（只跑 `run`，不會自動跑 `up` 或 `watch`）。實機驗收時建議加 `-VerifyEvidence -RepeatCount 2`，腳本會在 run 前自動抓 team/watch/control cursor，run 後自動呼叫 `phase2-run-evidence.ps1 -ExpectTerminal <landed|escalated>`。非零 `ESCALATED` 預設仍會讓腳本失敗；若本次驗收接受 escalate 作為明確終局，加 `-AllowEscalatedRun`。`-RunSelected` 必須搭配明確的 `-Node <host>`，不接受預設的 `all`。service bootstrap 則用 `-Service install-print|install|uninstall-print|uninstall -RunService`，同樣必須指定明確節點：
 
 ```bash
-pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Materialize -RunSelected -VerifyEvidence
-pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m2 -Materialize -RunSelected -VerifyEvidence
+pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Materialize -RunSelected -VerifyEvidence -RepeatCount 2
+pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m2 -Materialize -RunSelected -VerifyEvidence -RepeatCount 2
 ```
 
 在 m1 也可以加上節點檢查：
@@ -165,7 +165,7 @@ ensemble run "<主專案任務>" --crew .ensemble/phase2-fleet/crew-main.generat
 ```
 或由 manifest 直接執行本節點分配到的主專案 run，並自動驗證 team/watch evidence：
 ```bash
-pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Materialize -RunSelected -VerifyEvidence
+pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Materialize -RunSelected -VerifyEvidence -RepeatCount 2
 ```
 任一台操作機可監控 / 介入：
 ```bash
@@ -193,7 +193,7 @@ ensemble run "<衛星任務>" --crew .ensemble/phase2-fleet/crew-sat-a.generated
 ensemble watch sat-a --follow
 pwsh /path/to/ensemble/scripts/phase2-run-evidence.ps1 -Repo . -Team sat-a -Watch sat-a -TeamSince $teamCursor -WatchSince $watchCursor
 ```
-> 更建議先用 `phase2-fleet.ps1 -PlanOnly` 預覽，確認後用 `-RunSelected -VerifyEvidence` 執行，避免 crew path / team / watch 打錯，也避免手動 cursor 記錯。
+> 更建議先用 `phase2-fleet.ps1 -PlanOnly` 預覽，確認後用 `-RunSelected -VerifyEvidence -RepeatCount 2` 執行，避免 crew path / team / watch 打錯，也避免手動 cursor 記錯。
 > generated satellite crew 仍維持 `min_approvals=2`：`claude` review + `codex` audit 兩個 distinct vendor 都 LGTM 才能 land；只是 CLI 集合保持最小的 codex/claude。
 
 ### 完成判定（Slice C）
@@ -202,7 +202,7 @@ pwsh /path/to/ensemble/scripts/phase2-run-evidence.ps1 -Repo . -Team sat-a -Watc
 - 每個 run 的 CLI 結果為 **LANDED** 或 **ESCALATED**；board/watch evidence 末端為 `LANDED` 或 `escalated: ...`（含 escalate＝治理不落盤，也算正確終局；用 `phase2-fleet.ps1 -VerifyEvidence` 時需加 `-AllowEscalatedRun` 才會把非零 escalated run 當成可接受終局）。
 - 每個 run 都能通過 `scripts/phase2-run-evidence.ps1`；有實際介入過的主 run 加 `-RequireControl`。
 - 同一個 repo/team/watch 重跑時，先記 run 前 team/watch/control cursor，再對 `phase2-run-evidence.ps1` 傳 `-TeamSince` / `-WatchSince` / `-ControlSince`，避免舊 run 終局或介入事件混入驗收。
-- 任務可重跑一次仍到達同等終局。
+- 任務由 `-RepeatCount 2` 自動重跑一次，兩次都能到達同等終局。
 
 ---
 
@@ -263,7 +263,7 @@ pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Servic
 # 3) m1 看 fleet
 ensemble mesh && ensemble nodes
 # 4) 主專案（m1）
-pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Materialize -RunSelected -VerifyEvidence
+pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Materialize -RunSelected -VerifyEvidence -RepeatCount 2
 # 5) 衛星（m2~m5 各自）
-pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m2 -Materialize -RunSelected -VerifyEvidence
+pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m2 -Materialize -RunSelected -VerifyEvidence -RepeatCount 2
 ```

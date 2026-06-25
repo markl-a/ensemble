@@ -5,6 +5,8 @@
 #   pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Service install-print -RunService
 #   pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Service install -RunService
 #   pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Service uninstall -RunService
+# Repeatable Slice C acceptance example:
+#   pwsh scripts\phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Materialize -RunSelected -VerifyEvidence -RepeatCount 2
 
 param(
     [string]$Manifest = "phase2-fleet.local.json",
@@ -20,6 +22,7 @@ param(
     [switch]$RequireControlEvidence,
     [switch]$RequireSteerEvidence,
     [switch]$RequireAbortEvidence,
+    [int]$RepeatCount = 1,
     [switch]$PlanOnly,
     [switch]$Json,
     [string]$Service = "none",
@@ -613,37 +616,43 @@ function Invoke-SelectedRuns($Plan) {
     foreach ($project in $projects) {
         $runArgs = New-RunArgs $project.Task $project.Crew $project.Repo $project.Team $project.Watch ([bool]$project.Merge)
         $cmdText = Format-Command $runArgs
-        Write-Host ""
-        Write-Host ("running [{0}] {1}" -f $project.Node, $cmdText)
-        if (-not $VerifyEvidence) {
-            & ensemble @runArgs
+        for ($iteration = 1; $iteration -le $RepeatCount; $iteration++) {
+            Write-Host ""
+            if ($RepeatCount -gt 1) {
+                Write-Host ("running [{0}] repeat {1}/{2}: {3}" -f $project.Node, $iteration, $RepeatCount, $cmdText)
+            } else {
+                Write-Host ("running [{0}] {1}" -f $project.Node, $cmdText)
+            }
+            if (-not $VerifyEvidence) {
+                & ensemble @runArgs
+                $code = $LASTEXITCODE
+                if ($null -eq $code) {
+                    $code = 0
+                }
+                if ($code -ne 0) {
+                    Fail "selected run failed on node '$($project.Node)' with exit code $code"
+                }
+                continue
+            }
+
+            $cursors = Capture-RunEvidenceCursors $project
+            $runOut = & ensemble @runArgs 2>&1
             $code = $LASTEXITCODE
             if ($null -eq $code) {
                 $code = 0
             }
-            if ($code -ne 0) {
-                Fail "selected run failed on node '$($project.Node)' with exit code $code"
+            $runText = ($runOut | Out-String)
+            if (-not [string]::IsNullOrWhiteSpace($runText)) {
+                Write-Host $runText.TrimEnd()
             }
-            continue
-        }
-
-        $cursors = Capture-RunEvidenceCursors $project
-        $runOut = & ensemble @runArgs 2>&1
-        $code = $LASTEXITCODE
-        if ($null -eq $code) {
-            $code = 0
-        }
-        $runText = ($runOut | Out-String)
-        if (-not [string]::IsNullOrWhiteSpace($runText)) {
-            Write-Host $runText.TrimEnd()
-        }
-        $terminal = Get-RunTerminal $runText
-        Invoke-RunEvidenceVerifier $project $cursors $terminal
-        if ($code -ne 0) {
-            if ($terminal -eq "escalated" -and $AllowEscalatedRun) {
-                Write-Host "  run escalated; continuing by design because -AllowEscalatedRun is set." -ForegroundColor Yellow
-            } else {
-                Fail "selected run failed on node '$($project.Node)' with exit code $code"
+            $terminal = Get-RunTerminal $runText
+            Invoke-RunEvidenceVerifier $project $cursors $terminal
+            if ($code -ne 0) {
+                if ($terminal -eq "escalated" -and $AllowEscalatedRun) {
+                    Write-Host "  run escalated; continuing by design because -AllowEscalatedRun is set." -ForegroundColor Yellow
+                } else {
+                    Fail "selected run failed on node '$($project.Node)' with exit code $code"
+                }
             }
         }
     }
@@ -922,25 +931,28 @@ function Invoke-SelfTest {
     $oldEvidenceScript = $env:ENSEMBLE_PHASE2_EVIDENCE_SCRIPT
     $oldEvidenceLog = $env:ENSEMBLE_FAKE_EVIDENCE_LOG
     $oldVerifyEvidence = $script:VerifyEvidence
+    $oldRepeatCount = $script:RepeatCount
     $env:PATH = "$fakeBin$([System.IO.Path]::PathSeparator)$oldPath"
     $env:ENSEMBLE_FAKE_LOG = $fakeLog
     $env:ENSEMBLE_PHASE2_EVIDENCE_SCRIPT = $fakeEvidence
     $env:ENSEMBLE_FAKE_EVIDENCE_LOG = $evidenceLog
     $script:VerifyEvidence = $true
+    $script:RepeatCount = 2
     try {
         Invoke-SelectedRuns $nodePlan
     }
     finally {
         $env:PATH = $oldPath
         $script:VerifyEvidence = $oldVerifyEvidence
+        $script:RepeatCount = $oldRepeatCount
         if ($null -eq $oldFakeLog) { Remove-Item Env:\ENSEMBLE_FAKE_LOG -ErrorAction SilentlyContinue } else { $env:ENSEMBLE_FAKE_LOG = $oldFakeLog }
         if ($null -eq $oldEvidenceScript) { Remove-Item Env:\ENSEMBLE_PHASE2_EVIDENCE_SCRIPT -ErrorAction SilentlyContinue } else { $env:ENSEMBLE_PHASE2_EVIDENCE_SCRIPT = $oldEvidenceScript }
         if ($null -eq $oldEvidenceLog) { Remove-Item Env:\ENSEMBLE_FAKE_EVIDENCE_LOG -ErrorAction SilentlyContinue } else { $env:ENSEMBLE_FAKE_EVIDENCE_LOG = $oldEvidenceLog }
     }
     $verifyFakeOut = Get-Content -Raw -LiteralPath $fakeLog
     $verifyFakeLines = @($verifyFakeOut -split "`r?`n" | Where-Object { $_.Trim().Length -gt 0 })
-    if ($verifyFakeLines.Count -ne 1) {
-        Fail "self-test expected -RunSelected -VerifyEvidence to execute exactly one selected run"
+    if ($verifyFakeLines.Count -ne 2) {
+        Fail "self-test expected -RunSelected -VerifyEvidence -RepeatCount 2 to execute exactly two selected runs"
     }
     $evidenceOut = Get-Content -Raw -LiteralPath $evidenceLog
     if ($evidenceOut -notmatch '-Repo .+sat-a') {
@@ -1026,6 +1038,9 @@ if ($AllowEscalatedRun -and -not $VerifyEvidence) {
 }
 if (($RequireControlEvidence -or $RequireSteerEvidence -or $RequireAbortEvidence) -and -not $VerifyEvidence) {
     Fail "-RequireControlEvidence/-RequireSteerEvidence/-RequireAbortEvidence require -VerifyEvidence"
+}
+if ($RepeatCount -lt 1) {
+    Fail "-RepeatCount must be >= 1"
 }
 if ($RunSelected -and $PlanOnly) {
     Fail "-RunSelected cannot be combined with -PlanOnly"
