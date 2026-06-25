@@ -4,6 +4,23 @@
 AI-CLI collaborative dev crew), THEN advance the phantom-mesh main roadmap. This file is the
 queue a recurring cron drains — **one double-gated task per tick.**
 
+## Phase 2 live note (2026-06-26)
+
+- **Phantom bootstrap fallback added:** `scripts/phase2-phantom-bootstrap.ps1` can probe/start/verify
+  Phase-2 `ensemble up --port <service.port>` through Phantom's HMAC-protected `:7878` admin shell and
+  tool RPC when SSH/Tailscale SSH is unavailable. It reads the cluster secret only from
+  `PHANTOM_CLUSTER_SECRET` or an operator-supplied untracked `-SecretFile`, never prints it, resolves
+  short node names through Tailscale DNS, and treats `verify` as green when `ensemble` health is already
+  reachable even if Phantom is absent on the conductor. Windows peers missing `ensemble.exe` can be
+  installed without inbound HTTP by `-WindowsExePath`, which chunk-uploads the local exe via Phantom
+  `file_write`, decodes it into `%LOCALAPPDATA%\ensemble\bin`, then starts `ensemble up`. macOS/Linux
+  peers can build/install from a remote repo path/branch in the background. Live evidence this turn:
+  the conductor plus three reachable peers answer `ensemble /health` on `8788`; `ensemble mesh --port
+  8788` shows the three remote peers. Remaining Phase-2 fleet blocker: the fifth peer is online on
+  Tailscale and pingable, but has no `7878`/`8788` listener; OpenSSH returns publickey denied and the
+  Tailscale SSH wrapper is blocked by host-key strict checking, so it still needs an external login/service
+  bootstrap path before full 5-node Slice C can pass.
+
 ## ▶ CURRENT FOCUS (2026-06-21) — finish Phase 1 of the two-phase plan
 Spec: `docs/specs/2026-06-20-two-phase-real-tests-design.md` + `docs/specs/2026-06-20-ensemble-mcp-design.md`.
 DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver ✅ (merge_with_resolver + `ensemble merge --resolver`)** · step 5 exec-timeout ✅ · **step 3 `ensemble mcp` slice 1 ✅** (mesh + board_read) · **slice 2 ✅@3b5a96d** (`ensemble_board_post`) · **slice 3a ✅@f5f82fa** (`ensemble_worktree`; 8 gate rounds) · **slice 3b ✅@3ecf1c0** (`ensemble_enqueue`+`ensemble_claim` work-queue) · **slice 4a ✅@0121465** (`ensemble_merge {branch, into?}` — land a member's branch via `repo_sync::merge_branch`; conflict = reported outcome not error; concurrent merges serialized by a per-repo lock on the common .git dir; **4 gate rounds** — codex peeled back ref-confusion layer by layer (path `into:"f"` → leading-dash `--detach` → special-ref `HEAD`/tag-shadow), fixed with leading-`-` reject + `git rev-parse --symbolic-full-name == refs/heads/<name>`; codex+claude LGTM) · **slice ④b-i ✅@e6e25a8** (`ensemble_complete {id, outcome}` + `ensemble_fail {id, reason}` — ownership-guarded ledger terminal records: `ledger::complete_owned`/`fail_owned` do a SINGLE atomic guarded `UPDATE ... WHERE id=? AND state='claimed' AND claimed_by=?`, so a member can only close out a task it actually holds a live claim on — the `state='claimed'` predicate also kills the orphan-requeue race; a blocked write is a reported OUTCOME `{completed:false, detail}` not an error; codex+claude LGTM first round) · **slice ④b-ii ✅@d5f6208** (`ensemble_run {task}` — delegate ONE task to a HEADLESS governed crew sub-run via a `CrewRunner` trait injected into `Ctx` (the binary wires a `ConductorRunner` over `Conductor::run_in_repo`; mcp.rs stays free of crew/adapter wiring → happy path is hermetic via a FakeRunner); runs in `ctx.repo`, never a client path; returns `{landed,rounds,branch}`/`{landed,rounds,reason}`; **2 gate rounds** — codex CHANGES r1: tools/list advertised the tool even when production startup leaves the runner `None` (missing crew.toml) → fixed to advertise `ensemble_run` IFF `ctx.runner.is_some()`; r2 codex+claude LGTM). **MCP crew-participation API is now CODE-COMPLETE — all 10 tools** (mesh · board_read · board_post · worktree · enqueue · claim · merge · complete · fail · run).

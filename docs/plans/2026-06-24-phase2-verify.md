@@ -113,6 +113,42 @@ pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo <repo> -Crew <generated-cr
 
 這一段在純本機腳本中不能直接 SSH 到 m1~m5 下命令；因此提供「可觀測」與「部署指令」兩段：
 
+### Phantom bootstrap fallback
+
+若 SSH / Tailscale SSH 不可用，但 peer 上的 `phantom serve` 可連到 `:7878/healthz`，可用 Phantom 的 HMAC-protected admin shell 與 tool RPC 啟動 `ensemble`，避免手工複製 binary 或手工登入節點：
+
+```powershell
+# Probe Phantom + ensemble health. Secret can come from PHANTOM_CLUSTER_SECRET instead of -SecretFile.
+pwsh -NoProfile -File scripts\phase2-phantom-bootstrap.ps1 `
+  -Manifest phase2-fleet.local.json `
+  -SecretFile <untracked-secret-file> `
+  -Action probe
+
+# Start already-installed ensemble on reachable peers.
+pwsh -NoProfile -File scripts\phase2-phantom-bootstrap.ps1 `
+  -Manifest phase2-fleet.local.json `
+  -SecretFile <untracked-secret-file> `
+  -Action start
+
+# Windows peer fallback when ensemble is missing and inbound HTTP is blocked:
+# uploads a local Windows ensemble.exe in chunks via Phantom file_write, decodes it
+# into %LOCALAPPDATA%\ensemble\bin\ensemble.exe, then starts `ensemble up --port <service.port>`.
+pwsh -NoProfile -File scripts\phase2-phantom-bootstrap.ps1 `
+  -Manifest phase2-fleet.local.json `
+  -Node <windows-peer> `
+  -SecretFile <untracked-secret-file> `
+  -Action start `
+  -WindowsExePath D:\tmp\ensemble-phase2-control-port-red\release\ensemble.exe
+```
+
+Notes:
+
+- The script never prints the cluster secret. Prefer `PHANTOM_CLUSTER_SECRET`; `-SecretFile` may point at an untracked local operator file.
+- This transport is intended for Tailscale/private-link peers. Phantom HMAC authenticates requests but does not encrypt HTTP payloads by itself.
+- `verify` treats `ensemble` health as sufficient even if Phantom is not running on the same node. This covers the conductor case where only `ensemble up --port <service.port>` is required.
+- `probe` and `start` still require Phantom reachability on nodes that need bootstrap.
+- macOS/Linux peers without `ensemble` can build from `-MacRepoPath` on `-Branch` in the background; Windows peers can use `-WindowsExePath` chunk upload when URL download is blocked. If `-WindowsExeUrl` is used instead, `-WindowsExeSha256 <sha256>` is required and verified before the downloaded binary is installed or started.
+
 自動可驗證：
 
 - `ensemble mesh`
