@@ -45,7 +45,10 @@ pub use controlled::{
     control_script, pty_program_for_vendor, run_controlled_pty, ControlledPtyConfig,
 };
 pub use council::{council_targets, render_council, short_host, CouncilTarget};
-pub use crew::{AgentConfig, CrewConfig, CrewError, GatePolicy, OnFlake, RoleConfig, TestConfig};
+pub use crew::{
+    AgentConfig, CrewConfig, CrewError, CrewInspection, CrewRoleInspection, GatePolicy, OnFlake,
+    RoleConfig, TestConfig,
+};
 pub use discovery::{
     build_agent_hosts, discover_agent_hosts, discover_mesh, discover_nodes, parse_health_agents,
     probe_agents, Node,

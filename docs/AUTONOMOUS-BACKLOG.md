@@ -161,6 +161,14 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-25 — **Phase 2 Slice B now preflights governance before a run.**
+  New `ensemble crew inspect [--crew <path>] [--json]` uses the Rust TOML parser to expose the
+  pipeline, min approvals, test command, reviewer agents, distinct reviewer count, and explicit
+  active-role remote-agent routes. `scripts/phase2-verify.ps1` now calls it at the start of Slice B and refuses
+  a crew without `[test]`, `min_approvals >= 2`, and at least two distinct reviewer vendors. It also
+  has `-SliceBPreflightOnly` for deterministic gating checks and `-RequireExplicitRemoteAgents` for
+  the real cross-machine acceptance pass. Added `examples/crew-phase2.toml` as the local fallback
+  instead of the older Phase-1 sample, so Phase 2 cannot accidentally pass on an ungated crew.
 - 2026-06-25 — **Phase 2 verifier now does a loopback remote-control smoke for Slice A.**
   `scripts/phase2-verify.ps1` starts a temporary loopback `ensemble serve` with an ephemeral port/token
   during Slice A, then drives the real CLI through `--node http://127.0.0.1:<port>`.

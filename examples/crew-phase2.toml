@@ -1,0 +1,37 @@
+# Phase 2 main-project crew: test-gated, two-reviewer quorum.
+#
+# This is a local/default sample. For the real five-node fleet, generate explicit
+# [agents.<name>].node routes with scripts/phase2-fleet.ps1 from your manifest.
+
+pipeline = ["implement", "review", "audit"]
+
+[gate]
+min_approvals = 2
+max_rounds = 2
+on_flake = "exclude"
+stall_limit = 0
+max_task_secs = 0
+
+[test]
+command = "cargo test --quiet"
+
+[roles.implement]
+agent = "codex"
+
+[roles.review]
+agent = "claude"
+blind = true
+
+[roles.audit]
+agent = "agy"
+blind = true
+
+[agents.codex]
+backup = "agy"
+timeout = 120
+
+[agents.claude]
+timeout = 120
+
+[agents.agy]
+timeout = 180

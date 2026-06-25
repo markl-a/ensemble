@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// What to do when a reviewer agent flakes. `Exclude` drops it from the quorum with a logged
@@ -76,6 +76,28 @@ pub struct CrewConfig {
     pub test: Option<TestConfig>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CrewRoleInspection {
+    pub role: String,
+    pub agent: String,
+    pub blind: bool,
+    pub node: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CrewInspection {
+    pub pipeline: Vec<String>,
+    pub min_approvals: u32,
+    pub max_rounds: u32,
+    pub on_flake: String,
+    pub test_command: Option<String>,
+    pub implementer: Option<CrewRoleInspection>,
+    pub reviewers: Vec<CrewRoleInspection>,
+    pub reviewer_agents: Vec<String>,
+    pub distinct_reviewer_agents: usize,
+    pub explicit_remote_agents: Vec<String>,
+}
+
 fn de_on_flake<'de, D: serde::Deserializer<'de>>(d: D) -> Result<OnFlake, D::Error> {
     let s = String::deserialize(d)?;
     match s.as_str() {
@@ -139,6 +161,65 @@ impl CrewConfig {
     /// The per-command timeout (seconds) configured for `agent` (item 6) for its LOCAL turns, if any.
     pub fn timeout_for(&self, agent: &str) -> Option<u64> {
         self.agents.get(agent).and_then(|a| a.timeout)
+    }
+
+    pub fn inspect(&self) -> CrewInspection {
+        let role_inspection = |role: &str| -> Option<CrewRoleInspection> {
+            let cfg = self.roles.get(role)?;
+            Some(CrewRoleInspection {
+                role: role.to_string(),
+                agent: cfg.agent.clone(),
+                blind: cfg.blind,
+                node: self.node_for(&cfg.agent).map(|n| n.to_string()),
+            })
+        };
+        let implementer = role_inspection(self.implementer_role());
+        let reviewers: Vec<CrewRoleInspection> = self
+            .reviewer_roles()
+            .into_iter()
+            .filter_map(role_inspection)
+            .collect();
+        let reviewer_agents: Vec<String> = reviewers.iter().map(|r| r.agent.clone()).collect();
+        let distinct_reviewer_agents = reviewer_agents
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        let mut role_agents = std::collections::HashSet::new();
+        if let Some(imp) = &implementer {
+            role_agents.insert(imp.agent.clone());
+        }
+        for reviewer in &reviewers {
+            role_agents.insert(reviewer.agent.clone());
+        }
+        let mut explicit_remote_agents: Vec<String> = self
+            .agents
+            .iter()
+            .filter_map(|(agent, cfg)| {
+                if cfg.node.is_some() && role_agents.contains(agent) {
+                    Some(agent.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        explicit_remote_agents.sort();
+        CrewInspection {
+            pipeline: self.pipeline.clone(),
+            min_approvals: self.gate.min_approvals,
+            max_rounds: self.gate.max_rounds,
+            on_flake: match self.gate.on_flake {
+                OnFlake::Exclude => "exclude",
+                OnFlake::Retry => "retry",
+                OnFlake::Substitute => "substitute",
+            }
+            .to_string(),
+            test_command: self.test.as_ref().map(|t| t.command.clone()),
+            implementer,
+            reviewers,
+            reviewer_agents,
+            distinct_reviewer_agents,
+            explicit_remote_agents,
+        }
     }
 }
 
@@ -329,5 +410,61 @@ mod tests {
         assert_eq!(c.pipeline, vec!["implement", "review", "debug"]);
         assert_eq!(c.roles["implement"].agent, "codex");
         assert!(matches!(c.gate.on_flake, OnFlake::Exclude));
+    }
+
+    #[test]
+    fn parses_phase2_repo_example_with_test_gate_and_quorum() {
+        let p = std::path::Path::new("examples/crew-phase2.toml");
+        let c = CrewConfig::from_path(p).expect("examples/crew-phase2.toml must parse");
+        let inspection = c.inspect();
+        assert_eq!(inspection.min_approvals, 2);
+        assert_eq!(
+            inspection.reviewer_agents,
+            vec!["claude".to_string(), "agy".to_string()]
+        );
+        assert_eq!(inspection.distinct_reviewer_agents, 2);
+        assert!(inspection.test_command.is_some());
+    }
+
+    #[test]
+    fn inspect_reports_phase2_governance_inputs() {
+        let toml = r#"
+            pipeline = ["implement","review","audit"]
+            [gate]
+            min_approvals = 2
+            max_rounds = 2
+            on_flake = "exclude"
+            [test]
+            command = "cargo test --quiet"
+            [roles.implement]
+            agent = "codex"
+            [roles.review]
+            agent = "claude"
+            blind = true
+            [roles.audit]
+            agent = "agy"
+            blind = true
+            [agents.claude]
+            node = "http://m2:7878"
+            [agents.unused]
+            node = "http://unused:7878"
+        "#;
+        let c = CrewConfig::from_toml(toml).unwrap();
+        let got = c.inspect();
+
+        assert_eq!(got.min_approvals, 2);
+        assert_eq!(got.test_command.as_deref(), Some("cargo test --quiet"));
+        assert_eq!(got.implementer.as_ref().unwrap().agent, "codex");
+        assert_eq!(
+            got.reviewer_agents,
+            vec!["claude".to_string(), "agy".to_string()]
+        );
+        assert_eq!(got.distinct_reviewer_agents, 2);
+        assert_eq!(got.reviewers[0].node.as_deref(), Some("http://m2:7878"));
+        assert_eq!(
+            got.explicit_remote_agents,
+            vec!["claude".to_string()],
+            "only explicit remote routes for active pipeline roles should count"
+        );
     }
 }

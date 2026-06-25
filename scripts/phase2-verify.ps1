@@ -24,6 +24,7 @@ param(
     [int]$SmokeTimeoutSecs = 120,
     [int]$UpWarmupSecs = 6,
     [string]$RemoteNode = "",
+    [switch]$RequireExplicitRemoteAgents,
     [string]$LocalFleetNode = "",
     [string[]]$ExpectedFleetNodes = @(),
     [string]$FleetManifest = "",
@@ -35,6 +36,7 @@ param(
     [switch]$SkipSliceB,
     [switch]$SkipSliceC,
     [switch]$SkipSliceD,
+    [switch]$SliceBPreflightOnly,
     [switch]$SkipCleanSmoke,
     [string]$UpBind = ""
 
@@ -378,6 +380,40 @@ function Parse-JsonOrFail([string]$Text, [string]$Label) {
     }
 }
 
+function Assert-Phase2RunCrewGovernance([string]$CrewPath) {
+    $inspect = Invoke-EnsembleCapture @(
+        "crew", "inspect",
+        "--crew", $CrewPath,
+        "--json"
+    ) "crew governance inspect" -TimeoutSec 20
+    $json = Parse-JsonOrFail $inspect.Stdout "crew governance inspect"
+
+    if ([int]$json.min_approvals -lt 2) {
+        Fail "Phase 2 Slice B requires gate.min_approvals >= 2; got $($json.min_approvals)"
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$json.test_command)) {
+        Fail "Phase 2 Slice B requires a non-empty [test] command; the full run must still prove it passes"
+    }
+    $reviewerAgents = @($json.reviewer_agents | ForEach-Object { [string]$_ })
+    if ($reviewerAgents.Count -lt 2) {
+        Fail "Phase 2 Slice B requires at least two reviewer roles; got $($reviewerAgents.Count)"
+    }
+    if ([int]$json.distinct_reviewer_agents -lt 2) {
+        Fail "Phase 2 Slice B requires at least two different reviewer vendors; got $($json.distinct_reviewer_agents)"
+    }
+    if ([int]$json.distinct_reviewer_agents -lt [int]$json.min_approvals) {
+        Fail "Phase 2 Slice B requires enough distinct reviewer vendors to satisfy min_approvals=$($json.min_approvals); got $($json.distinct_reviewer_agents)"
+    }
+    if ($RequireExplicitRemoteAgents) {
+        $remoteAgents = @($json.explicit_remote_agents | ForEach-Object { [string]$_ })
+        if ($remoteAgents.Count -lt 1) {
+            Fail "Phase 2 Slice B was asked to require remote routing, but no active pipeline role has an explicit [agents.<name>].node entry"
+        }
+        Write-Host "explicit remote agents: $($remoteAgents -join ', ')" -ForegroundColor DarkGray
+    }
+    Write-Host "Phase 2 crew governance passed: min_approvals=$($json.min_approvals), reviewers=$($reviewerAgents -join ', '), test_command=$($json.test_command)" -ForegroundColor DarkGray
+}
+
 function Stream-Cursor([string]$RepoPath, [string]$Name) {
     $streamPath = Join-Path $RepoPath ".ensemble/stream/$Name.ndjson"
     if (-not (Test-Path -LiteralPath $streamPath -PathType Leaf)) {
@@ -605,14 +641,23 @@ function Run-SliceB {
     Step "Slice B: governed run + watch + steer/abort" {
         $crewPath = if ([System.IO.Path]::IsPathRooted($Crew)) { $Crew } else { Join-Path $Repo $Crew }
         if (-not (Test-Path -LiteralPath $crewPath)) {
-            # Backward compatibility: default to examples/crew.toml if previous location missing.
+            # Phase 2 requires a test-gated, two-reviewer crew. If the operator has not
+            # materialized crew-main.toml yet, use the local Phase 2 sample instead of
+            # the older Phase 1 example.
             if ($Crew -eq "crew-main.toml") {
-                $Crew = "examples\\crew.toml"
+                $Crew = "examples\\crew-phase2.toml"
                 $crewPath = if ([System.IO.Path]::IsPathRooted($Crew)) { $Crew } else { Join-Path $Repo $Crew }
             }
             if (-not (Test-Path -LiteralPath $crewPath)) {
                 Fail "crew file not found: $crewPath"
             }
+        }
+
+        Assert-Phase2RunCrewGovernance $crewPath
+        if ($SliceBPreflightOnly) {
+            Write-Host "SliceBPreflightOnly enabled; skipping governed run after crew governance check." -ForegroundColor Yellow
+            Write-Host "Slice B preflight checks passed." -ForegroundColor Green
+            return
         }
 
         $runTask = $Task

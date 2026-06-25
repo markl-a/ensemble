@@ -12,7 +12,7 @@ pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo D:\Projects\ensemble
 
 - `ensemble` 可在 PATH 取到（或 `-TargetDir` 有對應 `target/*/ensemble.exe`）
 - `git` 可用
-- `crew-main.toml`（或你自己的 `--crew`）可用於 `ensemble run`
+- `crew-main.toml`（或你自己的 `--crew`）可用於 `ensemble run`；若尚未產生，Slice B 會退回本機範例 `examples/crew-phase2.toml`
 
 ## Slice A：控制面（控制 plane）
 
@@ -49,9 +49,26 @@ pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo D:\Projects\ensemble -Team
 
 自動驗證：
 
+- 先執行 `ensemble crew inspect --crew <crew.toml> --json`，檢查 Phase 2 governance：
+  - `gate.min_approvals >= 2`
+  - 必須有 `[test] command = ...`
+  - 至少兩個 reviewer role，且至少兩個不同 reviewer vendor
+  - 若正式測跨機 crew，加 `-RequireExplicitRemoteAgents`，會要求至少一個 active pipeline role 有 `[agents.<name>].node`
 - 執行 `ensemble run`，檢查輸出包含 `LANDED` 或 `ESCALATED`
 - `ensemble watch <watch> --since 0` 至少可讀取回溯訊息
 - `ensemble steer` 與 `ensemble abort` 可行，且 `.ensemble/control/<watch>.ndjson` 可看到對應控制事件
+
+只測 Slice B governance，不啟動 AI run：
+
+```powershell
+pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo D:\Projects\ensemble -SkipSliceA -SkipSliceC -SkipSliceD -SliceBPreflightOnly
+```
+
+正式跨機 crew 應使用 `phase2-fleet.ps1 -Materialize` 產生的 crew，然後加：
+
+```powershell
+pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo <repo> -Crew <generated-crew.toml> -RequireExplicitRemoteAgents
+```
 
 ## Slice C：五機配置（fleet）可重跑性
 

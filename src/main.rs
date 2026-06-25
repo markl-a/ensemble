@@ -16,6 +16,7 @@ fn abort_flag() -> Arc<AtomicBool> {
 const USAGE: &str = "usage:\n  \
     ensemble run \"<task>\" [--crew <crew.toml>] [--repo <path>] [--team <name>] [--merge [--into <target>]] [--watch <name>]\n  \
     ensemble run-many \"<task1>\" \"<task2>\" ... [--crew <crew.toml>] [--repo <path>]\n  \
+    ensemble crew inspect [--crew <crew.toml>] [--json]   (print parsed crew/gate/reviewer metadata for verification)\n  \
     ensemble dispatch \"<task1>\" ... --ledger <db> [--crew <crew.toml>] [--repo <path>]   (durable, resumable)\n  \
     ensemble ledger <status|recover> --ledger <db> [--stale-secs N]\n  \
     ensemble nodes   (probe the tailnet for `serve` hosts and the agents they offer)\n  \
@@ -65,6 +66,7 @@ fn main() {
     match sub {
         Some("run") => run_single(&args),
         Some("run-many") => run_many(&args),
+        Some("crew") => crew_cmd(&args),
         Some("dispatch") => dispatch_cmd(&args),
         Some("ledger") => ledger_cmd(&args),
         Some("nodes") => nodes_cmd(&args),
@@ -2536,6 +2538,65 @@ fn council_run_one(
     }
 }
 
+/// `ensemble crew inspect [--crew <p>] [--json]` — print parsed crew/gate/reviewer metadata so
+/// acceptance scripts can verify governance with the same TOML parser the conductor uses.
+fn crew_cmd(args: &[String]) {
+    match args.get(2).map(|s| s.as_str()) {
+        Some("inspect") => {
+            require_value_if_present(args, "--crew");
+            let crew = load_crew(args);
+            let inspection = crew.inspect();
+            if has_flag(args, "--json") {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&inspection)
+                        .expect("crew inspection should serialize")
+                );
+            } else {
+                print!("{}", render_crew_inspection(&inspection));
+            }
+        }
+        _ => {
+            eprintln!("usage: ensemble crew inspect [--crew <crew.toml>] [--json]");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn render_crew_inspection(i: &CrewInspection) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "pipeline={}\nmin_approvals={}\nmax_rounds={}\non_flake={}\n",
+        i.pipeline.join(","),
+        i.min_approvals,
+        i.max_rounds,
+        i.on_flake
+    ));
+    out.push_str(&format!(
+        "test={}\n",
+        i.test_command.as_deref().unwrap_or("(none)")
+    ));
+    if let Some(imp) = &i.implementer {
+        out.push_str(&format!("implementer={}\n", imp.agent));
+    } else {
+        out.push_str("implementer=(missing)\n");
+    }
+    out.push_str(&format!("reviewers={}\n", i.reviewer_agents.join(",")));
+    out.push_str(&format!(
+        "distinct_reviewer_agents={}\n",
+        i.distinct_reviewer_agents
+    ));
+    if !i.explicit_remote_agents.is_empty() {
+        out.push_str(&format!(
+            "explicit_remote_agents={}\n",
+            i.explicit_remote_agents.join(",")
+        ));
+    } else {
+        out.push_str("explicit_remote_agents=(none)\n");
+    }
+    out
+}
+
 /// `ensemble run "<task>" [--crew <p>] [--repo <p>]` — a single task, isolated in its own worktree.
 fn run_single(args: &[String]) {
     require_value_if_present(args, "--into"); // used by --merge; reject a value-less `--into`
@@ -3786,6 +3847,38 @@ backup = "agy"
             "--no-discover"
         ));
         assert!(!has_flag(&argv(&["ensemble", "run", "x"]), "--no-discover"));
+    }
+
+    #[test]
+    fn crew_inspection_render_surfaces_phase2_gate_inputs() {
+        let crew = CrewConfig::from_toml(
+            r#"
+pipeline = ["implement", "review", "audit"]
+[gate]
+min_approvals = 2
+max_rounds = 2
+on_flake = "exclude"
+[test]
+command = "cargo test --quiet"
+[roles.implement]
+agent = "codex"
+[roles.review]
+agent = "claude"
+[roles.audit]
+agent = "agy"
+[agents.claude]
+node = "http://m2:7878"
+"#,
+        )
+        .unwrap();
+
+        let rendered = render_crew_inspection(&crew.inspect());
+
+        assert!(rendered.contains("min_approvals=2"));
+        assert!(rendered.contains("test=cargo test --quiet"));
+        assert!(rendered.contains("reviewers=claude,agy"));
+        assert!(rendered.contains("distinct_reviewer_agents=2"));
+        assert!(rendered.contains("explicit_remote_agents=claude"));
     }
 
     #[test]
