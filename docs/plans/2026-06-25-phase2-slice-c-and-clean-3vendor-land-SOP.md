@@ -155,7 +155,12 @@ pwsh scripts/phase2-verify.ps1 -Repo . -SkipSliceA -SkipSliceB -SkipSliceD -Flee
 ### 4a 主專案（team = main，五機可見、可介入）
 
 在 **m1**（主 repo 目錄）：
-```bash
+```powershell
+$teamCursor = (ensemble team inbox --repo <主repo路徑> --team main --json | ConvertFrom-Json).next
+$watchCursor = @((ensemble watch main --repo <主repo路徑> --team main --since 0 --json 2>$null) | Where-Object { $_.Trim() }).Count
+$controlPath = Join-Path <主repo路徑> ".ensemble/control/main.ndjson"
+$controlCursor = if (Test-Path $controlPath) { @((Get-Content $controlPath) | Where-Object { $_.Trim() }).Count } else { 0 }
+
 ensemble run "<主專案任務>" --crew .ensemble/phase2-fleet/crew-main.generated.toml --repo <主repo路徑> --team main --watch main --merge
 ```
 或由 manifest 直接執行本節點分配到的主專案 run：
@@ -168,22 +173,32 @@ ensemble watch main --follow
 ensemble steer main "請偏重 error handling" --team main
 ensemble abort main --hard --team main        # 偏離時硬中斷
 ```
+run 結束後收斂證據：
+```powershell
+pwsh scripts/phase2-run-evidence.ps1 -Repo <主repo路徑> -Team main -Watch main -TeamSince $teamCursor -WatchSince $watchCursor -RequireControl -ControlSince $controlCursor
+```
 > generated main crew 已是 `implement=codex / review=claude / audit=agy`、`min_approvals=2`，
 > 且 `codex`、`claude` 都 `backup="agy"`（額度爆掉自動換 agy，不整個 escalate）。
 
 ### 4b 四個衛星專案（各機各專案，codex + claude）
 
 在各衛星機器（`m2→sat-a`、`m3→sat-b`、`m4→sat-c`、`m5→sat-d`）的專案目錄：
-```bash
+```powershell
+$teamCursor = (ensemble team inbox --repo . --team sat-a --json | ConvertFrom-Json).next
+$watchCursor = @((ensemble watch sat-a --repo . --team sat-a --since 0 --json 2>$null) | Where-Object { $_.Trim() }).Count
+
 ensemble run "<衛星任務>" --crew .ensemble/phase2-fleet/crew-sat-a.generated.toml --repo . --team sat-a --watch sat-a
 ensemble watch sat-a --follow
+pwsh /path/to/ensemble/scripts/phase2-run-evidence.ps1 -Repo . -Team sat-a -Watch sat-a -TeamSince $teamCursor -WatchSince $watchCursor
 ```
 > 更建議先用 `phase2-fleet.ps1 -PlanOnly` 預覽，確認後用 `-RunSelected` 執行，避免 crew path / team / watch 打錯。
 
 ### 完成判定（Slice C）
 - `ensemble mesh` 在 m1 顯示本機 CLIs，且 tailnet peers 看得到 m2~m5；`ensemble nodes` 可作為 agent→host 輔助視圖。
-- 每個 run 都有可讀的 `stream/control` 事件（`ensemble watch <name> --since 0`）。
-- 每個 run 末端為 **LANDED** 或 **ESCALATED**（含 escalate＝治理不落盤，也算正確終局）。
+- 每個 run 都有可讀的 `stream` 事件（`ensemble watch <name> --since 0`）；有實際介入時才要求 control feed 證據。
+- 每個 run 的 CLI 結果為 **LANDED** 或 **ESCALATED**；board/watch evidence 末端為 `LANDED` 或 `escalated: ...`（含 escalate＝治理不落盤，也算正確終局）。
+- 每個 run 都能通過 `scripts/phase2-run-evidence.ps1`；有實際介入過的主 run 加 `-RequireControl`。
+- 同一個 repo/team/watch 重跑時，先記 run 前 team/watch/control cursor，再對 `phase2-run-evidence.ps1` 傳 `-TeamSince` / `-WatchSince` / `-ControlSince`，避免舊 run 終局或介入事件混入驗收。
 - 任務可重跑一次仍到達同等終局。
 
 ---
@@ -193,7 +208,7 @@ ensemble watch sat-a --follow
 codex 每日額度重置後（觀測到的訊息：`retry after 11:54 PM`），跑一次 **codex 當 implementer 的乾淨三家版**，
 證明「test pass + 2 家不同 vendor 審核」可正常 land：
 
-```bash
+```powershell
 ensemble run "<可驗證的小任務>" --crew .ensemble/phase2-fleet/crew-main.generated.toml --repo <主repo> --team main --watch main --merge
 ```
 
@@ -245,7 +260,15 @@ pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Servic
 # 3) m1 看 fleet
 ensemble mesh && ensemble nodes
 # 4) 主專案（m1）
+$mainRepo = "<主repo路徑>"
+$teamCursor = (ensemble team inbox --repo $mainRepo --team main --json | ConvertFrom-Json).next
+$watchCursor = @((ensemble watch main --repo $mainRepo --team main --since 0 --json 2>$null) | Where-Object { $_.Trim() }).Count
 pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Materialize -RunSelected
+pwsh scripts/phase2-run-evidence.ps1 -Repo $mainRepo -Team main -Watch main -TeamSince $teamCursor -WatchSince $watchCursor
 # 5) 衛星（m2~m5 各自）
+$satRepo = "<衛星repo路徑>"
+$teamCursor = (ensemble team inbox --repo $satRepo --team sat-a --json | ConvertFrom-Json).next
+$watchCursor = @((ensemble watch sat-a --repo $satRepo --team sat-a --since 0 --json 2>$null) | Where-Object { $_.Trim() }).Count
 pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m2 -Materialize -RunSelected
+pwsh scripts/phase2-run-evidence.ps1 -Repo $satRepo -Team sat-a -Watch sat-a -TeamSince $teamCursor -WatchSince $watchCursor
 ```

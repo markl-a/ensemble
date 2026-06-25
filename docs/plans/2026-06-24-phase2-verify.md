@@ -65,6 +65,17 @@ pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo D:\Projects\ensemble -Team
 - `ensemble watch <watch> --follow`（可選）
 - `ensemble steer <watch> "<prompt>"`
 - `ensemble abort <watch> [--hard]`
+- run 前先記下三個 feed cursor，run 結束後用 `scripts\phase2-run-evidence.ps1` 讀取 team/watch/control 證據：
+
+```powershell
+$teamCursor = (ensemble team inbox --repo <repo> --team <team> --json | ConvertFrom-Json).next
+$watchCursor = @((ensemble watch <watch> --repo <repo> --team <team> --since 0 --json 2>$null) | Where-Object { $_.Trim() }).Count
+$controlPath = Join-Path <repo> ".ensemble/control/<watch>.ndjson"
+$controlCursor = if (Test-Path $controlPath) { @((Get-Content $controlPath) | Where-Object { $_.Trim() }).Count } else { 0 }
+
+# run finishes here
+pwsh scripts\phase2-run-evidence.ps1 -Repo <repo> -Team <team> -Watch <watch> -TeamSince $teamCursor -WatchSince $watchCursor -RequireControl -ControlSince $controlCursor
+```
 
 自動驗證：
 
@@ -76,6 +87,8 @@ pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo D:\Projects\ensemble -Team
 - 執行 `ensemble run`，檢查輸出包含 `LANDED` 或 `ESCALATED`
 - `ensemble watch <watch> --since 0` 至少可讀取回溯訊息
 - `ensemble steer` 與 `ensemble abort` 可行，且 `.ensemble/control/<watch>.ndjson` 可看到對應控制事件
+- `scripts\phase2-run-evidence.ps1` 可在 run 後獨立檢查 team board 與 watch stream 都有同一個 conductor terminal decision，並可要求 control feed 非空或包含 steer/abort
+- 重複使用同一 repo/team/watch 時，run 前先分別記下 team/watch/control cursor，run 後用 `-TeamSince` / `-WatchSince` / `-ControlSince`，避免舊 run 的 terminal 或 control event 被算進新 run 的驗收
 - Hermetic regression：`cargo test --test cross_machine`
   會用 in-process `serve` + `RemoteAdapter` 驗證遠端 codex implementer、遠端 claude/agy reviewers、test gate、`min_approvals = 2` 的治理路徑；同時覆蓋 red test gate 不可 land、同 vendor reviewer 不能湊滿 Phase 2 quorum 的負案例
 
@@ -137,6 +150,7 @@ pwsh -NoProfile -File scripts\phase2-verify.ps1 -Repo D:\Projects\ensemble -Skip
 
 - `scripts/phase2-verify.ps1`（本文件對應自動切片）
 - `scripts/phase2-local-ready.ps1`（上五機前的本機 readiness wrapper；預設不跑 clean reinstall）
+- `scripts/phase2-run-evidence.ps1`（單一主/衛星 run 完成後，檢查 team/watch/control 證據與 board/watch 的 `LANDED` 或 `escalated: ...` 終局）
 - `scripts/phase2-goal-shape.ps1`（檢查 5-node + 4 satellites manifest 形狀）
 - `scripts/phase2-fleet.ps1 -PlanOnly -Json`（輸出機器可讀的 full-fleet project/command plan，供 Slice C verifier 檢查）
 - `scripts/phantom-single-machine.ps1`（在進 Phase 2 前確認 Phantom 可在單機透過 shell tool 調用 ensemble，且 `--node local` 不會誤走遠端）

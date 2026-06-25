@@ -161,6 +161,16 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-25 — **Phase 2 per-run evidence verifier added.**
+  `scripts/phase2-run-evidence.ps1` verifies the evidence left by one completed main or satellite run:
+  callers must pass independent `-TeamSince` and `-WatchSince` cursors; `team inbox` must contain a
+  conductor terminal decision, `watch --json` must expose the same terminal decision, and optional
+  `-RequireControl` / `-RequireSteer` / `-RequireAbort` checks the run's control feed from
+  `-ControlSince`. It is intended to run after each real m1~m5 Slice C run so completion is based on
+  recorded team/stream/control evidence, not only terminal memory. Verified with a self-test temporary
+  repo, a negative terminal-expectation check, a team/watch disagreement check, malformed control-feed
+  rejection, invalid control-command shape rejection, terminal-prefix rejection (`ESCALATED_PENDING` is
+  not terminal), and terminal-case rejection (`landed` is not `LANDED`).
 - 2026-06-25 — **Phase 2 local readiness wrapper added.**
   `scripts/phase2-local-ready.ps1` chains the existing verifiers needed before moving to the real 5-node
   fleet: Phase 1 deterministic acceptance, Phantom single-machine bridge, and Phase 2 Slice A +
