@@ -146,6 +146,52 @@ function Get-ControlFeedPath([string]$Repo, [string]$Watch) {
 function Get-WatchFeedPath([string]$Repo, [string]$Watch) {
     return Join-Path $Repo ".ensemble/stream/$Watch.ndjson"
 }
+
+function Get-StringSha256([string]$Text) {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($Text)
+        $hash = $sha.ComputeHash($bytes)
+        return (($hash | ForEach-Object { $_.ToString("x2") }) -join "")
+    }
+    finally {
+        $sha.Dispose()
+    }
+}
+
+function Get-FileSha256([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        Fail "generated crew file is missing: $Path (run phase2-fleet.ps1 with -Materialize before -RunSelected/-VerifyReports)"
+    }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [System.IO.File]::OpenRead($Path)
+        try {
+            $hash = $sha.ComputeHash($stream)
+            return (($hash | ForEach-Object { $_.ToString("x2") }) -join "")
+        }
+        finally {
+            $stream.Dispose()
+        }
+    }
+    finally {
+        $sha.Dispose()
+    }
+}
+
+function Get-ProjectCrewSha256($Project) {
+    return Get-StringSha256 ([string]$Project.Text)
+}
+
+function Assert-GeneratedCrewCurrent($Project) {
+    $expected = Get-ProjectCrewSha256 $Project
+    $actual = Get-FileSha256 $Project.Crew
+    if ($actual -ne $expected) {
+        Fail "generated crew for '$($Project.Name)' is stale or hand-edited: $($Project.Crew). Run phase2-fleet.ps1 with -Materialize from the current manifest."
+    }
+    return $expected
+}
+
 function Normalize-ServiceAction([string]$Action) {
     if ([string]::IsNullOrWhiteSpace($Action)) {
         return "none"
@@ -513,7 +559,7 @@ function Materialize-Plan($Plan) {
         }
         $dir = Split-Path -Parent $project.Crew
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
-        Set-Content -LiteralPath $project.Crew -Value $project.Text -Encoding utf8NoBOM
+        [System.IO.File]::WriteAllText($project.Crew, [string]$project.Text, [System.Text.UTF8Encoding]::new($false))
         Write-Host "wrote $($project.Crew)"
     }
 }
@@ -630,6 +676,7 @@ function Clear-AcceptanceReport($Project) {
 }
 
 function Write-AcceptanceReport($Project, [object[]]$Runs) {
+    $crewSha256 = Assert-GeneratedCrewCurrent $Project
     $path = Get-AcceptanceReportPath $Project
     $dir = Split-Path -Parent $path
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
@@ -650,6 +697,7 @@ function Write-AcceptanceReport($Project, [object[]]$Runs) {
             team = $Project.Team
             watch = $Project.Watch
             crew = $Project.Crew
+            crewSha256 = $crewSha256
             merge = [bool]$Project.Merge
             minApprovals = [int]$Project.MinApprovals
             reviewerAgents = @($Project.ReviewerAgents)
@@ -706,6 +754,11 @@ function Assert-AcceptanceReport($Project, $Report) {
     $projectName = Require-ReportField $projectInfo "name" "$context project"
     $projectTeam = Require-ReportField $projectInfo "team" "$context project"
     $projectWatch = Require-ReportField $projectInfo "watch" "$context project"
+    $projectCrewSha256 = Require-ReportField $projectInfo "crewSha256" "$context project"
+    $expectedCrewSha256 = Assert-GeneratedCrewCurrent $Project
+    if ([string]$projectCrewSha256 -ne $expectedCrewSha256) {
+        Fail "$context was produced from a stale generated crew hash"
+    }
     if ($projectName -ne $Project.Name) {
         Fail "acceptance report project name mismatch: got '$projectName', expected '$($Project.Name)'"
     }
@@ -764,6 +817,7 @@ function Invoke-SelectedRuns($Plan) {
     }
     $acceptanceReports = @()
     foreach ($project in $projects) {
+        Assert-GeneratedCrewCurrent $project | Out-Null
         $runArgs = New-RunArgs $project.Task $project.Crew $project.Repo $project.Team $project.Watch ([bool]$project.Merge)
         $cmdText = Format-Command $runArgs
         $runReports = @()
@@ -1016,6 +1070,7 @@ function Invoke-SelfTest {
     if ($sat.Text -notmatch 'node = "http://m2:7878"') {
         Fail "self-test expected satellite node to be normalized"
     }
+    Materialize-Plan $nodePlan
     $fakeBin = Join-Path $root "fake-bin"
     New-Item -ItemType Directory -Force -Path $fakeBin | Out-Null
     $fakeLog = Join-Path $root "fake-ensemble.log"
@@ -1156,6 +1211,9 @@ function Invoke-SelfTest {
     if ($report.project.name -ne "sat-a" -or $report.node -ne "m2") {
         Fail "self-test expected acceptance report to identify the selected project and node"
     }
+    if ([string]::IsNullOrWhiteSpace([string]$report.project.crewSha256)) {
+        Fail "self-test expected acceptance report to bind the generated crew hash"
+    }
     Invoke-AcceptanceReportVerifier $nodePlan
     $scriptPath = if ([string]::IsNullOrWhiteSpace($PSCommandPath)) { Join-Path $PSScriptRoot "phase2-fleet.ps1" } else { $PSCommandPath }
     $childOut = & pwsh -NoProfile -File $scriptPath -Manifest $manifestPath -Node m2 -VerifyReports -RepeatCount 2 2>&1
@@ -1166,6 +1224,34 @@ function Invoke-SelfTest {
     if ($childCode -ne 0) {
         Fail "self-test expected CLI -VerifyReports to validate the selected acceptance report`n$($childOut | Out-String)"
     }
+
+    Set-Content -LiteralPath $sat.Crew -Encoding utf8NoBOM -Value "stale generated crew"
+    $oldPath = $env:PATH
+    $oldFakeLog = $env:ENSEMBLE_FAKE_LOG
+    $oldEvidenceScript = $env:ENSEMBLE_PHASE2_EVIDENCE_SCRIPT
+    $oldEvidenceLog = $env:ENSEMBLE_FAKE_EVIDENCE_LOG
+    $env:PATH = "$fakeBin$([System.IO.Path]::PathSeparator)$oldPath"
+    $env:ENSEMBLE_FAKE_LOG = $fakeLog
+    $env:ENSEMBLE_PHASE2_EVIDENCE_SCRIPT = $fakeEvidence
+    $env:ENSEMBLE_FAKE_EVIDENCE_LOG = $evidenceLog
+    try {
+        $childOut = & pwsh -NoProfile -File $scriptPath -Manifest $manifestPath -Node m2 -RunSelected -VerifyEvidence 2>&1
+        $childCode = $LASTEXITCODE
+        if ($null -eq $childCode) {
+            $childCode = 0
+        }
+        if ($childCode -ne 0) {
+            Fail "self-test expected CLI -RunSelected to refresh a stale generated crew before running`n$($childOut | Out-String)"
+        }
+        Assert-GeneratedCrewCurrent $sat | Out-Null
+    }
+    finally {
+        $env:PATH = $oldPath
+        if ($null -eq $oldFakeLog) { Remove-Item Env:\ENSEMBLE_FAKE_LOG -ErrorAction SilentlyContinue } else { $env:ENSEMBLE_FAKE_LOG = $oldFakeLog }
+        if ($null -eq $oldEvidenceScript) { Remove-Item Env:\ENSEMBLE_PHASE2_EVIDENCE_SCRIPT -ErrorAction SilentlyContinue } else { $env:ENSEMBLE_PHASE2_EVIDENCE_SCRIPT = $oldEvidenceScript }
+        if ($null -eq $oldEvidenceLog) { Remove-Item Env:\ENSEMBLE_FAKE_EVIDENCE_LOG -ErrorAction SilentlyContinue } else { $env:ENSEMBLE_FAKE_EVIDENCE_LOG = $oldEvidenceLog }
+    }
+
     $malformedReport = [pscustomobject]@{
         ok = $true
         node = "m2"
@@ -1199,6 +1285,41 @@ function Invoke-SelfTest {
     }
     if ($childCode -eq 0) {
         Fail "self-test expected CLI -VerifyReports to reject a run entry missing exitCode`n$($childOut | Out-String)"
+    }
+    $wrongCrewHashReport = [pscustomobject]@{
+        ok = $true
+        node = "m2"
+        verifyEvidence = $true
+        repeatCount = 2
+        project = [pscustomobject]@{
+            name = "sat-a"
+            team = "sat-a"
+            watch = "sat-a"
+            crewSha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+        runs = @(
+            [pscustomobject]@{
+                iteration = 1
+                terminal = "landed"
+                evidenceVerified = $true
+                exitCode = 0
+            },
+            [pscustomobject]@{
+                iteration = 2
+                terminal = "landed"
+                evidenceVerified = $true
+                exitCode = 0
+            }
+        )
+    }
+    $wrongCrewHashReport | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $acceptanceReport -Encoding utf8NoBOM
+    $childOut = & pwsh -NoProfile -File $scriptPath -Manifest $manifestPath -Node m2 -VerifyReports -RepeatCount 2 2>&1
+    $childCode = $LASTEXITCODE
+    if ($null -eq $childCode) {
+        $childCode = 0
+    }
+    if ($childCode -eq 0) {
+        Fail "self-test expected CLI -VerifyReports to reject an acceptance report with a stale generated crew hash`n$($childOut | Out-String)"
     }
     Set-Content -LiteralPath $acceptanceReport -Encoding utf8NoBOM -Value '{"ok":true,"stale":true}'
     $fakeEvidenceFail = Join-Path $root "fake-evidence-fail.ps1"
@@ -1270,6 +1391,7 @@ function Invoke-SelfTest {
     $script:VerifyEvidence = $true
     $script:RepeatCount = 2
     try {
+        Materialize-Plan $multiPlan
         foreach ($project in @($multiPlan.Projects | Where-Object { $_.Selected })) {
             $runs = @(
                 [pscustomobject]@{

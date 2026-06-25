@@ -161,6 +161,12 @@ DONE this run: step 1 merge ✅ · step 2 journal ✅ · **step 2b AI-resolver �
   a note in this file rather than guessing.
 
 ## Log (most recent first)
+- 2026-06-25 — **Phase 2 fleet acceptance reports now bind generated crew hashes.**
+  `scripts/phase2-fleet.ps1 -RunSelected -VerifyEvidence` now refreshes selected generated
+  crew files from the current manifest before running, and acceptance reports include the
+  manifest-derived generated crew SHA-256. `-VerifyReports` compares that hash against the
+  current manifest-generated crew content, so a report from an older route/quorum plan cannot
+  satisfy Slice C after the manifest changes. Verified with `phase2-fleet.ps1 -SelfTest`.
 - 2026-06-25 — **Phase 2 Slice A now verifies member@node control routing end to end.**
   `scripts/phase2-verify.ps1` still tests explicit `--node <loopback-serve>` control
   routes, and now also drives `watch`, `steer`, and `abort` through

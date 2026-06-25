@@ -132,14 +132,14 @@ pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m2 -Materi
 pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node all -PlanOnly -Json
 ```
 
-確認 plan 正確後，也可以讓腳本直接執行該節點被選中的 `ensemble run`（只跑 `run`，不會自動跑 `up` 或 `watch`）。實機驗收時建議加 `-VerifyEvidence -RepeatCount 2`，腳本會在 run 前自動抓 team/watch/control cursor，run 後自動呼叫 `phase2-run-evidence.ps1 -ExpectTerminal <landed|escalated>`，全部 repeat 通過後在 generated crew 旁寫出 `<repo>/.ensemble/phase2-fleet/acceptance-<project>-<node>.json`。非零 `ESCALATED` 預設仍會讓腳本失敗；若本次驗收接受 escalate 作為明確終局，加 `-AllowEscalatedRun`。`-RunSelected` 必須搭配明確的 `-Node <host>`，不接受預設的 `all`。service bootstrap 則用 `-Service install-print|install|uninstall-print|uninstall -RunService`，同樣必須指定明確節點：
+確認 plan 正確後，也可以讓腳本直接執行該節點被選中的 `ensemble run`（只跑 `run`，不會自動跑 `up` 或 `watch`）。實機驗收時建議加 `-VerifyEvidence -RepeatCount 2`，腳本會先刷新 generated crew，接著在 run 前自動抓 team/watch/control cursor，run 後自動呼叫 `phase2-run-evidence.ps1 -ExpectTerminal <landed|escalated>`，全部 repeat 通過後在 generated crew 旁寫出含 generated crew SHA-256 的 `<repo>/.ensemble/phase2-fleet/acceptance-<project>-<node>.json`。非零 `ESCALATED` 預設仍會讓腳本失敗；若本次驗收接受 escalate 作為明確終局，加 `-AllowEscalatedRun`。`-RunSelected` 必須搭配明確的 `-Node <host>`，不接受預設的 `all`。service bootstrap 則用 `-Service install-print|install|uninstall-print|uninstall -RunService`，同樣必須指定明確節點：
 
 ```bash
 pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m1 -Materialize -RunSelected -VerifyEvidence -RepeatCount 2
 pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node m2 -Materialize -RunSelected -VerifyEvidence -RepeatCount 2
 ```
 
-所有選中的 run 都完成後，用同一份 manifest 驗證 acceptance reports。若 m1 能讀到主 repo 與四顆衛星 repo：
+所有選中的 run 都完成後，用同一份 manifest 驗證 acceptance reports。`-VerifyReports` 會拒絕 crew hash 與目前 manifest 不一致的舊 report。若 m1 能讀到主 repo 與四顆衛星 repo：
 
 ```bash
 pwsh scripts/phase2-fleet.ps1 -Manifest phase2-fleet.local.json -Node all -VerifyReports -RepeatCount 2
@@ -216,7 +216,7 @@ pwsh /path/to/ensemble/scripts/phase2-run-evidence.ps1 -Repo . -Team sat-a -Watc
 - 每個 run 都能通過 `scripts/phase2-run-evidence.ps1`；有實際介入過的主 run 加 `-RequireControl`。
 - 同一個 repo/team/watch 重跑時，先記 run 前 team/watch/control cursor，再對 `phase2-run-evidence.ps1` 傳 `-TeamSince` / `-WatchSince` / `-ControlSince`，避免舊 run 終局或介入事件混入驗收。
 - 任務由 `-RepeatCount 2` 自動重跑一次，兩次都能到達同等終局。
-- `phase2-fleet.ps1 -RunSelected -VerifyEvidence -RepeatCount 2` 產出的 `.ensemble/phase2-fleet/acceptance-<project>-<node>.json` 中，`ok=true`、`repeatCount=2`，且每筆 `runs[]` 都有 terminal、exitCode、team/watch/control cursor 與 `evidenceVerified=true`。
+- `phase2-fleet.ps1 -RunSelected -VerifyEvidence -RepeatCount 2` 產出的 `.ensemble/phase2-fleet/acceptance-<project>-<node>.json` 中，`ok=true`、`repeatCount=2`、`project.crewSha256` 符合目前 manifest materialize 出來的 generated crew，且每筆 `runs[]` 都有 terminal、exitCode、team/watch/control cursor 與 `evidenceVerified=true`。
 - `phase2-fleet.ps1 -Node all -VerifyReports -RepeatCount 2` 在可讀取全部 repo 的節點通過；或每台節點各自用 `-Node <this-node> -VerifyReports -RepeatCount 2` 通過。
 
 ---
