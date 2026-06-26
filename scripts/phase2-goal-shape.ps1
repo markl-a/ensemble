@@ -82,14 +82,43 @@ function Assert-UniqueValues([string[]]$Values, [string]$Label) {
     }
 }
 
+function Test-NodeSame([string]$Left, [string]$Right) {
+    $a = Get-ExpectedHost $Left
+    $b = Get-ExpectedHost $Right
+    if ($a.Equals($b, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+    if ($a.StartsWith("$b.", [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+    if ($b.StartsWith("$a.", [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+    return $false
+}
+
+function Assert-NodeAllowed([string]$Value, [string[]]$ForbiddenNodes, [string]$Label) {
+    foreach ($forbidden in $ForbiddenNodes) {
+        if (Test-NodeSame $Value $forbidden) {
+            Fail "Phase 2 goal manifest uses forbidden node '$Value' at $Label"
+        }
+    }
+}
+
 function Assert-Phase2GoalShape($Fleet) {
     $nodes = @((Get-Prop $Fleet "nodes" @()) | ForEach-Object { [string]$_ })
+    $forbiddenNodes = @((Get-Prop $Fleet "forbidden_nodes" @()) | ForEach-Object { [string]$_ } | Where-Object { $_.Trim().Length -gt 0 })
     if ($nodes.Count -ne 5) {
         Fail "Phase 2 goal requires exactly 5 fleet nodes; manifest has $($nodes.Count)"
     }
     Assert-UniqueValues $nodes "node"
+    Assert-UniqueValues $forbiddenNodes "forbidden node"
+    foreach ($node in $nodes) {
+        Assert-NodeAllowed $node $forbiddenNodes "nodes"
+    }
 
     $conductor = [string](Get-Prop $Fleet "conductor" $nodes[0])
+    Assert-NodeAllowed $conductor $forbiddenNodes "conductor"
     if (-not (Test-NodeKnown $conductor $nodes)) {
         Fail "Phase 2 goal conductor '$conductor' is not listed in manifest.nodes"
     }
@@ -105,6 +134,7 @@ function Assert-Phase2GoalShape($Fleet) {
     }
     foreach ($agent in @("codex", "claude", "agy")) {
         $route = Require-Prop $routes $agent "main.routes"
+        Assert-NodeAllowed $route $forbiddenNodes "main.routes.$agent"
         if (-not (Test-NodeKnown $route $nodes)) {
             Fail "Phase 2 goal main route '$agent=$route' does not point at a manifest node"
         }
@@ -122,6 +152,7 @@ function Assert-Phase2GoalShape($Fleet) {
         $satName = Require-Prop $sat "name" "satellites[]"
         Require-Prop $sat "repo" "satellites[$satName]" | Out-Null
         $satNode = Require-Prop $sat "node" "satellites[$satName]"
+        Assert-NodeAllowed $satNode $forbiddenNodes "satellites[$satName].node"
         if (-not (Test-NodeKnown $satNode $nodes)) {
             Fail "Phase 2 goal satellite '$satName' node '$satNode' is not listed in manifest.nodes"
         }
@@ -222,6 +253,20 @@ function Invoke-SelfTest {
         )
     } | ConvertTo-Json -Depth 8 | ConvertFrom-Json
     Expect-Fail "duplicate satellite" { Assert-Phase2GoalShape $duplicateSatellite }
+
+    $forbiddenNode = @{
+        nodes           = @("m1", "m2", "m3", "m4", "m5")
+        forbidden_nodes = @("m3")
+        conductor       = "m1"
+        main            = @{ repo = "x"; routes = @{ codex = "m1"; claude = "m2"; agy = "m3" } }
+        satellites      = @(
+            @{ name = "sat-a"; repo = "a"; node = "m2" },
+            @{ name = "sat-b"; repo = "b"; node = "m3" },
+            @{ name = "sat-c"; repo = "c"; node = "m4" },
+            @{ name = "sat-d"; repo = "d"; node = "m5" }
+        )
+    } | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+    Expect-Fail "forbidden node used" { Assert-Phase2GoalShape $forbiddenNode }
 
     Write-Host "phase2-goal-shape self-test passed" -ForegroundColor Green
 }

@@ -330,6 +330,29 @@ function Test-HostPresent([string]$ExpectedNode, [string[]]$Hosts) {
     return $false
 }
 
+function Test-NodeSame([string]$Left, [string]$Right) {
+    $a = Get-ExpectedHost $Left
+    $b = Get-ExpectedHost $Right
+    if ($a.Equals($b, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+    if ($a.StartsWith("$b.", [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+    if ($b.StartsWith("$a.", [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+    return $false
+}
+
+function Assert-NodeAllowed([string]$Value, [string[]]$ForbiddenNodes, [string]$Label) {
+    foreach ($forbidden in $ForbiddenNodes) {
+        if (Test-NodeSame $Value $forbidden) {
+            Fail "fleet manifest uses forbidden node '$Value' at $Label"
+        }
+    }
+}
+
 function New-MainCrewText($Main) {
     $routes = Get-Prop $Main "routes" $null
     if ($null -eq $routes) {
@@ -451,14 +474,28 @@ function Select-Node([string]$Candidate) {
 
 function New-FleetPlan($Fleet, [string]$ManifestDir) {
     $nodes = @(Get-Prop $Fleet "nodes" @())
+    $forbiddenNodes = @((Get-Prop $Fleet "forbidden_nodes" @()) | ForEach-Object { [string]$_ } | Where-Object { $_.Trim().Length -gt 0 })
     if ($nodes.Count -eq 0) {
         Fail "manifest.nodes must contain m1..m5 (or your mapped host names)"
     }
+    foreach ($fleetNode in $nodes) {
+        Assert-NodeAllowed ([string]$fleetNode) $forbiddenNodes "nodes"
+    }
     $conductor = [string](Get-Prop $Fleet "conductor" $nodes[0])
+    Assert-NodeAllowed $conductor $forbiddenNodes "conductor"
     $script:FleetServicePort = Get-FleetServicePort $Fleet
     $main = Get-Prop $Fleet "main" $null
     if ($null -eq $main) {
         Fail "manifest is missing required field: main"
+    }
+    $routes = Get-Prop $main "routes" $null
+    if ($null -ne $routes) {
+        foreach ($agent in @("codex", "claude", "agy")) {
+            $route = Get-Prop $routes $agent $null
+            if ($null -ne $route -and -not [string]::IsNullOrWhiteSpace([string]$route)) {
+                Assert-NodeAllowed ([string]$route) $forbiddenNodes "main.routes.$agent"
+            }
+        }
     }
     $mainRepo = Resolve-FromBase $ManifestDir (Require-Prop $main "repo" "main")
     $mainTeam = [string](Get-Prop $main "team" "main")
@@ -502,6 +539,7 @@ function New-FleetPlan($Fleet, [string]$ManifestDir) {
     foreach ($sat in $satellites) {
         $satName = Require-Prop $sat "name" "satellites[]"
         $satNode = Require-Prop $sat "node" "satellites[$satName]"
+        Assert-NodeAllowed $satNode $forbiddenNodes "satellites[$satName].node"
         $satRepo = Resolve-FromBase $ManifestDir (Require-Prop $sat "repo" "satellites[$satName]")
         $satTeam = [string](Get-Prop $sat "team" $satName)
         $satWatch = [string](Get-Prop $sat "watch" $satTeam)

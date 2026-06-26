@@ -30,6 +30,14 @@ queue a recurring cron drains — **one double-gated task per tick.**
   uninstall -> install -> service dry-run -> governed smoke (`codex -> test -> claude -> LANDED`) ->
   up/mesh/nodes -> final uninstall. This proves the single-machine baseline and rebuildable install path
   are still green after adding the Phantom bootstrap fallback.
+- **Fleet eligibility guard added after live reprobe:** `scripts/phase2-goal-shape.ps1` now supports
+  optional `forbidden_nodes` in the untracked fleet manifest and rejects any manifest that uses a forbidden
+  peer in `nodes`, `conductor`, main routes, or satellite nodes. This prevents a 5-node acceptance run from
+  silently counting a tailnet peer that private fleet policy excludes from the personal dev mesh. Current
+  live state remains 4/5 healthy for personal-fleet purposes: the conductor was restarted on `8788`, three
+  remote peers still answer `ensemble /health`; the remaining personal candidate has a non-interactive SSH
+  method documented, but its `ensemble up` listener still needs a final health-checked bootstrap. Full Slice C
+  still needs that fifth personal node to join the service mesh before the 5-node acceptance can count it.
 
 ## ▶ CURRENT FOCUS (2026-06-21) — finish Phase 1 of the two-phase plan
 Spec: `docs/specs/2026-06-20-two-phase-real-tests-design.md` + `docs/specs/2026-06-20-ensemble-mcp-design.md`.

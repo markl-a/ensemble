@@ -93,6 +93,29 @@ function Test-HostPresent([string]$ExpectedNode, [string[]]$Hosts) {
     return $false
 }
 
+function Test-NodeSame([string]$Left, [string]$Right) {
+    $a = Get-ExpectedHost $Left
+    $b = Get-ExpectedHost $Right
+    if ($a.Equals($b, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+    if ($a.StartsWith("$b.", [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+    if ($b.StartsWith("$a.", [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $true
+    }
+    return $false
+}
+
+function Assert-NodeAllowed([string]$Value, [string[]]$ForbiddenNodes, [string]$Label) {
+    foreach ($forbidden in $ForbiddenNodes) {
+        if (Test-NodeSame $Value $forbidden) {
+            Fail "fleet manifest uses forbidden node '$Value' at $Label"
+        }
+    }
+}
+
 function Expand-NodeList([string[]]$Nodes) {
     $expanded = New-Object System.Collections.Generic.List[string]
     foreach ($node in $Nodes) {
@@ -161,11 +184,48 @@ function Read-FleetManifestInfo([string]$Path) {
         Fail "fleet manifest must define a non-empty nodes array: $manifestPath"
     }
     $nodes = @($nodesProp.Value | ForEach-Object { [string]$_ })
+    $forbiddenProp = $manifest.PSObject.Properties["forbidden_nodes"]
+    $forbiddenNodes = if ($null -ne $forbiddenProp) {
+        @($forbiddenProp.Value | ForEach-Object { [string]$_ } | Where-Object { $_.Trim().Length -gt 0 })
+    } else {
+        @()
+    }
+    foreach ($node in $nodes) {
+        Assert-NodeAllowed $node $forbiddenNodes "nodes"
+    }
     $conductorProp = $manifest.PSObject.Properties["conductor"]
     $conductor = if ($null -ne $conductorProp -and -not [string]::IsNullOrWhiteSpace([string]$conductorProp.Value)) {
         [string]$conductorProp.Value
     } else {
         [string]$nodes[0]
+    }
+    Assert-NodeAllowed $conductor $forbiddenNodes "conductor"
+    $mainProp = $manifest.PSObject.Properties["main"]
+    if ($null -ne $mainProp -and $null -ne $mainProp.Value) {
+        $routesProp = $mainProp.Value.PSObject.Properties["routes"]
+        if ($null -ne $routesProp -and $null -ne $routesProp.Value) {
+            foreach ($agent in @("codex", "claude", "agy")) {
+                $routeProp = $routesProp.Value.PSObject.Properties[$agent]
+                if ($null -ne $routeProp -and -not [string]::IsNullOrWhiteSpace([string]$routeProp.Value)) {
+                    Assert-NodeAllowed ([string]$routeProp.Value) $forbiddenNodes "main.routes.$agent"
+                }
+            }
+        }
+    }
+    $satellitesProp = $manifest.PSObject.Properties["satellites"]
+    if ($null -ne $satellitesProp -and $null -ne $satellitesProp.Value) {
+        foreach ($sat in @($satellitesProp.Value)) {
+            $nameProp = $sat.PSObject.Properties["name"]
+            $satName = if ($null -ne $nameProp -and -not [string]::IsNullOrWhiteSpace([string]$nameProp.Value)) {
+                [string]$nameProp.Value
+            } else {
+                "unknown"
+            }
+            $nodeProp = $sat.PSObject.Properties["node"]
+            if ($null -ne $nodeProp -and -not [string]::IsNullOrWhiteSpace([string]$nodeProp.Value)) {
+                Assert-NodeAllowed ([string]$nodeProp.Value) $forbiddenNodes "satellites[$satName].node"
+            }
+        }
     }
     $servicePort = 7878
     $serviceProp = $manifest.PSObject.Properties["service"]
