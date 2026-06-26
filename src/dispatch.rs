@@ -8,12 +8,19 @@ use crate::ledger::{Counts, Ledger, Result};
 use std::path::Path;
 
 /// A stable id for a task's text, so re-running the same batch is idempotent (same id → INSERT OR
-/// IGNORE no-ops). Stable within a binary build.
+/// IGNORE no-ops). Content-stable AND toolchain-independent: FNV-1a 64-bit is a FIXED algorithm, so
+/// the id stays the same across Rust upgrades. `DefaultHasher` (the previous impl) was only "stable
+/// within a binary build" — its seed/algorithm can change between toolchains, which would re-id
+/// every existing ledger task on a compiler upgrade and silently re-run a whole drained batch.
 pub fn task_id(descr: &str) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    descr.hash(&mut h);
-    format!("{:016x}", h.finish())
+    // FNV-1a 64-bit over the raw UTF-8 bytes. Same fixed constants as the phantom-mesh fleet's
+    // task_id, so the durable PRIMARY KEY can never drift on a toolchain bump.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in descr.bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
 }
 
 /// Enqueue `tasks`, recover claims older than `stale_before`, then drain the queue through
@@ -58,4 +65,26 @@ pub fn run(
         }
     }
     ledger.counts()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::task_id;
+
+    #[test]
+    fn task_id_is_content_stable_and_toolchain_independent() {
+        // GOLDEN: locks the FNV-1a output so an accidental algorithm change — or a regression
+        // back to DefaultHasher — is caught. The durable ledger PRIMARY KEY depends on this id
+        // never drifting across Rust toolchain upgrades (else a drained batch silently re-runs).
+        assert_eq!(task_id("hello"), "a430d84680aabd0b");
+        assert_eq!(task_id("world"), "4f59ff5e730c8af3");
+        assert_eq!(task_id(""), "cbf29ce484222325", "empty input = the FNV offset basis");
+        // Deterministic + distinct.
+        assert_eq!(task_id("hello"), task_id("hello"));
+        assert_ne!(task_id("hello"), task_id("world"));
+        // Always 16 lowercase hex chars (zero-padded).
+        let id = task_id("deploy the thing");
+        assert_eq!(id.len(), 16);
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+    }
 }
