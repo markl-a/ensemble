@@ -1,8 +1,11 @@
 use crate::adapter::{detect_rate_limit, Adapter, AdapterError, AgentOutput, RateLimitInfo};
 use crate::wire::{RunRequest, RunResponse};
+use std::io::{self, Read};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+
+const MAX_REMOTE_RESPONSE_BYTES: u64 = 128 * 1024 * 1024;
 
 /// Process-wide counter making every dispatch job id unique (so two concurrent remote runs of the
 /// same agent get distinct `dispatch/<agent>-<seq>` branches on the node).
@@ -64,8 +67,7 @@ impl Adapter for RemoteAdapter {
             .send_string(&body);
         match resp {
             Ok(r) => {
-                let s = r
-                    .into_string()
+                let s = read_response_body_limited(r.into_reader(), MAX_REMOTE_RESPONSE_BYTES)
                     .map_err(|e| AdapterError::Flaked(format!("read: {e}")))?;
                 let rr: RunResponse = serde_json::from_str(&s)
                     .map_err(|e| AdapterError::Flaked(format!("decode: {e}")))?;
@@ -122,6 +124,18 @@ impl Adapter for RemoteAdapter {
             ))),
         }
     }
+}
+
+fn read_response_body_limited(mut reader: impl Read, max_bytes: u64) -> io::Result<String> {
+    let mut s = String::new();
+    reader.by_ref().take(max_bytes + 1).read_to_string(&mut s)?;
+    if s.len() as u64 > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("response too large (>{max_bytes} bytes)"),
+        ));
+    }
+    Ok(s)
 }
 
 impl RemoteAdapter {
@@ -218,6 +232,31 @@ mod tests {
         assert_eq!(out.agent, "codex");
         assert_eq!(out.text, "PONG");
         h.join().unwrap();
+    }
+
+    #[test]
+    fn remote_adapter_accepts_large_response_body() {
+        // ureq::Response::into_string has a protective body-size limit. Real git-sync result
+        // bundles can exceed that limit for larger repos, so the adapter must read the response
+        // body through a capped reader path instead.
+        let tmp = tempfile::tempdir().unwrap();
+        let text = "x".repeat(12 * 1024 * 1024);
+        let (url, h) = stub_server(crate::wire::RunResponse::ok("codex", &text));
+        let a = RemoteAdapter::new("codex", &url);
+        let out = a.run("large response", tmp.path()).unwrap();
+        assert_eq!(out.agent, "codex");
+        assert_eq!(out.text.len(), text.len());
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn remote_response_reader_rejects_bodies_over_the_explicit_cap() {
+        let err = read_response_body_limited(std::io::Cursor::new("123456"), 5).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains("response too large"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

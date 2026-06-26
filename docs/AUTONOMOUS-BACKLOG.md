@@ -33,11 +33,24 @@ queue a recurring cron drains — **one double-gated task per tick.**
 - **Fleet eligibility guard added after live reprobe:** `scripts/phase2-goal-shape.ps1` now supports
   optional `forbidden_nodes` in the untracked fleet manifest and rejects any manifest that uses a forbidden
   peer in `nodes`, `conductor`, main routes, or satellite nodes. This prevents a 5-node acceptance run from
-  silently counting a tailnet peer that private fleet policy excludes from the personal dev mesh. Current
-  live state remains 4/5 healthy for personal-fleet purposes: the conductor was restarted on `8788`, three
-  remote peers still answer `ensemble /health`; the remaining personal candidate has a non-interactive SSH
-  method documented, but its `ensemble up` listener still needs a final health-checked bootstrap. Full Slice C
-  still needs that fifth personal node to join the service mesh before the 5-node acceptance can count it.
+  silently counting a tailnet peer that private fleet policy excludes from the personal dev mesh. The missing
+  personal candidate was then bootstrapped with the documented SSH login-shell method and joined the service
+  mesh on `8788`, so the current service layer is a conductor plus four reachable peers.
+- **5-node service mesh and one-pass fleet run evidence refreshed:** the personal fleet manifest now resolves
+  to the conductor plus four reachable peers on service port `8788`; `phase2-goal-shape.ps1`, `phase2-fleet.ps1
+  -PlanOnly`, and `phase2-verify.ps1 -SkipSliceA -SkipSliceB -SkipSliceD -CheckFleetManifestNodes` pass against
+  the private manifest. One-pass `phase2-fleet.ps1 -RunSelected -VerifyEvidence -AllowEscalatedRun` reports
+  exist for the main project and all four satellites, and `-VerifyReports -RepeatCount 1` validates them. One
+  satellite reached `LANDED`; the main project and three satellites reached explicit `ESCALATED` terminal
+  decisions because remote reviewer auth is not green everywhere (Claude 401/not logged in, and agy login
+  required on the main audit route). This proves the cross-node run/evidence/control substrate is live, but
+  Phase 2 is not complete until reviewer auth is fixed and the formal repeatable Slice C gate can run with
+  the required quorum.
+- **Remote git-sync response-size flake fixed locally:** the first main-project run exposed a real adapter
+  bug: large git-sync responses failed with `read: response too big for into_string`. `RemoteAdapter` now reads
+  response bodies through an explicit 128 MiB capped response reader instead of `into_string`, with a 12 MiB
+  regression test plus an over-cap rejection test. After rebuilding a patched release binary, the same main
+  route progressed past the response-size failure into the expected governance quorum decision.
 
 ## ▶ CURRENT FOCUS (2026-06-21) — finish Phase 1 of the two-phase plan
 Spec: `docs/specs/2026-06-20-two-phase-real-tests-design.md` + `docs/specs/2026-06-20-ensemble-mcp-design.md`.
