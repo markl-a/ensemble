@@ -362,14 +362,22 @@ function Assert-NodeKnown([string]$Value, $Nodes, [string]$Label) {
     Fail "fleet manifest node '$Value' at $Label does not point at manifest.nodes"
 }
 
-function New-MainCrewText($Main) {
+function Agent-NodeLines([string]$Agent, [string]$Route, [string]$Conductor) {
+    $lines = @("[agents.$Agent]")
+    if (-not (Test-NodeSame $Route $Conductor)) {
+        $lines += "node = $(Toml-String (Normalize-NodeUrl $Route))"
+    }
+    return $lines
+}
+
+function New-MainCrewText($Main, [string]$Conductor) {
     $routes = Get-Prop $Main "routes" $null
     if ($null -eq $routes) {
         Fail "manifest is missing required field: main.routes"
     }
-    $codexNode = Normalize-NodeUrl (Require-Prop $routes "codex" "main.routes")
-    $claudeNode = Normalize-NodeUrl (Require-Prop $routes "claude" "main.routes")
-    $agyNode = Normalize-NodeUrl (Require-Prop $routes "agy" "main.routes")
+    $codexRoute = [string](Require-Prop $routes "codex" "main.routes")
+    $claudeRoute = [string](Require-Prop $routes "claude" "main.routes")
+    $agyRoute = [string](Require-Prop $routes "agy" "main.routes")
     $testCommand = [string](Get-Prop $Main "test" "cargo test --quiet")
 
     $lines = @(
@@ -400,20 +408,22 @@ function New-MainCrewText($Main) {
         'agent = "agy"',
         "blind = true",
         "",
-        "[agents.codex]",
-        "node = $(Toml-String $codexNode)",
-        "timeout = 60",
-        'backup = "agy"',
-        "",
-        "[agents.claude]",
-        "node = $(Toml-String $claudeNode)",
-        "timeout = 60",
-        'backup = "agy"',
-        "",
-        "[agents.agy]",
-        "node = $(Toml-String $agyNode)",
-        "timeout = 180"
+        ""
     )
+    $lines += Agent-NodeLines "codex" $codexRoute $Conductor
+    $lines += @(
+        "timeout = 300",
+        'backup = "agy"',
+        ""
+    )
+    $lines += Agent-NodeLines "claude" $claudeRoute $Conductor
+    $lines += @(
+        "timeout = 300",
+        'backup = "agy"',
+        ""
+    )
+    $lines += Agent-NodeLines "agy" $agyRoute $Conductor
+    $lines += "timeout = 300"
     return ($lines -join [Environment]::NewLine) + [Environment]::NewLine
 }
 
@@ -549,7 +559,7 @@ function New-FleetPlan($Fleet, [string]$ManifestDir) {
         Watch    = $mainWatch
         Task     = $mainTask
         Merge    = $mainMerge
-        Text     = New-MainCrewText $main
+        Text     = New-MainCrewText $main $conductor
         MinApprovals = 2
         ReviewerAgents = @("claude", "agy")
         Selected = $mainSelected
@@ -1200,8 +1210,14 @@ function Invoke-SelfTest {
         Fail "self-test expected JSON plan to include one watch command per project"
     }
     $main = @($plan.Projects | Where-Object { $_.Kind -eq "main" })[0]
-    if ($main.Text -notmatch 'node = "http://m1:8788"') {
-        Fail "self-test expected main codex route to be normalized"
+    if ($main.Text -match '(?s)\[agents\.codex\]\s+node =') {
+        Fail "self-test expected main conductor codex route to stay local"
+    }
+    if ($main.Text -notmatch '(?s)\[agents\.claude\]\s+node = "http://m2:8788"') {
+        Fail "self-test expected main remote claude route to be normalized"
+    }
+    if ($main.Text -notmatch '(?s)\[agents\.agy\]\s+node = "http://m2:8788"') {
+        Fail "self-test expected main remote agy route to be normalized"
     }
     if ((Normalize-NodeUrl "m2:9000") -ne "http://m2:9000") {
         Fail "self-test expected host:port to be preserved"

@@ -57,6 +57,14 @@ queue a recurring cron drains — **one double-gated task per tick.**
   reject satellite routes that point outside `manifest.nodes` or hit `forbidden_nodes`. This is needed because
   live 5-node probing showed Codex availability is broad but reviewer auth can be uneven, so Phase 2 needs a
   repeatable way to route review to an auth-ready peer without moving the satellite project assignment.
+- **5-node Slice C RepeatCount=2 is now green locally:** using the private fleet manifest and the patched
+  release binary, `phase2-fleet.ps1 -RunSelected -VerifyEvidence -RepeatCount 2` completed for the main project
+  plus all four satellites, and `phase2-fleet.ps1 -Node all -VerifyReports -RepeatCount 2` validated every
+  acceptance report. All ten selected runs reached `LANDED` with two reviewer approvals and evidence verifier
+  success. Two live blockers were fixed on the way: governed runs now skip existing kept branches from earlier
+  processes so fixed manifest tasks can rerun, and main-project routes that point at the conductor generate
+  local agents instead of forcing remote git-sync for the conductor's own CLIs. The remote adapter response cap
+  was raised from 128 MiB to 512 MiB while keeping the explicit over-cap rejection.
 
 ## ▶ CURRENT FOCUS (2026-06-21) — finish Phase 1 of the two-phase plan
 Spec: `docs/specs/2026-06-20-two-phase-real-tests-design.md` + `docs/specs/2026-06-20-ensemble-mcp-design.md`.

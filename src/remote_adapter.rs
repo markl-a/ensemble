@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-const MAX_REMOTE_RESPONSE_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_REMOTE_RESPONSE_BYTES: u64 = 512 * 1024 * 1024;
 
 /// Process-wide counter making every dispatch job id unique (so two concurrent remote runs of the
 /// same agent get distinct `dispatch/<agent>-<seq>` branches on the node).

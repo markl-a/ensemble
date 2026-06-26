@@ -25,35 +25,47 @@ pub struct Worktree {
 
 impl Worktree {
     /// `git -C <repo> worktree add -b ensemble/<slug> <repo>/.ensemble/worktrees/<slug> HEAD`,
-    /// where `<slug>` = sanitized `task_id` + a unique sequence suffix (collision-proof).
+    /// where `<slug>` = sanitized `task_id` + a unique sequence suffix. The process-local
+    /// sequence is only a starting point; kept branches from prior processes are skipped so a
+    /// fixed governed task can be rerun.
     pub fn create(repo: &Path, task_id: &str) -> std::io::Result<Self> {
-        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-        let slug = format!("{}-{seq}", sanitize(task_id));
-        let branch = format!("ensemble/{slug}");
-        let path = repo.join(".ensemble").join("worktrees").join(&slug);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+        let stem = sanitize(task_id);
+        for _ in 0..1024 {
+            let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+            let slug = format!("{stem}-{seq}");
+            let branch = format!("ensemble/{slug}");
+            let path = repo.join(".ensemble").join("worktrees").join(&slug);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            if path.exists() || branch_exists(repo, &branch)? {
+                continue;
+            }
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(["worktree", "add", "-b", &branch])
+                .arg(&path)
+                .arg("HEAD")
+                .output()?;
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                if stderr.contains("already exists") {
+                    continue;
+                }
+                return Err(std::io::Error::other(format!("git worktree add: {stderr}")));
+            }
+            return Ok(Self {
+                path,
+                branch,
+                slug,
+                repo: repo.to_path_buf(),
+                keep_branch: false,
+            });
         }
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(repo)
-            .args(["worktree", "add", "-b", &branch])
-            .arg(&path)
-            .arg("HEAD")
-            .output()?;
-        if !out.status.success() {
-            return Err(std::io::Error::other(format!(
-                "git worktree add: {}",
-                String::from_utf8_lossy(&out.stderr)
-            )));
-        }
-        Ok(Self {
-            path,
-            branch,
-            slug,
-            repo: repo.to_path_buf(),
-            keep_branch: false,
-        })
+        Err(std::io::Error::other(
+            "git worktree add: exhausted available worktree slugs",
+        ))
     }
 
     pub fn branch(&self) -> &str {
@@ -106,6 +118,16 @@ impl Worktree {
         }
         Ok(true)
     }
+}
+
+fn branch_exists(repo: &Path, branch: &str) -> std::io::Result<bool> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "--quiet", "--verify"])
+        .arg(format!("refs/heads/{branch}"))
+        .output()?;
+    Ok(out.status.success())
 }
 
 impl Drop for Worktree {
@@ -438,6 +460,40 @@ mod tests {
             .output()
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&show.stdout), "hello");
+    }
+
+    #[test]
+    fn create_skips_existing_kept_branches_for_reruns() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+
+        let first_slug;
+        {
+            let mut wt = Worktree::create(repo, "repeatable task").unwrap();
+            first_slug = wt.slug().to_string();
+            wt.keep();
+        }
+
+        let (stem, seq) = first_slug.rsplit_once('-').unwrap();
+        let seq: u64 = seq.parse().unwrap();
+        for offset in 1..=16 {
+            let branch = format!("ensemble/{stem}-{}", seq + offset);
+            git(repo, &["branch", &branch, "HEAD"]);
+        }
+
+        let wt = Worktree::create(repo, "repeatable task").unwrap();
+        assert!(
+            wt.slug().starts_with(&format!("{stem}-")),
+            "rerun should keep the same task stem, got {}",
+            wt.slug()
+        );
+        assert!(
+            !((seq + 1)..=(seq + 16)).any(|n| wt.slug() == format!("{stem}-{n}")),
+            "rerun reused a pre-existing kept branch slug: {}",
+            wt.slug()
+        );
+        assert!(wt.path.exists(), "rerun worktree should be created");
     }
 
     #[test]
