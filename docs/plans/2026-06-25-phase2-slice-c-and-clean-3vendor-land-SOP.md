@@ -10,9 +10,9 @@
 
 ## 0. 每台機器一次性前置
 
-1. **關 Surfshark 再上 Tailscale**（重要）：Surfshark 的 WireGuard 會撞 Tailscale，跨機會悄悄連不到。
+1. **關 your VPN 再上 Tailscale**（重要）：your VPN 的 WireGuard 會撞 Tailscale，跨機會悄悄連不到。
    ```powershell
-   # 關閉 Surfshark（GUI 關閉或停服務），然後：
+   # 關閉 your VPN（GUI 關閉或停服務），然後：
    tailscale up
    tailscale status   # 確認每台都在同一 tailnet、有 100.x IP
    ```
@@ -105,7 +105,7 @@ ensemble nodes       # agent→host 輔助視圖；不列本機 m1
 pwsh scripts/phase2-verify.ps1 -Repo . -SkipSliceA -SkipSliceB -SkipSliceD -FleetManifest phase2-fleet.local.json -FleetNode m1 -CheckFleetManifestNodes
 ```
 若 manifest 使用非預設 port，手動 mesh/nodes 需加 `--port <service.port>`；`phase2-fleet.ps1 -CheckNodes` 會自動使用 manifest port。
-> 看不到節點 → 回 Step 0：先關 Surfshark 再 `tailscale up`，並確認每台都已 `ensemble up`。
+> 看不到節點 → 回 Step 0：先關 your VPN 再 `tailscale up`，並確認每台都已 `ensemble up`。
 
 ---
 
@@ -274,7 +274,7 @@ ensemble run "<可驗證的小任務>" --crew .ensemble/phase2-fleet/crew-main.g
 
 | 症狀 | 處置 |
 |---|---|
-| 跨機 `ensemble nodes` 看不到別台 | 先關 Surfshark 再 `tailscale up`（WireGuard 衝突）；確認別台已 `ensemble up` |
+| 跨機 `ensemble nodes` 看不到別台 | 先關 your VPN 再 `tailscale up`（WireGuard 衝突）；確認別台已 `ensemble up` |
 | `ensemble nodes` 沒列出 m1 | 正常；`nodes`/tailnet peer discovery 不列本機，請看 `ensemble mesh` 的 `local CLIs` |
 | `agy` flake / timeout | 給足 timeout（≥120s；crew 已設 `[agents.agy] timeout=180`）。短 timeout（1~5s）一定 flake |
 | 把 `opencode` 當自動 reviewer 卡住 | opencode headless 會 hang，**別放進自動角色**；互動式 `ensemble agent`/MCP 不受限 |
@@ -288,7 +288,7 @@ ensemble run "<可驗證的小任務>" --crew .ensemble/phase2-fleet/crew-main.g
 ## 7. 一頁速查（每台機器照抄）
 
 ```bash
-# 0) 關 Surfshark；tailscale up; tailscale status
+# 0) 關 your VPN；tailscale up; tailscale status
 # 1) pull + build + install
 git pull --ff-only && cargo build --release && cargo install --path . --force
 ensemble doctor

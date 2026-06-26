@@ -4207,7 +4207,7 @@ node = "http://m2:7878"
             "--team",
             "ops",
             "--member",
-            "lead@z13",
+            "lead@node-a",
             "--print-config",
             "codex",
             "--model",
@@ -4227,7 +4227,7 @@ node = "http://m2:7878"
 
         assert_eq!(parsed.repo, "work");
         assert_eq!(parsed.team, "ops");
-        assert_eq!(parsed.name.as_deref(), Some("lead@z13"));
+        assert_eq!(parsed.name.as_deref(), Some("lead@node-a"));
         assert!(parsed.print_config);
         assert_eq!(
             parsed.vendor_args,
@@ -4294,7 +4294,7 @@ node = "http://m2:7878"
         let env = MemberLauncherEnv {
             cwd: cwd.clone(),
             exe: test_abs("bin").join("ensemble"),
-            raw_host: Some("Z13.local".to_string()),
+            raw_host: Some("node-a.local".to_string()),
             home: test_abs("home"),
             codex_home: None,
             vendor_bin: None,
@@ -4309,7 +4309,7 @@ node = "http://m2:7878"
 
         assert_eq!(plan.repo, cwd.join("work"));
         assert_eq!(plan.team, "ops");
-        assert_eq!(plan.member, "codex@z13");
+        assert_eq!(plan.member, "codex@node-a");
         assert_eq!(plan.crew, cwd.join("work").join("crew.toml"));
         assert_eq!(plan.vendor_program, "codex");
         assert_eq!(
@@ -4354,7 +4354,7 @@ node = "http://m2:7878"
         let env = MemberLauncherEnv {
             cwd: cwd.clone(),
             exe: test_abs("bin").join("ensemble"),
-            raw_host: Some("z13".to_string()),
+            raw_host: Some("node-a".to_string()),
             home: test_abs("home"),
             codex_home: None,
             vendor_bin: Some(fake.display().to_string()),
@@ -4488,7 +4488,7 @@ node = "http://m2:7878"
         let env = MemberLauncherEnv {
             cwd: cwd.clone(),
             exe: test_abs("bin").join("ensemble"),
-            raw_host: Some("Z13".to_string()),
+            raw_host: Some("node-a".to_string()),
             home: test_abs("home"),
             codex_home: None,
             vendor_bin: None,
@@ -4502,9 +4502,9 @@ node = "http://m2:7878"
             build_member_launch_plan(ensemble::mcp_install::ClientKind::Claude, parsed, &env)
                 .unwrap();
 
-        assert_eq!(plan.member, "claude@z13");
-        assert_eq!(plan.session.member, "claude@z13");
-        assert_eq!(plan.params.name, "claude@z13");
+        assert_eq!(plan.member, "claude@node-a");
+        assert_eq!(plan.session.member, "claude@node-a");
+        assert_eq!(plan.params.name, "claude@node-a");
     }
 
     #[test]
@@ -4513,7 +4513,7 @@ node = "http://m2:7878"
         let env = MemberLauncherEnv {
             cwd: cwd.clone(),
             exe: test_abs("bin").join("ensemble"),
-            raw_host: Some("Z13".to_string()),
+            raw_host: Some("node-a".to_string()),
             home: test_abs("home"),
             codex_home: None,
             vendor_bin: None,
@@ -4588,7 +4588,7 @@ node = "http://m2:7878"
         let env = MemberLauncherEnv {
             cwd,
             exe: test_abs("bin").join("ensemble"),
-            raw_host: Some("Z13".to_string()),
+            raw_host: Some("node-a".to_string()),
             home: test_abs("home"),
             codex_home: None,
             vendor_bin: None,
@@ -4618,7 +4618,7 @@ node = "http://m2:7878"
             "--team",
             "ops",
             "--member",
-            "agy@z13",
+            "agy@node-a",
             "--timeout",
             "30",
             "--confirm-policy",
@@ -4633,7 +4633,7 @@ node = "http://m2:7878"
 
         assert_eq!(parsed.repo, "work");
         assert_eq!(parsed.team, "ops");
-        assert_eq!(parsed.name.as_deref(), Some("agy@z13"));
+        assert_eq!(parsed.name.as_deref(), Some("agy@node-a"));
         assert_eq!(parsed.timeout_secs, 30);
         assert_eq!(parsed.confirm_policy, ConfirmPolicy::Deny);
         assert_eq!(parsed.prompt.as_deref(), Some("summarize board"));
@@ -4664,14 +4664,14 @@ node = "http://m2:7878"
             "--team",
             "ops",
             "--member",
-            "agy@z13",
+            "agy@node-a",
             "--confirm-policy",
             "approve",
             "agy",
             "--continue",
         ]))
         .unwrap();
-        let plan = build_agy_plan(parsed, &cwd, Some("Z13.local"));
+        let plan = build_agy_plan(parsed, &cwd, Some("node-a.local"));
 
         assert_eq!(agy_launch_mode(&plan), AgyLaunchMode::Interactive);
         assert_eq!(
@@ -4689,21 +4689,21 @@ node = "http://m2:7878"
         let with_prompt = build_agy_plan(
             parse_agy_args(&argv(&["ensemble", "agy", "--prompt", "read board"])).unwrap(),
             &cwd,
-            Some("Z13.local"),
+            Some("node-a.local"),
         );
         assert_eq!(agy_launch_mode(&with_prompt), AgyLaunchMode::TeamTurn);
 
         let with_json = build_agy_plan(
             parse_agy_args(&argv(&["ensemble", "--json", "agy"])).unwrap(),
             &cwd,
-            Some("Z13.local"),
+            Some("node-a.local"),
         );
         assert_eq!(agy_launch_mode(&with_json), AgyLaunchMode::TeamTurn);
 
         let with_print_prompt = build_agy_plan(
             parse_agy_args(&argv(&["ensemble", "--print-prompt", "agy"])).unwrap(),
             &cwd,
-            Some("Z13.local"),
+            Some("node-a.local"),
         );
         assert_eq!(agy_launch_mode(&with_print_prompt), AgyLaunchMode::TeamTurn);
     }
@@ -4826,9 +4826,9 @@ node = "http://m2:7878"
     fn resolve_one_bare_host_maps_to_default_port_url() {
         // A bare host (no scheme) → http://<host>:7878; must not fall through to a local adapter
         // even though "claude" is a known local name. The label reflects the real target.
-        let (a, label) = resolve_one("claude", Some("ayaneo"), false).unwrap();
+        let (a, label) = resolve_one("claude", Some("node-b"), false).unwrap();
         assert_eq!(a.name(), "claude");
-        assert_eq!(label, "http://ayaneo:7878");
+        assert_eq!(label, "http://node-b:7878");
         // a bare host that merely starts with "http" is still a bare host (not a URL)
         let (_b, label2) = resolve_one("claude", Some("httpbox"), false).unwrap();
         assert_eq!(label2, "http://httpbox:7878");
@@ -4976,7 +4976,7 @@ node = "http://m2:7878"
 
     #[test]
     fn member_node_routing_uses_member_suffix_without_explicit_node() {
-        let routed = route_control_member("claude@macbook", None, Some("z13"), &[]);
+        let routed = route_control_member("claude@macbook", None, Some("node-a"), &[]);
 
         assert_eq!(routed.member, "claude@macbook");
         assert_eq!(routed.node.as_deref(), Some("macbook"));
@@ -4988,10 +4988,10 @@ node = "http://m2:7878"
             "http://macbook.tail.ts.net:7878".to_string(),
             vec!["claude".to_string()],
         )];
-        let routed = route_control_member("claude@macbook", Some("ayaneo"), Some("z13"), &mesh);
+        let routed = route_control_member("claude@macbook", Some("node-b"), Some("node-a"), &mesh);
 
         assert_eq!(routed.member, "claude@macbook");
-        assert_eq!(routed.node.as_deref(), Some("ayaneo"));
+        assert_eq!(routed.node.as_deref(), Some("node-b"));
     }
 
     #[test]
@@ -5000,7 +5000,7 @@ node = "http://m2:7878"
             "http://work.tail.ts.net:7878".to_string(),
             vec!["reviewer".to_string()],
         )];
-        let routed = route_control_member("reviewer@work", Some("local"), Some("z13"), &mesh);
+        let routed = route_control_member("reviewer@work", Some("local"), Some("node-a"), &mesh);
 
         assert_eq!(routed.member, "reviewer@work");
         assert_eq!(routed.node, None);
@@ -5008,9 +5008,9 @@ node = "http://m2:7878"
 
     #[test]
     fn member_node_routing_keeps_local_suffix_on_local_plane() {
-        let routed = route_control_member("codex@z13", None, Some("Z13.local"), &[]);
+        let routed = route_control_member("codex@node-a", None, Some("node-a.local"), &[]);
 
-        assert_eq!(routed.member, "codex@z13");
+        assert_eq!(routed.member, "codex@node-a");
         assert_eq!(routed.node, None);
 
         let explicit_local = route_control_member("claude@local", None, Some("anything"), &[]);
@@ -5030,7 +5030,7 @@ node = "http://m2:7878"
             ),
         ];
 
-        let routed = route_control_member("claude@macbook", None, Some("z13"), &mesh);
+        let routed = route_control_member("claude@macbook", None, Some("node-a"), &mesh);
 
         assert_eq!(routed.member, "claude@macbook");
         assert_eq!(

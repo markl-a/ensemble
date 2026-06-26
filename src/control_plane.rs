@@ -259,7 +259,7 @@ mod tests {
     fn local_control_plane_roundtrips_team_board() {
         let tmp = tempfile::tempdir().unwrap();
         let session =
-            crate::team::resolve_team_session(tmp.path(), Some("ops"), "codex", None, Some("z13"));
+            crate::team::resolve_team_session(tmp.path(), Some("ops"), "codex", None, Some("node-a"));
         let cp = LocalControlPlane::new();
 
         let cursor = cp
@@ -278,7 +278,7 @@ mod tests {
     fn local_control_plane_reports_status_and_feeds() {
         let tmp = tempfile::tempdir().unwrap();
         let session =
-            crate::team::resolve_team_session(tmp.path(), None, "codex", Some("codex@z13"), None);
+            crate::team::resolve_team_session(tmp.path(), None, "codex", Some("codex@node-a"), None);
         let cp = LocalControlPlane::new();
         cp.post_team_message(&session, "operator", "note", "online")
             .unwrap();
@@ -286,12 +286,12 @@ mod tests {
             .unwrap()
             .enqueue("task-1", "demo", 1)
             .unwrap();
-        Feed::open(crate::member_stream_path(tmp.path(), "codex@z13"))
+        Feed::open(crate::member_stream_path(tmp.path(), "codex@node-a"))
             .append(r#"{"ev":"output","n":1,"text":"hi","ts":"T"}"#)
             .unwrap();
         cp.append_control(
             tmp.path(),
-            "codex@z13",
+            "codex@node-a",
             &ControlCmd::Steer {
                 from: "operator".into(),
                 prompt: "focus".into(),
@@ -302,8 +302,8 @@ mod tests {
         let status = cp.team_status(&session).unwrap();
         assert_eq!(status.board_len, 1);
         assert_eq!(status.ledger_counts.queued, 1);
-        assert_eq!(status.streams, vec!["codex-z13".to_string()]);
-        assert_eq!(status.controls, vec!["codex-z13".to_string()]);
+        assert_eq!(status.streams, vec!["codex-node-a".to_string()]);
+        assert_eq!(status.controls, vec!["codex-node-a".to_string()]);
     }
 
     #[test]

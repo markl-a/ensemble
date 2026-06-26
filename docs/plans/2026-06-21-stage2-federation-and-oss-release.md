@@ -5,7 +5,7 @@
 > the operator, in order, with a stated success check.
 >
 > **Two goals, one playbook:**
-> 1. **Stage 2 federation** — bring the full fleet (5 physical machines + z13's WSL-Linux
+> 1. **Stage 2 federation** — bring the full fleet (5 physical machines + conductor's WSL-Linux
 >    node) online and prove they run ensemble *jointly* as one federated crew across **three
 >    platforms** (Windows, macOS, WSL/Linux) over Tailscale, landing real cross-vendor work
 >    through the **double-gate**.
@@ -47,41 +47,41 @@ governed task may fan turns out to several CLIs, so the budget is bounded by the
 
 | Node | Tailscale name | OS / platform | Cores | RAM | Role | Local CLIs hosted (`serve`) | Concurrency budget |
 |---|---|---|---|---|---|---|---|
-| **z13** | `yoyogood` | Windows 11 | 16C/32T | 111.6 GB | **PRIME / conductor** — runs `ensemble run`, owns `main`, runs the double-gate, heavy parallelism | codex, claude, opencode, agy | **6–8** worktrees |
-| **z13-WSL** | (shares z13's tailnet IP, or its own if `tailscale up` inside WSL) | WSL2 Linux | shares z13 | shares z13 | **3rd-platform portability proof** — a Linux `serve` node; clean Unix PTY for agy | codex, claude, opencode, agy (whichever are installed in WSL) | **2–3** (shares z13 silicon) |
-| **M5 MBP** | `marklmacbook-pro` | macOS arm64 | ~10–14 (confirm) | 24 GB | **macOS worker** — primary Mac agent host; clean Unix PTY | codex, claude, opencode, agy | **3–4** |
-| **acer** | `laptop-gur943mk` | Windows | 4C/8T | 23.8 GB | Windows worker | codex, claude (whichever installed) | **2** |
-| **ayaneo** | `ayaneo` | Windows | 8C/16T | 12.7 GB | **RAM-constrained** Windows worker — fewer worktrees | codex, claude (1 heavy CLI at a time) | **1–2** |
-| **M1 MBA** | `markmacbook-air` | macOS arm64 | 8 (4P+4E) | 12 GB | **RAM-constrained + intermittent** — may be offline; portable | codex, claude | **1** |
+| **conductor** | `node-a` | Windows 11 | 16C/32T | 111.6 GB | **PRIME / conductor** — runs `ensemble run`, owns `main`, runs the double-gate, heavy parallelism | codex, claude, opencode, agy | **6–8** worktrees |
+| **conductor-WSL** | (shares conductor's tailnet IP, or its own if `tailscale up` inside WSL) | WSL2 Linux | shares conductor | shares conductor | **3rd-platform portability proof** — a Linux `serve` node; clean Unix PTY for agy | codex, claude, opencode, agy (whichever are installed in WSL) | **2–3** (shares conductor silicon) |
+| **mac-1** | `node-c` | macOS arm64 | ~10–14 (confirm) | 24 GB | **macOS worker** — primary Mac agent host; clean Unix PTY | codex, claude, opencode, agy | **3–4** |
+| **node-d** | `node-d` | Windows | 4C/8T | 23.8 GB | Windows worker | codex, claude (whichever installed) | **2** |
+| **node-b** | `node-b` | Windows | 8C/16T | 12.7 GB | **RAM-constrained** Windows worker — fewer worktrees | codex, claude (1 heavy CLI at a time) | **1–2** |
+| **mac-2** | `node-e` | macOS arm64 | 8 (4P+4E) | 12 GB | **RAM-constrained + intermittent** — may be offline; portable | codex, claude | **1** |
 
 Notes:
-- **Conductor = z13 only.** Workers run `ensemble serve` and host CLIs; only the conductor
+- **Conductor = conductor only.** Workers run `ensemble serve` and host CLIs; only the conductor
   runs `ensemble run`/`dispatch` and lands to `main`. The double-gate lives on the conductor.
-- **z13-WSL is the third-platform proof.** It need not host *new* capability — its job is to
+- **conductor-WSL is the third-platform proof.** It need not host *new* capability — its job is to
   show a Linux node `serve`s, runs an agent turn, and returns edits via `repo_sync` exactly
-  like a Windows/macOS node. See §7 open question on whether the WSL node and z13-Windows node
+  like a Windows/macOS node. See §7 open question on whether the WSL node and conductor-Windows node
   coexist on one tailnet IP or the WSL node runs its own `tailscale up`.
-- **RAM-constrained nodes** (ayaneo 12.7 GB, M1 12 GB) host at most one heavy CLI run at a
+- **RAM-constrained nodes** (node-b 12.7 GB, mac-2 12 GB) host at most one heavy CLI run at a
   time. Do **not** point a fan-out task's whole quorum at them.
-- **M1 is intermittent.** The plan must degrade cleanly when it is offline — and it does:
+- **mac-2 is intermittent.** The plan must degrade cleanly when it is offline — and it does:
   `discover_mesh` only probes `online` peers, and `probe_agents` caps each connect at 800 ms
-  (`discovery.rs`), so an absent M1 never stalls discovery.
+  (`discovery.rs`), so an absent mac-2 never stalls discovery.
 
 ### 1.2 Verify the live numbers (don't hardcode)
 
 Run on each node before assigning its budget:
 
 ```powershell
-# Windows (PowerShell) — z13 / acer / ayaneo
+# Windows (PowerShell) — conductor / node-d / node-b
 (Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors
 [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory/1GB,1)
 ```
 ```bash
-# macOS (zsh) — M5 / M1
+# macOS (zsh) — mac-1 / mac-2
 sysctl -n hw.logicalcpu ; echo "$(($(sysctl -n hw.memsize)/1073741824)) GB"
 ```
 ```bash
-# WSL (bash) — z13-WSL
+# WSL (bash) — conductor-WSL
 nproc ; free -g | awk '/Mem:/{print $2" GB"}'
 ```
 
@@ -89,41 +89,41 @@ nproc ; free -g | awk '/Mem:/{print $2" GB"}'
 
 ```mermaid
 graph TB
-    subgraph TAILNET["Tailnet (WireGuard) — m4932981@ — port 7878, tailnet-only bind"]
+    subgraph TAILNET["Tailnet (WireGuard) — <user>@ — port 7878, tailnet-only bind"]
         direction TB
-        Z13["<b>z13 / yoyogood</b> (Windows, 32T/111GB)<br/>PRIME · CONDUCTOR · owns main + double-gate<br/>ensemble run / dispatch / merge<br/>serve: codex claude opencode agy"]
+        CONDUCTOR["<b>conductor / node-a</b> (Windows, 32T/111GB)<br/>PRIME · CONDUCTOR · owns main + double-gate<br/>ensemble run / dispatch / merge<br/>serve: codex claude opencode agy"]
 
-        subgraph Z13HOST["z13 silicon"]
-            WSL["<b>z13-WSL</b> (Linux/WSL2)<br/>3rd-platform proof · clean PTY<br/>ensemble serve"]
+        subgraph CONDUCTOR_HOST["conductor silicon"]
+            WSL["<b>conductor-WSL</b> (Linux/WSL2)<br/>3rd-platform proof · clean PTY<br/>ensemble serve"]
         end
 
-        M5["<b>M5 MBP</b> (macOS arm64, 24GB)<br/>macOS worker · ensemble serve<br/>codex claude opencode agy"]
-        ACER["<b>acer / laptop-gur943mk</b> (Windows, 8T/24GB)<br/>worker · ensemble serve"]
-        AYANEO["<b>ayaneo</b> (Windows, 16T/12.7GB)<br/>RAM-constrained worker · ensemble serve"]
-        M1["<b>M1 MBA</b> (macOS arm64, 12GB)<br/>intermittent worker · ensemble serve"]
+        mac-1["<b>mac-1</b> (macOS arm64, 24GB)<br/>macOS worker · ensemble serve<br/>codex claude opencode agy"]
+        NODE_D["<b>node-d / node-d</b> (Windows, 8T/24GB)<br/>worker · ensemble serve"]
+        NODE_B["<b>node-b</b> (Windows, 16T/12.7GB)<br/>RAM-constrained worker · ensemble serve"]
+        mac-2["<b>mac-2</b> (macOS arm64, 12GB)<br/>intermittent worker · ensemble serve"]
     end
 
-    Z13 -- "POST /run (HTTP/WireGuard)" --> WSL
-    Z13 -- "POST /run" --> M5
-    Z13 -- "POST /run" --> ACER
-    Z13 -- "POST /run" --> AYANEO
-    Z13 -. "POST /run (when online)" .-> M1
+    CONDUCTOR -- "POST /run (HTTP/WireGuard)" --> WSL
+    CONDUCTOR -- "POST /run" --> mac-1
+    CONDUCTOR -- "POST /run" --> NODE_D
+    CONDUCTOR -- "POST /run" --> NODE_B
+    CONDUCTOR -. "POST /run (when online)" .-> mac-2
 
-    WSL -- "RunResponse + result bundle" --> Z13
-    M5 -- "RunResponse + result bundle" --> Z13
-    ACER -- "RunResponse + result bundle" --> Z13
-    AYANEO -- "RunResponse + result bundle" --> Z13
-    M1 -. "RunResponse + result bundle" .-> Z13
+    WSL -- "RunResponse + result bundle" --> CONDUCTOR
+    mac-1 -- "RunResponse + result bundle" --> CONDUCTOR
+    NODE_D -- "RunResponse + result bundle" --> CONDUCTOR
+    NODE_B -- "RunResponse + result bundle" --> CONDUCTOR
+    mac-2 -. "RunResponse + result bundle" .-> CONDUCTOR
 
-    Z13 ==> MAIN["main (fast-forward only,<br/>AFTER double-gate LGTM,<br/>commit identity markl-a)"]
+    CONDUCTOR ==> MAIN["main (fast-forward only,<br/>AFTER double-gate LGTM,<br/>commit identity <you>)"]
 
     classDef prime fill:#1f4e79,color:#fff,stroke:#0b2942;
     classDef worker fill:#2e6b34,color:#fff,stroke:#16361a;
     classDef constrained fill:#7a5c12,color:#fff,stroke:#3d2e09;
     classDef gate fill:#7a1f1f,color:#fff,stroke:#3d0f0f;
-    class Z13 prime;
-    class WSL,M5,ACER worker;
-    class AYANEO,M1 constrained;
+    class CONDUCTOR prime;
+    class WSL,mac-1,NODE_D worker;
+    class NODE_B,mac-2 constrained;
     class MAIN gate;
 ```
 
@@ -133,23 +133,23 @@ graph TB
 
 The federated run is identical in mechanism to a local run — a `RemoteAdapter` is
 indistinguishable from a local adapter to the conductor (`remote_adapter.rs` doc comment). The
-only new things at bring-up are: turn off Surfshark, `tailscale up`, start `serve` on each
+only new things at bring-up are: turn off your VPN, `tailscale up`, start `serve` on each
 worker, and point the conductor's crew at the discovered hosts.
 
 ```mermaid
 flowchart TD
-    A["Cold machines"] --> B{"Surfshark<br/>(WireGuard) running?"}
-    B -- yes --> B1["Turn OFF Surfshark<br/>(WireGuard ↔ Tailscale collision —<br/>the #1 bring-up gotcha)"]
+    A["Cold machines"] --> B{"your VPN<br/>(WireGuard) running?"}
+    B -- yes --> B1["Turn OFF your VPN<br/>(WireGuard ↔ Tailscale collision —<br/>the #1 bring-up gotcha)"]
     B -- no --> C
     B1 --> C["tailscale up — on EVERY node"]
     C --> D["ensemble doctor — per node<br/>(verify CLIs + tailscale + git-repo;<br/>exit 0 = ready)"]
     D -- "not ready" --> D1["install/login the missing CLI(s)<br/>(§5 reinstall) → re-doctor"]
     D -- ready --> E["ensemble serve — on every WORKER<br/>(binds tailnet IPv4:7878, never 0.0.0.0)"]
-    E --> F["z13: ensemble mesh / nodes<br/>(discover_mesh probes online peers'<br/>/health in parallel, 800ms connect cap)"]
-    F -- "hosts missing" --> F1["fix serve/tailscale on the absent node<br/>(check Surfshark, tailscale status)"]
+    E --> F["conductor: ensemble mesh / nodes<br/>(discover_mesh probes online peers'<br/>/health in parallel, 800ms connect cap)"]
+    F -- "hosts missing" --> F1["fix serve/tailscale on the absent node<br/>(check your VPN, tailscale status)"]
     F -- "mesh looks right" --> G["SMALLEST PROOF first:<br/>2 machines, 2 vendors (§3.4)"]
     G -- "fails" --> G1["diagnose (curl /health, --node explicit)<br/>before scaling up"]
-    G -- "passes" --> H["FULL federated run from z13:<br/>ensemble run \"&lt;task&gt;\" --crew fleet-crew.toml"]
+    G -- "passes" --> H["FULL federated run from conductor:<br/>ensemble run \"&lt;task&gt;\" --crew fleet-crew.toml"]
 
     H --> I["conductor fans turns across vendors+machines<br/>(adapters_for resolves agent→node:<br/>explicit node= &gt; discovered &gt; local)"]
     I --> J["each node: materialize base bundle →<br/>agent edits → commit on dispatch/&lt;job&gt; →<br/>bundle back (repo_sync)"]
@@ -157,8 +157,8 @@ flowchart TD
     K --> L["TEST GATE (firewall A):<br/>cargo test must be GREEN"]
     L -- "RED" --> I
     L -- "GREEN" --> M{{"DOUBLE-GATE (hard barrier):<br/>≥2 DISTINCT-VENDOR reviewers<br/>both VERDICT: LGTM?<br/>(min_approvals=2)"}}
-    M -- "no / flaked" --> M1["Iterate (feedback → implementer)<br/>or Escalate — NEVER land"]
-    M -- "yes (codex + claude LGTM)" --> N["LAND: fast-forward merge to main<br/>commit as markl-a &lt;m4932981@gmail.com&gt;"]
+    M -- "no / flaked" --> mac-2["Iterate (feedback → implementer)<br/>or Escalate — NEVER land"]
+    M -- "yes (codex + claude LGTM)" --> N["LAND: fast-forward merge to main<br/>commit as <you> &lt;you@example.com&gt;"]
 
     style M fill:#7a1f1f,color:#fff
     style N fill:#1f4e79,color:#fff
@@ -181,32 +181,32 @@ flowchart TD
 
 ## 3. Execution playbook
 
-> Conventions: **[z13]** = run on the conductor; **[worker]** = run on every worker node;
+> Conventions: **[conductor]** = run on the conductor; **[worker]** = run on every worker node;
 > **[node]** = run on the node named. Each block states its success check. Replace
 > `<tailnet-ipv4>`/`<host>` with values you **read at run time** — never paste an IP from this
 > doc into a command without confirming it with `tailscale ip -4` / `tailscale status`.
 
 ### 3.0 Pre-flight: kill the #1 gotcha (every node)
 
-Surfshark (WireGuard) collides with Tailscale (also WireGuard). Turn Surfshark **off first**.
+your VPN (WireGuard) collides with Tailscale (also WireGuard). Turn your VPN **off first**.
 
 ```powershell
-# [Windows node] — confirm Surfshark/WireGuard is not holding the tunnel, then bring tailscale up
-Get-Service -Name "*surfshark*","*WireGuard*" -ErrorAction SilentlyContinue | Select Name,Status
-# Quit Surfshark from its tray app / disconnect, THEN:
+# [Windows node] — confirm your VPN/WireGuard is not holding the tunnel, then bring tailscale up
+Get-Service -Name "*your-vpn*","*WireGuard*" -ErrorAction SilentlyContinue | Select Name,Status
+# Quit your VPN from its tray app / disconnect, THEN:
 tailscale up
 tailscale status        # success: peers listed, Self has a 100.x IP
 tailscale ip -4         # success: prints this node's 100.x address
 ```
 ```bash
 # [macOS / WSL node]
-pgrep -fl -i surfshark || echo "no surfshark process"   # quit the app if present
+pgrep -fl -i your-vpn || echo "no your-vpn process"   # quit the app if present
 tailscale up
 tailscale status && tailscale ip -4   # success: peers + this node's 100.x
 ```
 **Success check (all):** `tailscale status` lists the other fleet nodes; `tailscale ip -4`
-prints a `100.x` address. If cross-machine is still blocked, re-confirm Surfshark is fully off
-(see memory: surfshark-tailscale-wireguard-conflict).
+prints a `100.x` address. If cross-machine is still blocked, re-confirm your VPN is fully off
+(see memory: your-vpn-tailscale-wireguard-conflict).
 
 ### 3.1 Readiness: `ensemble doctor` (every node)
 
@@ -225,7 +225,7 @@ rather than trusting any pasted numbers:
 codex --version ; claude --version ; opencode --version ; agy --version
 ```
 
-### 3.2 The federated crew config (`fleet-crew.toml`, lives on z13)
+### 3.2 The federated crew config (`fleet-crew.toml`, lives on conductor)
 
 Pin reviewers to distinct vendors so the double-gate = two vendors structurally. Pin remote
 agents with explicit `node=` for a *deterministic* proof (auto-discovery also works — §3.3 —
@@ -233,7 +233,7 @@ but explicit is reproducible). Use the **bare host → `http://<host>:7878`** fo
 accepts, or a full URL.
 
 ```toml
-# fleet-crew.toml  (on z13)  — codex implements, claude + (agy|opencode) review = ≥2 vendors
+# fleet-crew.toml  (on conductor)  — codex implements, claude + (agy|opencode) review = ≥2 vendors
 pipeline = ["implement", "review", "debug"]
 
 [gate]
@@ -259,31 +259,31 @@ agent = "opencode"          # a 3rd distinct vendor as the second reviewer
 # Drive specific agents on specific machines (explicit > discovered > local).
 # Read each host's real tailnet name with `tailscale status`; bare host → http://<host>:7878.
 [agents.claude]
-node = "marklmacbook-pro"   # claude review runs on the M5 (macOS) — cross-platform proof
+node = "node-c"   # claude review runs on the mac-1 (macOS) — cross-platform proof
 
 [agents.opencode]
-node = "ayaneo"             # opencode debug runs on ayaneo (Windows) — RAM-constrained: 1 at a time
+node = "node-b"             # opencode debug runs on node-b (Windows) — RAM-constrained: 1 at a time
 ```
 
 > The conductor resolves each role's agent in `main.rs::adapters_for`: an explicit
 > `[agents.<n>] node=` always wins, else (discovery on) a tailnet peer hosting that agent, else
-> the local CLI. So `codex` (no `node=`) runs **locally on z13**, `claude` on the M5, `opencode`
-> on ayaneo — a single task fanned across **3 machines + 2 OSes + 3 vendors**.
+> the local CLI. So `codex` (no `node=`) runs **locally on conductor**, `claude` on the mac-1, `opencode`
+> on node-b — a single task fanned across **3 machines + 2 OSes + 3 vendors**.
 
 ### 3.3 Start serving (every worker)
 
 ```powershell
-# [worker: acer / ayaneo / z13-as-host-too] — Windows
+# [worker: node-d / node-b / conductor-as-host-too] — Windows
 cd <path-to-ensemble-repo>
 ensemble up            # prints the mesh, then serves on the tailnet IP:7878 (Ctrl-C to stop)
 # or, headless/background-friendly:  ensemble serve
 ```
 ```bash
-# [worker: M5 / M1] — macOS
+# [worker: mac-1 / mac-2] — macOS
 cd <path-to-ensemble-repo> && ensemble up
 ```
 ```bash
-# [worker: z13-WSL] — Linux. Inside WSL, confirm tailscale is up in THIS namespace first.
+# [worker: conductor-WSL] — Linux. Inside WSL, confirm tailscale is up in THIS namespace first.
 cd /mnt/d/Projects/ensemble    # or a native clone; see §7 on shared-vs-own tailnet IP
 ensemble up
 ```
@@ -293,16 +293,16 @@ If it binds **loopback** instead (warning printed), tailscale has no IP on that 
 
 ### 3.4 Smallest federated proof FIRST (2 machines, 2 vendors)
 
-Before the 5-machine run, prove the wire end-to-end with the least moving parts: z13 (conductor
+Before the 5-machine run, prove the wire end-to-end with the least moving parts: conductor (conductor
 + local codex) drives **one** remote vendor on **one** other machine. The `agent` verb does a
 real git-sync round-trip (base bundle → remote edit → ff back into `--repo`).
 
 ```powershell
-# [z13] — pick a node that is serving claude (e.g. the M5). Read its name from `tailscale status`.
-ensemble agent claude "Append a line 'federation smoke OK' to FEDERATION_SMOKE.md" --node marklmacbook-pro --repo . --json
+# [conductor] — pick a node that is serving claude (e.g. the mac-1). Read its name from `tailscale status`.
+ensemble agent claude "Append a line 'federation smoke OK' to FEDERATION_SMOKE.md" --node node-c --repo . --json
 ```
-**Success check:** JSON `{"agent":"claude","node":"http://marklmacbook-pro:7878","ok":true,…}`
-**and** `git status` on z13 shows `FEDERATION_SMOKE.md` changed (the remote edit fast-forwarded
+**Success check:** JSON `{"agent":"claude","node":"http://node-c:7878","ok":true,…}`
+**and** `git status` on conductor shows `FEDERATION_SMOKE.md` changed (the remote edit fast-forwarded
 back via `repo_sync::apply_result`). If `ok:false`, diagnose with `curl …/health` and an
 explicit `--node` before scaling up. (Discard the smoke file afterward — do not commit it.)
 
@@ -313,10 +313,10 @@ explicit `--node` before scaling up. (Discard the smoke file afterward — do no
 ### 3.5 The full federated governed run (5 machines, 3 OSes, double-gate → main)
 
 ```powershell
-# [z13] — ensure main is clean (worktree merge needs a clean tree) and you're on main
+# [conductor] — ensure main is clean (worktree merge needs a clean tree) and you're on main
 git -C <repo> switch main ; git -C <repo> status --porcelain   # success: empty output
 
-# Drive the governed crew. codex (z13) implements; claude (M5/macOS) + opencode (ayaneo/Win) review.
+# Drive the governed crew. codex (conductor) implements; claude (mac-1/macOS) + opencode (node-b/Win) review.
 # Edits from remote nodes return via repo_sync; the test gate must be GREEN; then the DOUBLE-GATE.
 ensemble run "<a real, scoped task on this repo>" --crew fleet-crew.toml --repo .
 ```
@@ -328,9 +328,9 @@ ensemble run "<a real, scoped task on this repo>" --crew fleet-crew.toml --repo 
   land the branch to `main` under the right identity:
 
 ```powershell
-# [z13] — set the repo-local identity FIRST (never the global Clewtex identity)
-git -C <repo> config user.name  "markl-a"
-git -C <repo> config user.email "m4932981@gmail.com"
+# [conductor] — set the repo-local identity FIRST (never the global Clewtex identity)
+git -C <repo> config user.name  "<you>"
+git -C <repo> config user.email "you@example.com"
 
 # Land the gated branch to main (fast-forward / true-merge; conflict → escalates, never auto-resolves)
 ensemble merge ensemble/<slug> --into main --repo .
@@ -341,17 +341,17 @@ the work safe on the branch).
 
 **Federation success criteria (all must hold):**
 1. The transcript shows turns that ran on **≥2 other machines** and **≥2 other OSes** (codex
-   local on z13-Windows + claude on macOS + opencode on a second Windows box; swap one reviewer
-   to the **z13-WSL** node to tick the Linux box — see §3.6).
+   local on conductor-Windows + claude on macOS + opencode on a second Windows box; swap one reviewer
+   to the **conductor-WSL** node to tick the Linux box — see §3.6).
 2. **Two distinct-vendor** `VERDICT: LGTM` lines gated the land (`min_approvals=2`).
-3. The merge to `main` is a **fast-forward**, authored `markl-a <m4932981@gmail.com>`.
+3. The merge to `main` is a **fast-forward**, authored `<you> <you@example.com>`.
 
 ### 3.6 Tick the third platform (WSL/Linux) explicitly
 
 To make the Linux node load-bearing in the proof, point one reviewer at it for a run:
 
 ```powershell
-# [z13] one-off: drive claude review on the WSL node instead of the M5
+# [conductor] one-off: drive claude review on the WSL node instead of the mac-1
 ensemble agent claude "Review: does <file> satisfy <task>? End with VERDICT: LGTM or CHANGES." --node <wsl-host-or-100.x> --repo .
 ```
 Or temporarily set `[agents.claude] node = "<wsl-host>"` in a copy of `fleet-crew.toml` and run
@@ -361,11 +361,11 @@ agy-on-WSL is the clean-PTY datapoint.
 
 ### 3.7 Durable variant (optional, for a batch)
 
-For a resumable multi-task batch across the fleet, use the ledger so a dropped node (M1 going
+For a resumable multi-task batch across the fleet, use the ledger so a dropped node (mac-2 going
 offline) doesn't lose work:
 
 ```powershell
-# [z13]
+# [conductor]
 ensemble dispatch "task A" "task B" "task C" --ledger fleet.db --crew fleet-crew.toml --repo .
 ensemble ledger status --ledger fleet.db        # success: done/failed/queued/claimed counts
 ```
@@ -402,18 +402,18 @@ Build a release binary per target; name to the `cargo-binstall` convention so `c
 ensemble` works for free (matches the OSS-onboarding spec, component A).
 
 ```powershell
-# [z13] Windows x86_64
+# [conductor] Windows x86_64
 cargo build --release --target x86_64-pc-windows-msvc
 #   artifact: target\x86_64-pc-windows-msvc\release\ensemble.exe
 ```
 ```bash
-# [M5 / M1] macOS arm64 (native build on a Mac — cross from Windows is impractical)
+# [mac-1 / mac-2] macOS arm64 (native build on a Mac — cross from Windows is impractical)
 cargo build --release --target aarch64-apple-darwin
 #   artifact: target/aarch64-apple-darwin/release/ensemble
 # (also x86_64-apple-darwin if you want Intel-Mac coverage)
 ```
 ```bash
-# [z13-WSL] Linux x86_64  — use the alternate target dir to dodge Defender LNK1104 on /mnt
+# [conductor-WSL] Linux x86_64  — use the alternate target dir to dodge Defender LNK1104 on /mnt
 cd /mnt/d/Projects/ensemble && CARGO_TARGET_DIR=$HOME/ensemble-target cargo build --release --target x86_64-unknown-linux-gnu
 #   artifact: $HOME/ensemble-target/x86_64-unknown-linux-gnu/release/ensemble
 ```
@@ -429,8 +429,8 @@ Run before any public push; **success = each command finds nothing** in tracked 
 ```bash
 # tailnet IPs (100.x), machine names, the operator's email, any token-ish strings
 git grep -nE '100\.(8[0-9]|10[0-9]|11[0-9])\.[0-9]+\.[0-9]+'      # tailnet IPv4s
-git grep -niE 'yoyogood|ayaneo|laptop-gur943mk|markmacbook|marklmacbook-pro|dev-host'  # host names
-git grep -niE 'm4932981@gmail\.com|surfshark|CodexSandboxUsers'   # email / VPN / ACL leakage
+git grep -niE 'node-a|node-b|node-d|markmacbook|node-c|extra-host'  # host names
+git grep -niE '<user>@gmail\.com|your-vpn|'   # email / VPN / ACL leakage
 # confirm runtime scratch + build dirs are untracked
 git status --porcelain --ignored | Select-String '\.ensemble|target-'
 ```
@@ -455,44 +455,44 @@ Goal: every node ends on the same fresh ensemble binary + the four CLIs, re-doct
 Order per node: **(a) refresh binary → (b) install/upgrade the 4 CLIs → (c) `ensemble doctor` →
 (d) re-`serve`/re-mesh.**
 
-### 5.1 z13 (PRIME, Windows) — rebuild from source
+### 5.1 conductor (PRIME, Windows) — rebuild from source
 
 ```powershell
-# [z13] pull, build release, verify
+# [conductor] pull, build release, verify
 cd <repo> && git pull
 cargo build --release            # if native build hits Defender LNK1104, build via WSL (§5.5) and copy out
 .\target\release\ensemble.exe doctor    # (d) success: "ready"
 ```
 
-### 5.2 Windows workers (acer, ayaneo) — fetch binary, no toolchain needed
+### 5.2 Windows workers (node-d, node-b) — fetch binary, no toolchain needed
 
-No SSH automation (the `~/.ssh/config` `CodexSandboxUsers` ACL breaks `tailscale ssh`; see
+No SSH automation (the `~/.ssh/config` `` ACL breaks `tailscale ssh`; see
 memory). Use **Taildrop**:
 
 ```powershell
-# [z13] push the fresh exe to each worker
-tailscale file cp .\target\release\ensemble.exe ayaneo:
-tailscale file cp .\target\release\ensemble.exe laptop-gur943mk:
+# [conductor] push the fresh exe to each worker
+tailscale file cp .\target\release\ensemble.exe node-b:
+tailscale file cp .\target\release\ensemble.exe node-d:
 ```
 ```powershell
-# [acer / ayaneo] receive + verify  (ayaneo is RAM-constrained: one heavy CLI at a time)
+# [node-d / node-b] receive + verify  (node-b is RAM-constrained: one heavy CLI at a time)
 tailscale file get .
 .\ensemble.exe doctor
 ```
 
-### 5.3 macOS workers (M5, M1) — native arm64 build
+### 5.3 macOS workers (mac-1, mac-2) — native arm64 build
 
 Windows-cross to macOS is impractical; build on a Mac (one arm64 build serves both Macs, but
 each must have the binary on its PATH):
 
 ```bash
-# [M5] build once
+# [mac-1] build once
 cd <repo> && git pull && cargo build --release --target aarch64-apple-darwin
-# copy to M1 via Taildrop (M1 is intermittent — do it while it's online)
-tailscale file cp target/aarch64-apple-darwin/release/ensemble markmacbook-air:
+# copy to mac-2 via Taildrop (mac-2 is intermittent — do it while it's online)
+tailscale file cp target/aarch64-apple-darwin/release/ensemble node-e:
 ```
 ```bash
-# [M1] receive + verify  (RAM-constrained + intermittent → budget 1)
+# [mac-2] receive + verify  (RAM-constrained + intermittent → budget 1)
 tailscale file get . && ./ensemble doctor
 ```
 
@@ -510,7 +510,7 @@ shows `ok`). Re-verify versions (§3.1) — do not trust pasted numbers. Per-pla
 ### 5.5 WSL/Linux node — build in WSL, run in WSL
 
 ```bash
-# [z13-WSL] use the alternate target dir (native /mnt build can hit Defender LNK1104)
+# [conductor-WSL] use the alternate target dir (native /mnt build can hit Defender LNK1104)
 cd /mnt/d/Projects/ensemble && CARGO_TARGET_DIR=$HOME/ensemble-target cargo build --release
 $HOME/ensemble-target/release/ensemble doctor   # success: "ready"
 ```
@@ -522,12 +522,12 @@ $HOME/ensemble-target/release/ensemble doctor   # success: "ready"
 ensemble serve            # or `ensemble up`
 ```
 ```powershell
-# [z13] confirm the whole fleet is visible again
+# [conductor] confirm the whole fleet is visible again
 ensemble mesh             # success: each online worker → the agents it hosts
 ensemble nodes            # success: agent → host URL map
 ```
-RAM-constrained (ayaneo, M1) and intermittent (M1) nodes need no special re-join — discovery
-probes only `online` peers and caps each connect at 800 ms, so an offline M1 is simply absent
+RAM-constrained (node-b, mac-2) and intermittent (mac-2) nodes need no special re-join — discovery
+probes only `online` peers and caps each connect at 800 ms, so an offline mac-2 is simply absent
 from `mesh` and rejoins automatically when it comes back online and `serve`s.
 
 ---
@@ -536,35 +536,35 @@ from `mesh` and rejoins automatically when it comes back online and `serve`s.
 
 | Risk | Trigger | Mitigation | Owner step |
 |---|---|---|---|
-| **Surfshark ↔ Tailscale WireGuard collision** (#1 gotcha) | Surfshark running when you `tailscale up` → cross-machine blocked | Quit Surfshark **first**, then `tailscale up`; verify `tailscale status` lists peers | §3.0 |
-| **agy ConPTY on Windows** | agy run on z13/acer/ayaneo | Known cloned-reader EOF limit (`agy_adapter.rs`); `--print-timeout` handled. Prefer agy on macOS/WSL (normal PTY); on Windows treat agy as best-effort, keep the gate on codex+claude | §3.2 (don't put agy in the 2-vendor quorum on Windows), §5.4 |
-| **RAM-constrained node thrash** (ayaneo 12.7 GB, M1 12 GB) | Multiple heavy CLI turns concurrently | Budget 1–2; never point a fan-out quorum at them; pin only one light reviewer role | §1.1, §3.2 |
-| **M1 offline mid-run** | Intermittent/portable node drops | Discovery probes only `online` peers (800 ms connect cap) → absent M1 never stalls; use `dispatch --ledger` so its claimed tasks recover (orphan recovery after 5 min) | §3.7, §5.6 |
+| **your VPN ↔ Tailscale WireGuard collision** (#1 gotcha) | your VPN running when you `tailscale up` → cross-machine blocked | Quit your VPN **first**, then `tailscale up`; verify `tailscale status` lists peers | §3.0 |
+| **agy ConPTY on Windows** | agy run on conductor/node-d/node-b | Known cloned-reader EOF limit (`agy_adapter.rs`); `--print-timeout` handled. Prefer agy on macOS/WSL (normal PTY); on Windows treat agy as best-effort, keep the gate on codex+claude | §3.2 (don't put agy in the 2-vendor quorum on Windows), §5.4 |
+| **RAM-constrained node thrash** (node-b 12.7 GB, mac-2 12 GB) | Multiple heavy CLI turns concurrently | Budget 1–2; never point a fan-out quorum at them; pin only one light reviewer role | §1.1, §3.2 |
+| **mac-2 offline mid-run** | Intermittent/portable node drops | Discovery probes only `online` peers (800 ms connect cap) → absent mac-2 never stalls; use `dispatch --ledger` so its claimed tasks recover (orphan recovery after 5 min) | §3.7, §5.6 |
 | **Discovery slow on a multi-device tailnet** | Idle iOS/Android peers drop :7878 | Already fixed (`probe_agents` `timeout_connect(800ms)`, parallel `probe_all`); if still slow, use explicit `--node <host>` to skip discovery | §3.4 (explicit node), `discovery.rs` |
 | **serve binds loopback (local-only) by mistake** | Node has no tailnet IP (tailscale logged out) | `resolve_bind` warns + binds 127.0.0.1, never 0.0.0.0; fix tailscale and re-serve | §3.0, §3.3 |
-| **Wrong commit identity on landed work** | Global `Clewtex` identity leaks into ensemble commits | Set repo-local `markl-a <m4932981@gmail.com>` before `merge`; verify `git log -1 --format='%an <%ae>'` | §3.5 (memory: git-identity-markl-a) |
+| **Wrong commit identity on landed work** | Global `Clewtex` identity leaks into ensemble commits | Set repo-local `<you> <you@example.com>` before `merge`; verify `git log -1 --format='%an <%ae>'` | §3.5 (memory: git-identity-<you>) |
 | **`git add -A` sweeps stray build dirs** | Committing landed work or the release | Use `git add <specific files>`; `/target-*` is gitignored but verify with `git status --ignored` | §4.4 (memory lesson) |
 | **codex `working:false` stale flag** | Reading node.json to decide if codex is usable | Ignore the flag; verify with `codex --version` + a live `ensemble agent codex "PONG"` | §3.1, §5.4 |
 | **Merge conflict from a remote node's edits** | Two fanned tasks touch the same file | `repo_sync` never auto-resolves: it aborts + restores + escalates; resolve with `ensemble merge … --resolver <agent>` (one AI round, validated marker-free) or by hand | §3.5, `repo_sync.rs::merge_with_resolver` |
 | **Tailnet = trust boundary (no app auth)** | A shared/multi-user tailnet | Document plainly; restrict port 7878 with **tailscale ACLs**; serve is tailnet-only by default (component E) | §4.5, OSS-onboarding spec §2 |
 | **Leaking IPs/hostnames/email on publish** | Public push of repo or docs | §4.4 scrub `git grep` gates; decide on `docs/` scrubbing | §4.4, §7 |
-| **SSH automation broken** | `~/.ssh/config` `CodexSandboxUsers` ACL → `tailscale ssh` fails | Use Taildrop (`tailscale file cp/get`) for binary distribution, not SSH | §5.2, §5.3 (memory) |
+| **SSH automation broken** | `~/.ssh/config` `` ACL → `tailscale ssh` fails | Use Taildrop (`tailscale file cp/get`) for binary distribution, not SSH | §5.2, §5.3 (memory) |
 
 ---
 
 ## 7. Open questions / decisions for the operator
 
-1. **WSL node identity on the tailnet.** Does z13-WSL run its **own** `tailscale up` (its own
-   `100.x` IP, a truly independent peer) or share z13-Windows's tunnel? For a clean
+1. **WSL node identity on the tailnet.** Does conductor-WSL run its **own** `tailscale up` (its own
+   `100.x` IP, a truly independent peer) or share conductor-Windows's tunnel? For a clean
    three-platform proof, an independent WSL tailnet IP is strongest — but it means two peers on
-   one machine. **Decision needed:** independent WSL peer vs. WSL represented through z13.
-2. **Does z13-Windows also `serve` while being the conductor?** It *can* (host CLIs + drive the
-   crew), but then a fanned task could route a remote agent back to z13's own `serve`. Recommend
-   z13 hosts locally only (no `node=` pointing at itself); workers serve. Confirm.
-3. **M5 exact core count.** Pasted as ~10–14 — run §1.2 on the M5 to fix its concurrency budget
+   one machine. **Decision needed:** independent WSL peer vs. WSL represented through conductor.
+2. **Does conductor-Windows also `serve` while being the conductor?** It *can* (host CLIs + drive the
+   crew), but then a fanned task could route a remote agent back to conductor's own `serve`. Recommend
+   conductor hosts locally only (no `node=` pointing at itself); workers serve. Confirm.
+3. **mac-1 exact core count.** Pasted as ~10–14 — run §1.2 on the mac-1 to fix its concurrency budget
    (affects whether it carries 3 or 4 worktrees).
 4. **Public repo name + visibility.** crates.io name is `ensemble` (taken? confirm
-   availability) — the GitHub repo is currently `markl-a/ensemble`. Decision: keep `ensemble`
+   availability) — the GitHub repo is currently `<you>/ensemble`. Decision: keep `ensemble`
    on crates.io or pick a unique name; public vs. staged-private first.
 5. **Scrub `docs/` or publish a clean subset?** The design docs reference live machine
    names/IPs/dates. Decision: scrub `docs/` in place, or keep the full design history in a

@@ -153,7 +153,7 @@ falls back to the suffix as a bare host so explicit operator knowledge still wor
 
 To preserve the Phase 1 local workflow, `@local` and a suffix matching this machine's short hostname
 continue to use the local file-backed plane. This avoids turning local default member names such as
-`codex@z13` into remote HTTP calls on the same machine.
+`codex@conductor` into remote HTTP calls on the same machine.
 
 Operators can also force the local plane with `--node local`. This is the escape hatch for existing
 local member names that contain an `@` suffix which looks like a node name, for example

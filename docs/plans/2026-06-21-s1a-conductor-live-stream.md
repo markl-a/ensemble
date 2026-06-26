@@ -235,7 +235,7 @@ Smoke (two shells): terminal A `ensemble run "<trivial task>" --crew <p> --repo 
 
 - [ ] `cargo test --lib` (all green) + `cargo clippy --all-targets -- -D warnings` (clean) via WSL.
 - [ ] Double-gate `git diff main...HEAD` (codex from the empty temp gate cwd + claude via stdin); both must end `VERDICT: LGTM`. Bar: observer never alters run outcome (best-effort), no deadlock/borrow issue from `&self` streaming, render disambiguation (StreamEvent vs Message vs raw) correct, `--watch` arg parsing + feed-path confinement (reuses `member_stream_path`).
-- [ ] On both LGTM: ff-merge the slice to `main`; update `docs/AUTONOMOUS-BACKLOG.md` (S1a done, S1 control plane next) as a separate commit; push as markl-a; delete the slice branch; clean gate scratch.
+- [ ] On both LGTM: ff-merge the slice to `main`; update `docs/AUTONOMOUS-BACKLOG.md` (S1a done, S1 control plane next) as a separate commit; push as <you>; delete the slice branch; clean gate scratch.
 
 ## Self-review
 - **Spec coverage:** S1a = the "看得到" half of S1 (observe). Control plane (steer/abort) + serve routes are the NEXT S1 sub-slice, not here. ✓

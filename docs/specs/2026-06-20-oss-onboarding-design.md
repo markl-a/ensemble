@@ -19,7 +19,7 @@ on-ramp.
 2. (you are already logged into your CLIs: claude / codex / agy / opencode)
 3. ensemble up                       # starts serve + prints the mesh
    → local CLIs : claude, codex, agy, opencode
-   → tailnet    : ayaneo → [codex, claude]   dev-host → [opencode, agy]
+   → tailnet    : node-b → [codex, claude]   extra-host → [opencode, agy]
 4. use it: ensemble agent codex "…"   |   ensemble run "…"
 ```
 
@@ -63,9 +63,9 @@ already-landed pieces.
   `ensemble down` to reason about).
 - **Output (before it blocks on serve):**
   ```
-  ensemble up — serving on 100.87.70.65:7878
+  ensemble up — serving on 100.x.y.z:7878
     local CLIs : codex, claude, agy, opencode
-    tailnet    : ayaneo → [codex, claude]   dev-host → [opencode, agy]
+    tailnet    : node-b → [codex, claude]   extra-host → [opencode, agy]
   (serving… Ctrl-C to stop)
   ```
 - **Depends on:** doctor, discovery, serve, component E.

@@ -133,7 +133,7 @@ impl Adapter for ExecAdapter {
         // through `cmd /C <program> ... "<prompt>"`, where cmd's command-line parsing MANGLES
         // multi-line / quoted prompts (newlines are command separators; quoting differs from the
         // CRT rules Rust applies). codex (`exec`), claude (`-p`) and opencode (`run`) all read the
-        // prompt from stdin when given no positional prompt — verified on z13.
+        // prompt from stdin when given no positional prompt — verified locally.
         let mut child = match self
             .build_command()
             .current_dir(cwd)

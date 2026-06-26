@@ -37,7 +37,7 @@ pub struct RoleConfig {
 
 /// Per-agent overrides. `backup` names the agent to substitute when this agent flakes and the
 /// gate's `on_flake = "substitute"`. `node` is the base URL of a remote `ensemble serve` host that
-/// runs this agent (e.g. "http://acer.tail.ts.net:7878") — when set, the orchestrator drives the
+/// runs this agent (e.g. "http://node-d.tail.ts.net:7878") — when set, the orchestrator drives the
 /// agent on that node over HTTP instead of locally.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AgentConfig {
@@ -371,10 +371,10 @@ mod tests {
             [roles.review]
             agent = "claude"
             [agents.claude]
-            node = "http://acer.tail.ts.net:7878"
+            node = "http://node-d.tail.ts.net:7878"
         "#;
         let c = CrewConfig::from_toml(toml).unwrap();
-        assert_eq!(c.node_for("claude"), Some("http://acer.tail.ts.net:7878"));
+        assert_eq!(c.node_for("claude"), Some("http://node-d.tail.ts.net:7878"));
         assert_eq!(c.node_for("codex"), None);
     }
 

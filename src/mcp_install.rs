@@ -307,17 +307,17 @@ mod tests {
     #[test]
     fn default_member_name_appends_short_lowercased_host() {
         assert_eq!(
-            default_member_name(ClientKind::Claude, Some("Z13")),
-            "claude@z13"
+            default_member_name(ClientKind::Claude, Some("node-a")),
+            "claude@node-a"
         );
         assert_eq!(
-            default_member_name(ClientKind::Codex, Some("z13.local")),
-            "codex@z13",
+            default_member_name(ClientKind::Codex, Some("node-a.local")),
+            "codex@node-a",
             "domain stripped"
         );
         assert_eq!(
-            default_member_name(ClientKind::Opencode, Some("  ayaneo \n")),
-            "opencode@ayaneo",
+            default_member_name(ClientKind::Opencode, Some("  node-b \n")),
+            "opencode@node-b",
             "trimmed"
         );
     }

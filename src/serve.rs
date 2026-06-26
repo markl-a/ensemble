@@ -396,10 +396,10 @@ mod tests {
 
     #[test]
     fn resolve_bind_prefers_tailnet_ipv4() {
-        let ips = vec!["fd7a:1::5".to_string(), "100.87.70.65".to_string()];
+        let ips = vec!["fd7a:1::5".to_string(), "100.x.y.z".to_string()];
         assert_eq!(
             resolve_bind(&ips, None, 7878),
-            BindAddr::Tailnet("100.87.70.65:7878".into())
+            BindAddr::Tailnet("100.x.y.z:7878".into())
         );
     }
 

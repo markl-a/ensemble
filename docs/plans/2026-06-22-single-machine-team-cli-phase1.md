@@ -28,7 +28,7 @@ with `watch`, `steer`, and `abort` without relying on Tailscale or another machi
 ### Must Have
 
 - `ensemble [ensemble options] codex|claude|opencode|agy [vendor args...]` is the launcher entry point.
-- Every launched member uses a stable member id, for example `codex@yoyogood`.
+- Every launched member uses a stable member id, for example `codex@node-a`.
 - Every member launched in the same repo and team writes to the same `.ensemble/` state.
 - The main user-facing CLI can inspect team status and board messages.
 - The main user-facing CLI can send a team message and read replies.

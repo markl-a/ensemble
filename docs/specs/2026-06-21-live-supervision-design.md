@@ -102,21 +102,21 @@ The caller serde-parses each returned line into `StreamEvent` / `ControlCmd`. `b
 
 ### 5.2 Stream events (one ndjson object per line, internally tagged `"ev"`)
 ```
-{"ev":"session_start","member":"claude@z13","cli":"claude","backend":"pty","host":"z13","pid":12345,"ts":"<rfc3339>"}
+{"ev":"session_start","member":"claude@conductor","cli":"claude","backend":"pty","host":"conductor","pid":12345,"ts":"<rfc3339>"}
 {"ev":"turn_start","n":7,"prompt":"<excerpt>","ts":...}      // model began working
 {"ev":"output","n":7,"text":"<excerpt chunk>","ts":...}      // observed activity (PTY: stripped tee; API: assistant delta)
 {"ev":"tool","n":7,"name":"Edit","detail":"<excerpt>","ts":...}  // API backends only (PTY can't cleanly)
 {"ev":"turn_end","n":7,"reply":"<excerpt>","ts":...}
-{"ev":"injected","n":8,"from":"main@yoyogood","prompt":"<excerpt>","ts":...}
-{"ev":"interrupted","n":8,"from":"main@yoyogood","hard":false,"ts":...}
+{"ev":"injected","n":8,"from":"main@node-a","prompt":"<excerpt>","ts":...}
+{"ev":"interrupted","n":8,"from":"main@node-a","hard":false,"ts":...}
 {"ev":"session_end","reason":"exited|killed|eof","ts":...}
 ```
 `n` = monotonic per-session turn counter. `ts` = RFC3339 from `SystemTime`. Text fields excerpted to `board::MAX_BODY` (1500 chars) for hygiene.
 
 ### 5.3 Control commands (one ndjson object per line, tagged `"cmd"`)
 ```
-{"cmd":"inject","seq":1,"from":"main@yoyogood","prompt":"focus on the auth path; skip the UI","ts":...}
-{"cmd":"abort","seq":2,"from":"main@yoyogood","hard":false,"ts":...}
+{"cmd":"inject","seq":1,"from":"main@node-a","prompt":"focus on the auth path; skip the UI","ts":...}
+{"cmd":"abort","seq":2,"from":"main@node-a","hard":false,"ts":...}
 ```
 `seq` = monotonic per control feed (display/audit). The supervisor tracks an `applied` cursor (= `read_since` index); commands at index ≥ `applied` are applied in order, then the cursor advances — idempotent and lossless via the board cursor guarantee. `prompt` bounded like `MAX_BODY`.
 

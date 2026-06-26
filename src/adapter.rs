@@ -213,7 +213,7 @@ mod tests {
 
     #[test]
     fn detect_rate_limit_parses_codex_usage_limit_and_reset_time() {
-        // The exact line codex prints on quota exhaustion (observed 2026-06-24, M5 native run).
+        // The exact line codex prints on quota exhaustion (observed 2026-06-24, a native macOS run).
         let s =
             "ERROR: You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage \
                  to purchase more credits or try again at Jun 25th, 2026 5:33 AM.";

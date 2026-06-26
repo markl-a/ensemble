@@ -322,14 +322,14 @@ mod tests {
     #[test]
     fn parses_tailscale_peers() {
         let json = r#"{ "Peer": {
-            "k1": { "HostName": "acer", "DNSName": "acer.tail.ts.net.", "Online": true },
-            "k2": { "HostName": "ayaneo", "DNSName": "ayaneo.tail.ts.net.", "Online": false }
+            "k1": { "HostName": "node-d", "DNSName": "node-d.tail.ts.net.", "Online": true },
+            "k2": { "HostName": "node-b", "DNSName": "node-b.tail.ts.net.", "Online": false }
         }}"#;
         let mut nodes = parse_tailscale_status(json);
         nodes.sort_by(|a, b| a.name.cmp(&b.name));
         assert_eq!(nodes.len(), 2);
-        assert_eq!(nodes[0].name, "acer");
-        assert_eq!(nodes[0].dns_name, "acer.tail.ts.net"); // trailing dot trimmed
+        assert_eq!(nodes[0].name, "node-d");
+        assert_eq!(nodes[0].dns_name, "node-d.tail.ts.net"); // trailing dot trimmed
         assert!(nodes[0].online);
         assert!(!nodes[1].online);
     }
@@ -397,10 +397,10 @@ fn parses_remote_agent_node_url() {
         [roles.review]
         agent = "claude"
         [agents.claude]
-        node = "http://acer.tail.ts.net:7878"
+        node = "http://node-d.tail.ts.net:7878"
     "#;
     let c = CrewConfig::from_toml(toml).unwrap();
-    assert_eq!(c.node_for("claude"), Some("http://acer.tail.ts.net:7878"));
+    assert_eq!(c.node_for("claude"), Some("http://node-d.tail.ts.net:7878"));
     assert_eq!(c.node_for("codex"), None);
 }
 ```

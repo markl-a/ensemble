@@ -26,7 +26,7 @@ half: a **real CLI as the MCP client** driving that server, and **multiple** mem
 2. `ensemble doctor` is green — it reports which AI CLIs + `tailscale` are on PATH and whether the cwd
    is a git repo. Fix any `MISSING` before continuing.
 3. For the **multi-machine** parts: `tailscale up` on each node. ⚠️ If peers can't see each other, check
-   the Surfshark↔Tailscale WireGuard conflict (turn Surfshark off, then `tailscale up`).
+   the your VPN↔Tailscale WireGuard conflict (turn your VPN off, then `tailscale up`).
 4. Work inside a **throwaway git repo** (not a repo you care about) — the crew creates branches +
    worktrees under `.ensemble/`. A scratch repo:
    ```bash
@@ -146,7 +146,7 @@ Phase-1 step 4 is **proven** when, from real live CLIs, you have observed: (a) a
 
 - `ensemble_run` returns `-32603 "not configured"` or isn't listed → launch `ensemble mcp` **with
   `--crew <crew.toml>`** (a missing/unparseable crew.toml leaves the runner off; the other 9 tools still work).
-- Peers invisible in `ensemble mesh` → `tailscale status`; resolve the Surfshark↔Tailscale conflict.
+- Peers invisible in `ensemble mesh` → `tailscale status`; resolve the your VPN↔Tailscale conflict.
 - A claimed task stuck `claimed` → the member died before a terminal write; `ensemble ledger recover`
   requeues stale claims (or the member calls `ensemble_complete`/`ensemble_fail`).
 - A merge reports `{landed:false, conflict:[...]}` → resolve in the member's worktree and retry, or use

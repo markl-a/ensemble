@@ -1,7 +1,7 @@
 # Handoff — Phase 2 verify pass + 下一步交接
 
 > 接手對象:操作者本人 / 另一個 AI CLI / 另一台機器。讀完這份就能接著做。
-> 本次工作機:z13 (Windows)。日期:2026-06-25。
+> 本次工作機:conductor (Windows)。日期:2026-06-25。
 
 ---
 
@@ -13,7 +13,7 @@
 
 ## 1. 這次 session 做了什麼(都有實測證據)
 
-Branch:`phase2-verify-fixes`　PR:#2 → https://github.com/markl-a/ensemble/pull/2
+Branch:`phase2-verify-fixes`　PR:#2 → https://github.com/<you>/ensemble/pull/2
 （base commit `5417cf2`)
 
 | commit | 內容 | 為何 |
@@ -26,7 +26,7 @@ Branch:`phase2-verify-fixes`　PR:#2 → https://github.com/markl-a/ensemble/pul
 | `90894b3` | fix(crew):`crew-main.toml` 加 `audit=agy` 第二 reviewer | 原本 `min_approvals=2` 卻只有 1 個 reviewer → 永遠湊不到 2 票、必 escalate。現在 claude+agy 兩家可達 quorum |
 | `b88e1dd` | docs(phase2):五機 SOP + `crew-sat-two-ai.toml` | 讓 4 台 pull 下來 build 就能跑;補上衛星 crew 實檔 |
 
-### 實測證據(本機 z13)
+### 實測證據(本機 conductor)
 - **WSL `cargo test`**:全綠(authoritative path)。**native `cargo test`**:repo_sync 已綠;唯 2 個 `exec_adapter` timeout 測試在「高併發負載」下 timing flake,單獨跑全過。
 - **`cargo clippy --all-targets -D warnings`**:clean。
 - **`acceptance-single-machine.ps1`**:PASS。**`smoke.ps1 -PreflightOnly`**:PASS。
@@ -47,7 +47,7 @@ Branch:`phase2-verify-fixes`　PR:#2 → https://github.com/markl-a/ensemble/pul
 
 ### B. Slice C 五機 loop(需實機,operator 主導)
 照 `docs/plans/2026-06-25-phase2-slice-c-and-clean-3vendor-land-SOP.md`:
-- 每台:關 Surfshark → `tailscale up` → `git pull` → `cargo build --release && cargo install --path . --force` → `ensemble doctor` → `ensemble up`。
+- 每台:關 your VPN → `tailscale up` → `git pull` → `cargo build --release && cargo install --path . --force` → `ensemble doctor` → `ensemble up`。
 - m1:`ensemble mesh && ensemble nodes`(期待看到 m1~m5)。
 - 主專案(`crew-main.toml`,team=main)+ 4 衛星(`crew-sat-two-ai.toml`)各跑最小 run。
 - **完成判定**:nodes 看到 5 機、每 run 有 stream/control 事件、末端 LANDED/ESCALATED、可重跑。
@@ -70,13 +70,13 @@ ensemble run "<task>" --crew crew-main.toml --repo <repo> --team main --watch ma
 
 ## 3. 已知雷區(接手必讀)
 
-- **跨機看不到節點**:先關 Surfshark 再 `tailscale up`(Surfshark WireGuard 撞 Tailscale)。
+- **跨機看不到節點**:先關 your VPN 再 `tailscale up`(your VPN WireGuard 撞 Tailscale)。
 - **opencode**:headless 會 hang,**別放進自動 governed 角色**;互動式 `ensemble agent`/MCP 不受限。
 - **codex**:每天會限流;靠 crew 的 `backup="agy"` 自動 degrade(本版已修 backup adapter 沒被建的 bug)。
 - **agy**:沒壞,但要給足 timeout(短 timeout 1~5s 一定 flake,那是 smoke/acceptance 的故意設定);default adapter timeout 180s。
 - **`ensemble merge` 拒絕髒 worktree**:跑 run 的 repo 要 `.gitignore` 掉 `.ensemble/`,`crew.toml` 放 repo 外或 ignore。
 - **native Windows `cargo test`**:`exec_adapter` 兩個 timeout 測試在高負載下會 timing flake → 單獨重跑即綠;權威測試路徑是 WSL。
-- **git identity**:這 repo 一律用 `markl-a <m4932981@gmail.com>`;commit message 含反引號/`<...>` 用 `git commit -F file`;落地 `git add <具體檔案>` 不要 `-A`。
+- **git identity**:這 repo 一律用 `<you> <you@example.com>`;commit message 含反引號/`<...>` 用 `git commit -F file`;落地 `git add <具體檔案>` 不要 `-A`。
 
 ---
 

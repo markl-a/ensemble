@@ -355,7 +355,7 @@ mod tests {
     fn injected_event_roundtrips() {
         let ev = StreamEvent::Injected {
             n: 8,
-            from: "main@yoyogood".into(),
+            from: "main@node-a".into(),
             prompt: "focus".into(),
             ts: "T".into(),
         };
@@ -365,11 +365,11 @@ mod tests {
 
     #[test]
     fn render_line_pretty_prints_a_known_event() {
-        let raw = r#"{"ev":"injected","n":8,"from":"main@z13","prompt":"skip the UI","ts":"T"}"#;
+        let raw = r#"{"ev":"injected","n":8,"from":"main@node-a","prompt":"skip the UI","ts":"T"}"#;
         let s = render_line(raw);
         assert!(s.contains("inject #8"), "got {s}");
         assert!(
-            s.contains("main@z13") && s.contains("skip the UI"),
+            s.contains("main@node-a") && s.contains("skip the UI"),
             "got {s}"
         );
     }
@@ -463,14 +463,14 @@ mod tests {
     #[test]
     fn control_cmd_roundtrips_tagged_on_cmd() {
         let s = ControlCmd::Steer {
-            from: "main@z13".into(),
+            from: "main@node-a".into(),
             prompt: "skip the UI".into(),
         };
         let line = serde_json::to_string(&s).unwrap();
         assert!(line.contains(r#""cmd":"steer""#), "got {line}");
         assert_eq!(serde_json::from_str::<ControlCmd>(&line).unwrap(), s);
         let a = ControlCmd::Abort {
-            from: "main@z13".into(),
+            from: "main@node-a".into(),
             hard: true,
         };
         let aline = serde_json::to_string(&a).unwrap();
@@ -565,8 +565,8 @@ mod tests {
         use std::path::Path;
         // reuses journal's sanitizer: '@' in the canonical <cli>@<host> name becomes '-' on disk; the
         // supervisor and `watch` compute the SAME path, so the logical member id still resolves.
-        let p = member_stream_path(Path::new("/r"), "claude@z13");
-        assert!(p.ends_with("claude-z13.ndjson"), "got {p:?}");
+        let p = member_stream_path(Path::new("/r"), "claude@node-a");
+        assert!(p.ends_with("claude-node-a.ndjson"), "got {p:?}");
     }
 
     fn argv(v: &[&str]) -> Vec<String> {
@@ -575,8 +575,8 @@ mod tests {
 
     #[test]
     fn parse_watch_args_basic() {
-        let w = parse_watch_args(&argv(&["ensemble", "watch", "claude@z13"]));
-        assert_eq!(w.member.as_deref(), Some("claude@z13"));
+        let w = parse_watch_args(&argv(&["ensemble", "watch", "claude@node-a"]));
+        assert_eq!(w.member.as_deref(), Some("claude@node-a"));
         assert_eq!(w.since, 0);
         assert!(!w.follow);
         assert_eq!(w.repo, None);
@@ -590,7 +590,7 @@ mod tests {
             "watch",
             "--since",
             "5",
-            "claude@z13",
+            "claude@node-a",
             "--follow",
             "--repo",
             "/r",
@@ -599,7 +599,7 @@ mod tests {
             "--team",
             "ops",
         ]));
-        assert_eq!(w.member.as_deref(), Some("claude@z13"));
+        assert_eq!(w.member.as_deref(), Some("claude@node-a"));
         assert_eq!(w.since, 5);
         assert!(w.follow);
         assert_eq!(w.repo.as_deref(), Some("/r"));

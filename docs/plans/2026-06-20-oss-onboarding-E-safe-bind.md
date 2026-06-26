@@ -40,15 +40,15 @@ cd /d/Projects/ensemble && git checkout main && git pull --ff-only && git checko
 ```rust
     #[test]
     fn parse_self_ips_reads_self_tailscale_ips() {
-        let json = r#"{ "Self": { "HostName": "yoyogood",
-            "TailscaleIPs": ["100.87.70.65", "fd7a:1::5"] }, "Peer": {} }"#;
-        assert_eq!(parse_self_ips(json), vec!["100.87.70.65", "fd7a:1::5"]);
+        let json = r#"{ "Self": { "HostName": "node-a",
+            "TailscaleIPs": ["100.x.y.z", "fd7a:1::5"] }, "Peer": {} }"#;
+        assert_eq!(parse_self_ips(json), vec!["100.x.y.z", "fd7a:1::5"]);
     }
 
     #[test]
     fn parse_self_ips_empty_when_logged_out() {
         // logged-out status has Self.TailscaleIPs = null
-        let json = r#"{ "Self": { "HostName": "yoyogood", "TailscaleIPs": null }, "Peer": {} }"#;
+        let json = r#"{ "Self": { "HostName": "node-a", "TailscaleIPs": null }, "Peer": {} }"#;
         assert!(parse_self_ips(json).is_empty());
         assert!(parse_self_ips("not json").is_empty());
     }
@@ -130,9 +130,9 @@ mod bind_tests {
 
     #[test]
     fn prefers_tailnet_ipv4() {
-        let ips = vec!["fd7a:1::5".to_string(), "100.87.70.65".to_string()];
+        let ips = vec!["fd7a:1::5".to_string(), "100.x.y.z".to_string()];
         let b = resolve_bind(&ips, None, 7878);
-        assert_eq!(b, BindAddr::Tailnet("100.87.70.65:7878".into()));
+        assert_eq!(b, BindAddr::Tailnet("100.x.y.z:7878".into()));
     }
 
     #[test]
@@ -267,7 +267,7 @@ Expected: all `test result: ok`, `clippy=0`, `0` warn/err.
 - [ ] **Step 5: Empirical check (real machine, optional but recommended)** — rebuild native to a clean dir and confirm the default bind is the tailnet IP:
 
 ```bash
-CARGO_TARGET_DIR=C:/Users/m4932/ensemble-target-rel cargo build --release 2>&1 | tail -2
+CARGO_TARGET_DIR=C:/Users/<you>/ensemble-target-rel cargo build --release 2>&1 | tail -2
 # Then: start serve and confirm it prints "ensemble serve on 100.x:7878" (Ctrl-C to stop)
 ```
 
@@ -284,7 +284,7 @@ git add src/lib.rs src/main.rs && git commit -m "feat(serve): serve_cmd binds ta
 - [ ] **Step 1: Build the gate prompt** (diff vs main) into a repo-OUTSIDE temp file:
 
 ```bash
-P="/c/Users/m4932/AppData/Local/Temp/ens_gate_E.txt"
+P="/c/Users/<you>/AppData/Local/Temp/ens_gate_E.txt"
 printf 'You are a Rust reviewer. Review ONLY the diff; reply with findings then a final line `VERDICT: LGTM` or `VERDICT: CHANGES`. Do NOT edit files or run git.\nCONTEXT: ensemble serve now defaults to binding the tailnet IPv4 (reachable only over the tailnet) instead of 0.0.0.0; loopback fallback when no tailnet IP (never 0.0.0.0); --bind still overrides. parse_self_ips reads Self.TailscaleIPs; resolve_bind is the pure decision.\nSCRUTINIZE: (a) resolve_bind precedence + the never-0.0.0.0 invariant; (b) parse_self_ips on logged-out/null; (c) does binding 100.x fail if tailscaled is up but the IP is not yet assigned? behavior then; (d) any regression for users who relied on the old 0.0.0.0 default (they must use --bind 0.0.0.0:7878 now — is that documented?).\n=== DIFF ===\n' > "$P"
 git --no-pager diff main >> "$P"
 ```
@@ -292,8 +292,8 @@ git --no-pager diff main >> "$P"
 - [ ] **Step 2: Run codex + claude gates SAFELY** (codex from an EMPTY temp cwd so it cannot mutate the repo — see the gate-mutation lesson in the backlog). Both in the background:
 
 ```
-# codex (background): cd /c/Users/m4932/AppData/Local/Temp/ens_gate_cwd && cmd //C codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check < /c/Users/m4932/AppData/Local/Temp/ens_gate_E.txt
-# claude (background): cd /c/Users/m4932/AppData/Local/Temp/ens_gate_cwd && cmd //C claude -p < /c/Users/m4932/AppData/Local/Temp/ens_gate_E.txt
+# codex (background): cd /c/Users/<you>/AppData/Local/Temp/ens_gate_cwd && cmd //C codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check < /c/Users/<you>/AppData/Local/Temp/ens_gate_E.txt
+# claude (background): cd /c/Users/<you>/AppData/Local/Temp/ens_gate_cwd && cmd //C claude -p < /c/Users/<you>/AppData/Local/Temp/ens_gate_E.txt
 ```
 Expected: ≥2 distinct-AI `VERDICT: LGTM`. If CHANGES, fix + re-gate. After the gate, run `git status` to confirm the tree is untouched.
 
@@ -303,7 +303,7 @@ Expected: ≥2 distinct-AI `VERDICT: LGTM`. If CHANGES, fix + re-gate. After the
 git checkout main && git merge --ff-only feat/serve-tailnet-bind && git push origin main && git branch -d feat/serve-tailnet-bind
 ```
 
-- [ ] **Step 4: Refresh the deployed binary** — rebuild native to the clean out-of-repo dir (`CARGO_TARGET_DIR=C:/Users/m4932/ensemble-target-rel cargo build --release`) and re-Taildrop to active peers; then update the backlog Log + commit + push.
+- [ ] **Step 4: Refresh the deployed binary** — rebuild native to the clean out-of-repo dir (`CARGO_TARGET_DIR=C:/Users/<you>/ensemble-target-rel cargo build --release`) and re-Taildrop to active peers; then update the backlog Log + commit + push.
 
 ---
 

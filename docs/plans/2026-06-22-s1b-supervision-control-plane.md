@@ -41,11 +41,11 @@ abort-aware: their existing poll loop also checks the shared abort flag and `kil
 ```rust
 #[test]
 fn control_cmd_roundtrips_tagged_on_cmd() {
-    let s = ControlCmd::Steer { from: "main@z13".into(), prompt: "skip the UI".into() };
+    let s = ControlCmd::Steer { from: "main@conductor".into(), prompt: "skip the UI".into() };
     let line = serde_json::to_string(&s).unwrap();
     assert!(line.contains(r#""cmd":"steer""#), "got {line}");
     assert_eq!(serde_json::from_str::<ControlCmd>(&line).unwrap(), s);
-    let a = ControlCmd::Abort { from: "main@z13".into(), hard: true };
+    let a = ControlCmd::Abort { from: "main@conductor".into(), hard: true };
     assert!(serde_json::to_string(&a).unwrap().contains(r#""cmd":"abort""#));
     assert_eq!(serde_json::from_str::<ControlCmd>(&serde_json::to_string(&a).unwrap()).unwrap(), a);
 }
@@ -229,7 +229,7 @@ when `--watch` is set, spawn the watcher); `src/lib.rs` (re-exports). Gate-revie
   land; steer reaches the next round only (no mid-turn injection claim); `member_control_path` confinement;
   `--hard` kill is prompt and the clean abort still stops at the boundary; thread joins/shutdown on run end.
 - [ ] On both LGTM: ff-merge to `main`; backlog (S1b done, item-6 + S1c-cross-machine-control next) as a
-  separate commit; push as markl-a; delete slice; clean gate scratch.
+  separate commit; push as <you>; delete slice; clean gate scratch.
 
 ## Self-review
 - **Coverage:** observe (S1a ✓) + steer + interrupt(clean+hard) = the "防跑偏" Stage-1 verbs. "Configure"

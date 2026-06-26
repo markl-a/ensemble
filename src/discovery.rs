@@ -265,14 +265,14 @@ mod tests {
 
     #[test]
     fn parse_self_ips_reads_self_tailscale_ips() {
-        let json = r#"{ "Self": { "HostName": "yoyogood",
-            "TailscaleIPs": ["100.87.70.65", "fd7a:1::5"] }, "Peer": {} }"#;
-        assert_eq!(parse_self_ips(json), vec!["100.87.70.65", "fd7a:1::5"]);
+        let json = r#"{ "Self": { "HostName": "node-a",
+            "TailscaleIPs": ["100.x.y.z", "fd7a:1::5"] }, "Peer": {} }"#;
+        assert_eq!(parse_self_ips(json), vec!["100.x.y.z", "fd7a:1::5"]);
     }
 
     #[test]
     fn parse_self_ips_empty_when_logged_out() {
-        let json = r#"{ "Self": { "HostName": "yoyogood", "TailscaleIPs": null }, "Peer": {} }"#;
+        let json = r#"{ "Self": { "HostName": "node-a", "TailscaleIPs": null }, "Peer": {} }"#;
         assert!(parse_self_ips(json).is_empty());
         assert!(parse_self_ips("not json").is_empty());
     }
@@ -280,14 +280,14 @@ mod tests {
     #[test]
     fn parses_tailscale_peers() {
         let json = r#"{ "Peer": {
-            "k1": { "HostName": "acer", "DNSName": "acer.tail.ts.net.", "Online": true },
-            "k2": { "HostName": "ayaneo", "DNSName": "ayaneo.tail.ts.net.", "Online": false }
+            "k1": { "HostName": "node-d", "DNSName": "node-d.tail.ts.net.", "Online": true },
+            "k2": { "HostName": "node-b", "DNSName": "node-b.tail.ts.net.", "Online": false }
         }}"#;
         let mut nodes = parse_tailscale_status(json);
         nodes.sort_by(|a, b| a.name.cmp(&b.name));
         assert_eq!(nodes.len(), 2);
-        assert_eq!(nodes[0].name, "acer");
-        assert_eq!(nodes[0].dns_name, "acer.tail.ts.net"); // trailing dot trimmed
+        assert_eq!(nodes[0].name, "node-d");
+        assert_eq!(nodes[0].dns_name, "node-d.tail.ts.net"); // trailing dot trimmed
         assert!(nodes[0].online);
         assert!(!nodes[1].online);
     }
@@ -295,11 +295,11 @@ mod tests {
     #[test]
     fn parse_captures_tailscale_ips() {
         let json = r#"{ "Peer": {
-            "k": { "HostName": "ayaneo", "DNSName": "ayaneo.tail.ts.net.", "Online": true,
-                   "TailscaleIPs": ["100.107.205.98", "fd7a:1::1"] }
+            "k": { "HostName": "node-b", "DNSName": "node-b.tail.ts.net.", "Online": true,
+                   "TailscaleIPs": ["100.x.y.z", "fd7a:1::1"] }
         }}"#;
         let nodes = parse_tailscale_status(json);
-        assert_eq!(nodes[0].tailscale_ips, vec!["100.107.205.98", "fd7a:1::1"]);
+        assert_eq!(nodes[0].tailscale_ips, vec!["100.x.y.z", "fd7a:1::1"]);
     }
 
     #[test]

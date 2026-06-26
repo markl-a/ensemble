@@ -12,7 +12,7 @@ pub struct CouncilTarget {
     pub agent: String,
     /// `None` = run the agent LOCALLY; `Some(url)` = drive it on a tailnet peer's `ensemble serve`.
     pub node: Option<String>,
-    /// Display label, e.g. `codex@local` or `codex@ayaneo`.
+    /// Display label, e.g. `codex@local` or `codex@node-b`.
     pub label: String,
 }
 
@@ -49,7 +49,7 @@ pub fn council_targets(local: &[String], mesh: &[(String, Vec<String>)]) -> Vec<
 }
 
 /// A short, human label for a serve URL: strip the scheme and `:port`, then take the first DNS label
-/// (`http://ayaneo.tailf31eff.ts.net:7878` → `ayaneo`). An IPv4 or bracketed IPv6 literal is kept whole
+/// (`http://node-b.example.ts.net:7878` → `node-b`). An IPv4 or bracketed IPv6 literal is kept whole
 /// (minus scheme/port) — it has no meaningful short label.
 pub fn short_host(url: &str) -> String {
     let s = url
@@ -103,23 +103,23 @@ mod tests {
     fn council_targets_enumerates_local_and_every_remote_agent() {
         let local = vec!["codex".to_string(), "claude".to_string()];
         let mesh = vec![(
-            "http://ayaneo.tailf31eff.ts.net:7878".to_string(),
+            "http://node-b.example.ts.net:7878".to_string(),
             vec!["codex".to_string(), "agy".to_string()],
         )];
         let t = council_targets(&local, &mesh);
         let labels: Vec<&str> = t.iter().map(|c| c.label.as_str()).collect();
         assert!(labels.contains(&"codex@local") && labels.contains(&"claude@local"));
         assert!(
-            labels.contains(&"codex@ayaneo") && labels.contains(&"agy@ayaneo"),
+            labels.contains(&"codex@node-b") && labels.contains(&"agy@node-b"),
             "got {labels:?}"
         );
         // a local cli has no node; a remote one carries the serve URL
         let local_codex = t.iter().find(|c| c.label == "codex@local").unwrap();
         assert_eq!(local_codex.node, None);
-        let remote_codex = t.iter().find(|c| c.label == "codex@ayaneo").unwrap();
+        let remote_codex = t.iter().find(|c| c.label == "codex@node-b").unwrap();
         assert_eq!(
             remote_codex.node.as_deref(),
-            Some("http://ayaneo.tailf31eff.ts.net:7878")
+            Some("http://node-b.example.ts.net:7878")
         );
         assert_eq!(remote_codex.agent, "codex");
     }
@@ -145,10 +145,10 @@ mod tests {
 
     #[test]
     fn short_host_strips_scheme_port_and_domain() {
-        assert_eq!(short_host("http://ayaneo.tailf31eff.ts.net:7878"), "ayaneo");
-        assert_eq!(short_host("http://100.107.205.98:7878"), "100.107.205.98"); // IPv4 kept whole
+        assert_eq!(short_host("http://node-b.example.ts.net:7878"), "node-b");
+        assert_eq!(short_host("http://100.x.y.z:7878"), "100.x.y.z"); // IPv4 kept whole
         assert_eq!(short_host("http://[fd7a::1]:7878"), "[fd7a::1]"); // v6 kept whole
-        assert_eq!(short_host("http://z13:7878"), "z13"); // bare host, no domain
+        assert_eq!(short_host("http://node-a:7878"), "node-a"); // bare host, no domain
     }
 
     #[test]
@@ -159,13 +159,13 @@ mod tests {
                 Ok("risk A: unbounded loop".to_string()),
             ),
             (
-                "agy@ayaneo".to_string(),
+                "agy@node-b".to_string(),
                 Err("agy flaked: timed out".to_string()),
             ),
         ];
         let out = render_council(&results);
         assert!(out.contains("codex@local") && out.contains("risk A"));
-        assert!(out.contains("agy@ayaneo") && out.contains("[flaked: agy flaked: timed out]"));
+        assert!(out.contains("agy@node-b") && out.contains("[flaked: agy flaked: timed out]"));
         assert!(out.contains("1/2 replied"), "tally: {out}");
     }
 }

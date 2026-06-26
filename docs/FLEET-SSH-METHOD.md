@@ -19,7 +19,7 @@ leaks operator infra the moment it is pushed.
 ## Transport: Tailscale + SSH key auth
 
 - All nodes sit on one tailnet; reach a node by its tailscale IP.
-- Disable any conflicting userspace VPN first (e.g. Surfshark's WireGuard
+- Disable any conflicting userspace VPN first (e.g. your VPN's WireGuard
   collides with Tailscale — peers go unreachable until it is off).
 - Auth = **SSH public key** (add each machine's pubkey once). Do NOT rely on a
   credential that lives in the macOS **Keychain** (e.g. a `gh` token): it is

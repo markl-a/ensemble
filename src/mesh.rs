@@ -41,9 +41,9 @@ mod tests {
 
     #[test]
     fn render_up_shows_banner_indented_mesh_and_footer() {
-        let out = render_up("100.87.70.65:7878", &["codex".to_string()], &[]);
+        let out = render_up("100.x.y.z:7878", &["codex".to_string()], &[]);
         assert!(
-            out.contains("ensemble up — serving on 100.87.70.65:7878"),
+            out.contains("ensemble up — serving on 100.x.y.z:7878"),
             "got:\n{out}"
         );
         assert!(
@@ -58,7 +58,7 @@ mod tests {
         let local = vec!["codex".to_string(), "claude".to_string()];
         let hosts = vec![
             (
-                "http://ayaneo:7878".to_string(),
+                "http://node-b:7878".to_string(),
                 vec!["codex".to_string(), "claude".to_string()],
             ),
             (
@@ -69,7 +69,7 @@ mod tests {
         let out = render_mesh(&local, &hosts);
         assert!(out.contains("local CLIs : codex, claude"), "got:\n{out}");
         assert!(
-            out.contains("http://ayaneo:7878 → codex, claude"),
+            out.contains("http://node-b:7878 → codex, claude"),
             "got:\n{out}"
         );
         assert!(

@@ -13,7 +13,7 @@
 - Clippy: `wsl bash -lc 'cd /mnt/d/Projects/ensemble && CARGO_TARGET_DIR=$HOME/ensemble-target cargo clippy --all-targets -- -D warnings'`
 - Binary (Windows native, for smoke): `$env:CARGO_TARGET_DIR="C:\ctgt\ensemble"; cargo build` → `C:\ctgt\ensemble\debug\ensemble.exe`
 
-**Landing:** after all tasks green, commit specific files to a slice branch, run the double-gate (codex from empty temp cwd + claude), ff-merge to main ONLY after BOTH end `VERDICT: LGTM`. Identity `markl-a <m4932981@gmail.com>`.
+**Landing:** after all tasks green, commit specific files to a slice branch, run the double-gate (codex from empty temp cwd + claude), ff-merge to main ONLY after BOTH end `VERDICT: LGTM`. Identity `<you> <you@example.com>`.
 
 ---
 
@@ -304,7 +304,7 @@ mod tests {
     #[test]
     fn injected_event_roundtrips() {
         let ev = StreamEvent::Injected {
-            n: 8, from: "main@yoyogood".into(), prompt: "focus".into(), ts: "T".into(),
+            n: 8, from: "main@node-a".into(), prompt: "focus".into(), ts: "T".into(),
         };
         let back: StreamEvent = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
         assert_eq!(back, ev);
@@ -312,10 +312,10 @@ mod tests {
 
     #[test]
     fn render_line_pretty_prints_a_known_event() {
-        let raw = r#"{"ev":"injected","n":8,"from":"main@z13","prompt":"skip the UI","ts":"T"}"#;
+        let raw = r#"{"ev":"injected","n":8,"from":"main@conductor","prompt":"skip the UI","ts":"T"}"#;
         let s = render_line(raw);
         assert!(s.contains("inject #8"), "got {s}");
-        assert!(s.contains("main@z13") && s.contains("skip the UI"), "got {s}");
+        assert!(s.contains("main@conductor") && s.contains("skip the UI"), "got {s}");
     }
 
     #[test]
@@ -445,8 +445,8 @@ Add to `src/supervise.rs`'s `mod tests` (and add `use std::path::Path;` inside t
         use std::path::Path;
         // reuses journal's sanitizer: '@' in the canonical <cli>@<host> name becomes '-' on disk; the
         // supervisor and `watch` compute the SAME path, so the logical member id still resolves.
-        let p = member_stream_path(Path::new("/r"), "claude@z13");
-        assert!(p.ends_with("claude-z13.ndjson"), "got {p:?}");
+        let p = member_stream_path(Path::new("/r"), "claude@conductor");
+        assert!(p.ends_with("claude-conductor.ndjson"), "got {p:?}");
     }
 ```
 
@@ -512,8 +512,8 @@ Add to `src/supervise.rs`'s `mod tests`:
 
     #[test]
     fn parse_watch_args_basic() {
-        let w = parse_watch_args(&argv(&["ensemble", "watch", "claude@z13"]));
-        assert_eq!(w.member.as_deref(), Some("claude@z13"));
+        let w = parse_watch_args(&argv(&["ensemble", "watch", "claude@conductor"]));
+        assert_eq!(w.member.as_deref(), Some("claude@conductor"));
         assert_eq!(w.since, 0);
         assert!(!w.follow);
         assert_eq!(w.repo, None);
@@ -522,9 +522,9 @@ Add to `src/supervise.rs`'s `mod tests`:
     #[test]
     fn parse_watch_args_all_flags() {
         let w = parse_watch_args(&argv(&[
-            "ensemble", "watch", "--since", "5", "claude@z13", "--follow", "--repo", "/r",
+            "ensemble", "watch", "--since", "5", "claude@conductor", "--follow", "--repo", "/r",
         ]));
-        assert_eq!(w.member.as_deref(), Some("claude@z13"));
+        assert_eq!(w.member.as_deref(), Some("claude@conductor"));
         assert_eq!(w.since, 5);
         assert!(w.follow);
         assert_eq!(w.repo.as_deref(), Some("/r"));
@@ -684,17 +684,17 @@ In a scratch dir (NOT the repo root — keep `.ensemble/` scratch out of the tre
 ```powershell
 $ex = "C:\ctgt\ensemble\debug\ensemble.exe"
 $d  = "$env:TEMP\ens_watch_smoke"; New-Item -ItemType Directory -Force "$d\.ensemble\stream" | Out-Null
-$f  = "$d\.ensemble\stream\claude-z13.ndjson"
+$f  = "$d\.ensemble\stream\claude-conductor.ndjson"
 Set-Content -Path $f -Encoding utf8 -Value @(
-  '{"ev":"session_start","member":"claude@z13","cli":"claude","backend":"pty","host":"z13","pid":42,"ts":"T0"}',
+  '{"ev":"session_start","member":"claude@conductor","cli":"claude","backend":"pty","host":"conductor","pid":42,"ts":"T0"}',
   '{"ev":"turn_start","n":1,"prompt":"do the auth path","ts":"T1"}',
   '{"ev":"output","n":1,"text":"editing src/auth.rs","ts":"T2"}',
   '{"ev":"turn_end","n":1,"reply":"done","ts":"T3"}'
 )
-& $ex watch "claude@z13" --repo $d            # expect 4 rendered lines
-& $ex watch "claude@z13" --repo $d --since 2  # expect last 2 lines only
+& $ex watch "claude@conductor" --repo $d            # expect 4 rendered lines
+& $ex watch "claude@conductor" --repo $d --since 2  # expect last 2 lines only
 ```
-Expected: member `claude@z13` resolves to `claude-z13.ndjson`; events render (`● session_start …`, `▶ turn #1 …`, `  #1 | editing …`, `◀ turn #1 end …`); `--since 2` prints only the last two. For `--follow`: run `& $ex watch "claude@z13" --repo $d --follow` in one terminal, append another JSON line to `$f` from another, see it appear within ~250 ms; Ctrl-C exits cleanly. Then delete `$d`.
+Expected: member `claude@conductor` resolves to `claude-conductor.ndjson`; events render (`● session_start …`, `▶ turn #1 …`, `  #1 | editing …`, `◀ turn #1 end …`); `--since 2` prints only the last two. For `--follow`: run `& $ex watch "claude@conductor" --repo $d --follow` in one terminal, append another JSON line to `$f` from another, see it appear within ~250 ms; Ctrl-C exits cleanly. Then delete `$d`.
 
 - [ ] **Step 6: Commit**
 
@@ -718,11 +718,11 @@ In `docs/AUTONOMOUS-BACKLOG.md`, log the S0 landing under item 0.5 (stream primi
 
 - [ ] **Step 3: Double-gate**
 
-On the slice branch, build a self-contained gate prompt embedding `git diff main...HEAD`. Run codex from the EMPTY temp cwd `/c/Users/m4932/AppData/Local/Temp/ens_gate_cwd` (`codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check -C <dir>`, prompt via stdin) and claude (`claude -p` via stdin). Verify post-gate that the gate cwd is still empty (codex didn't mutate the repo). LAND (ff-merge to main) ONLY after BOTH end `VERDICT: LGTM`. Bar for this slice: the feed's locking/torn-tail/cursor correctness under concurrency, member-path traversal confinement, and forward-compat rendering (unknown event kinds not hidden).
+On the slice branch, build a self-contained gate prompt embedding `git diff main...HEAD`. Run codex from the EMPTY temp cwd `/c/Users/<you>/AppData/Local/Temp/ens_gate_cwd` (`codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check -C <dir>`, prompt via stdin) and claude (`claude -p` via stdin). Verify post-gate that the gate cwd is still empty (codex didn't mutate the repo). LAND (ff-merge to main) ONLY after BOTH end `VERDICT: LGTM`. Bar for this slice: the feed's locking/torn-tail/cursor correctness under concurrency, member-path traversal confinement, and forward-compat rendering (unknown event kinds not hidden).
 
 - [ ] **Step 4: Land + push + clean**
 
-ff-merge to main, push with `markl-a <m4932981@gmail.com>`, delete the slice branch, clean any gate scratch.
+ff-merge to main, push with `<you> <you@example.com>`, delete the slice branch, clean any gate scratch.
 
 ---
 

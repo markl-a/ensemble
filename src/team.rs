@@ -228,20 +228,20 @@ mod tests {
     fn default_member_name_supports_all_local_clients_including_agy() {
         assert_eq!(
             default_member_name("codex", Some("YOYOGOOD.local")),
-            "codex@yoyogood"
+            "codex@node-a"
         );
-        assert_eq!(default_member_name("claude", Some("z13")), "claude@z13");
+        assert_eq!(default_member_name("claude", Some("node-a")), "claude@node-a");
         assert_eq!(
             default_member_name("opencode", Some("my box!")),
             "opencode@mybox"
         );
-        assert_eq!(default_member_name("agy", Some("AYANEO")), "agy@ayaneo");
+        assert_eq!(default_member_name("agy", Some("AYANEO")), "agy@node-b");
         assert_eq!(default_member_name("agy", Some("...")), "agy");
     }
 
     #[test]
     fn member_file_stem_confines_hostile_member_names() {
-        assert_eq!(member_file_stem("lead@z13"), "lead-z13");
+        assert_eq!(member_file_stem("lead@node-a"), "lead-node-a");
         assert!(!member_file_stem("../../etc/passwd")
             .split(std::path::MAIN_SEPARATOR)
             .any(|part| part == ".."));
@@ -254,17 +254,17 @@ mod tests {
             repo,
             Some("ops"),
             "codex",
-            Some("lead@z13"),
+            Some("lead@node-a"),
             Some("ignored-host"),
         );
         assert_eq!(s.repo, repo);
         assert_eq!(s.team, "ops");
-        assert_eq!(s.member, "lead@z13");
+        assert_eq!(s.member, "lead@node-a");
         assert_eq!(s.root, repo.join(".ensemble").join("teams").join("ops"));
         assert_eq!(s.board, s.root.join("board.jsonl"));
         assert_eq!(s.ledger, s.root.join("ledger.db"));
-        assert_eq!(s.stream, s.root.join("stream").join("lead-z13.ndjson"));
-        assert_eq!(s.control, s.root.join("control").join("lead-z13.ndjson"));
+        assert_eq!(s.stream, s.root.join("stream").join("lead-node-a.ndjson"));
+        assert_eq!(s.control, s.root.join("control").join("lead-node-a.ndjson"));
     }
 
     #[test]

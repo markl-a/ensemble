@@ -4,7 +4,7 @@
 
 `ensemble` is a Rust 2021 CLI that turns different-vendor AI coding CLIs into a local-first, governed dev crew. It orchestrates implement/review/debug roles, keeps a mediated blackboard, can run work in git worktrees, and can federate agent execution across Tailscale peers.
 
-Do not trust the README status block as current: it still says Phase 0 / not usable. For current progress, prefer `docs/AUTONOMOUS-BACKLOG.md`, especially the most recent log entries.
+Do not trust the README status block as current: it still says Phase 0 / not usable. For current progress, prefer the specs and plans under `docs/specs/` and `docs/plans/`, especially the most recent ones.
 
 ## Tech Stack
 
@@ -36,7 +36,7 @@ Do not trust the README status block as current: it still says Phase 0 / not usa
 - Task 10.5 is now implemented after the original status line above: `ensemble codex`, `ensemble claude`, `ensemble opencode`, and interactive `ensemble agy` launch through a controlled PTY by default. The controlled launcher tails `.ensemble/control/<member>.ndjson`; `ensemble steer <member> "<prompt>"` sends Escape, waits briefly, then types the corrective prompt and Enter; `ensemble abort <member>` sends Escape; `ensemble abort <member> --hard` also kills the launched child process. The deterministic acceptance script includes an isolated fake Codex launcher check for this default path. Real vendor live-interruption behavior still needs the operator terminal pass because each vendor decides how Escape affects an in-flight generation or menu.
 - Verified for Task 10.5 on 2026-06-22: `cargo test --lib controlled --target-dir D:\tmp\ensemble-target-controlled-5`, `cargo test --bin ensemble --target-dir D:\tmp\ensemble-target-controlled-bin-4`, and `pwsh -NoProfile -File scripts\acceptance-single-machine.ps1 -NoBuild -SmokeRoot D:\tmp\ensemble-acceptance-controlled -TargetDir D:\tmp\ensemble-target-controlled-release -AgyTimeoutSecs 1` all passed.
 - Automation requirement from the operator: any CLI path ensemble drives automatically must not depend on hidden interactive confirmations. Use non-interactive permission/confirmation flags where available, expose an explicit policy, or time out and write a visible team-board flake. Do not count a stuck vendor prompt as a valid review or smoke result. On this machine, `opencode --help` does not expose a stable approve/deny confirmation flag, so ensemble rejects opencode `--confirm-policy approve|deny` instead of pretending it can operate those choices.
-- Next major work is still tracked in `docs/AUTONOMOUS-BACKLOG.md`: OSS onboarding tick C (`serve --install-service` / `--uninstall-service`), distribution tick A, cross-machine supervision control routes, and release cleanup.
+- Next major work: OSS onboarding tick C (`serve --install-service` / `--uninstall-service`), distribution tick A, cross-machine supervision control routes, and release cleanup.
 - Release blockers include `Cargo.toml` version still being `0.0.0` and the stale README.
 - Verified on 2026-06-22: the WSL path `CARGO_TARGET_DIR=$HOME/ensemble-target cargo test` passes, and WSL `cargo clippy --all-targets -- -D warnings` passes. Native Windows `cargo test` can fail in `repo_sync` restore tests because temp git repos inherit CRLF checkout behavior (`main-edit\r\n` vs expected `main-edit\n`).
 
@@ -78,8 +78,7 @@ Do not trust the README status block as current: it still says Phase 0 / not usa
 
 ## Context Loading Order
 
-1. Read `docs/AUTONOMOUS-BACKLOG.md` for the latest truth and next task.
-2. Read the relevant spec/plan under `docs/specs/` or `docs/plans/`.
-3. Read the source modules and tests involved before editing.
-4. For CLI behavior, inspect `src/main.rs` for existing argument parsing style before adding flags.
-5. For safety-critical git, MCP, ledger, or supervision changes, find an existing hermetic test pattern before writing new code.
+1. Read the relevant spec/plan under `docs/specs/` or `docs/plans/` for the latest design and next task.
+2. Read the source modules and tests involved before editing.
+3. For CLI behavior, inspect `src/main.rs` for existing argument parsing style before adding flags.
+4. For safety-critical git, MCP, ledger, or supervision changes, find an existing hermetic test pattern before writing new code.
