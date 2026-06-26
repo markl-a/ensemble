@@ -51,6 +51,12 @@ queue a recurring cron drains — **one double-gated task per tick.**
   response bodies through an explicit 128 MiB capped response reader instead of `into_string`, with a 12 MiB
   regression test plus an over-cap rejection test. After rebuilding a patched release binary, the same main
   route progressed past the response-size failure into the expected governance quorum decision.
+- **Satellite agent routing split added locally:** `phase2-fleet` generated crews now let each satellite keep
+  `satellites[].node` as the project execution/ownership node while optional `satellites[].routes.codex` and
+  `satellites[].routes.claude` override the actual AI CLI route. `phase2-goal-shape` and `phase2-fleet` both
+  reject satellite routes that point outside `manifest.nodes` or hit `forbidden_nodes`. This is needed because
+  live 5-node probing showed Codex availability is broad but reviewer auth can be uneven, so Phase 2 needs a
+  repeatable way to route review to an auth-ready peer without moving the satellite project assignment.
 
 ## ▶ CURRENT FOCUS (2026-06-21) — finish Phase 1 of the two-phase plan
 Spec: `docs/specs/2026-06-20-two-phase-real-tests-design.md` + `docs/specs/2026-06-20-ensemble-mcp-design.md`.

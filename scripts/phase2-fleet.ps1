@@ -353,6 +353,15 @@ function Assert-NodeAllowed([string]$Value, [string[]]$ForbiddenNodes, [string]$
     }
 }
 
+function Assert-NodeKnown([string]$Value, $Nodes, [string]$Label) {
+    foreach ($node in $Nodes) {
+        if (Test-NodeSame $Value ([string]$node)) {
+            return
+        }
+    }
+    Fail "fleet manifest node '$Value' at $Label does not point at manifest.nodes"
+}
+
 function New-MainCrewText($Main) {
     $routes = Get-Prop $Main "routes" $null
     if ($null -eq $routes) {
@@ -410,6 +419,19 @@ function New-MainCrewText($Main) {
 
 function New-SatelliteCrewText($Satellite) {
     $nodeUrl = Normalize-NodeUrl (Require-Prop $Satellite "node" "satellites[]")
+    $routes = Get-Prop $Satellite "routes" $null
+    $codexNode = $nodeUrl
+    $claudeNode = $nodeUrl
+    if ($null -ne $routes) {
+        $codexRoute = Get-Prop $routes "codex" $null
+        if ($null -ne $codexRoute -and -not [string]::IsNullOrWhiteSpace([string]$codexRoute)) {
+            $codexNode = Normalize-NodeUrl ([string]$codexRoute)
+        }
+        $claudeRoute = Get-Prop $routes "claude" $null
+        if ($null -ne $claudeRoute -and -not [string]::IsNullOrWhiteSpace([string]$claudeRoute)) {
+            $claudeNode = Normalize-NodeUrl ([string]$claudeRoute)
+        }
+    }
     $testCommand = [string](Get-Prop $Satellite "test" "cargo test --quiet")
 
     $lines = @(
@@ -439,11 +461,11 @@ function New-SatelliteCrewText($Satellite) {
         "blind = true",
         "",
         "[agents.codex]",
-        "node = $(Toml-String $nodeUrl)",
+        "node = $(Toml-String $codexNode)",
         "timeout = 120",
         "",
         "[agents.claude]",
-        "node = $(Toml-String $nodeUrl)",
+        "node = $(Toml-String $claudeNode)",
         "timeout = 150"
     )
     return ($lines -join [Environment]::NewLine) + [Environment]::NewLine
@@ -483,6 +505,7 @@ function New-FleetPlan($Fleet, [string]$ManifestDir) {
     }
     $conductor = [string](Get-Prop $Fleet "conductor" $nodes[0])
     Assert-NodeAllowed $conductor $forbiddenNodes "conductor"
+    Assert-NodeKnown $conductor $nodes "conductor"
     $script:FleetServicePort = Get-FleetServicePort $Fleet
     $main = Get-Prop $Fleet "main" $null
     if ($null -eq $main) {
@@ -494,6 +517,7 @@ function New-FleetPlan($Fleet, [string]$ManifestDir) {
             $route = Get-Prop $routes $agent $null
             if ($null -ne $route -and -not [string]::IsNullOrWhiteSpace([string]$route)) {
                 Assert-NodeAllowed ([string]$route) $forbiddenNodes "main.routes.$agent"
+                Assert-NodeKnown ([string]$route) $nodes "main.routes.$agent"
             }
         }
     }
@@ -540,6 +564,17 @@ function New-FleetPlan($Fleet, [string]$ManifestDir) {
         $satName = Require-Prop $sat "name" "satellites[]"
         $satNode = Require-Prop $sat "node" "satellites[$satName]"
         Assert-NodeAllowed $satNode $forbiddenNodes "satellites[$satName].node"
+        Assert-NodeKnown $satNode $nodes "satellites[$satName].node"
+        $satRoutes = Get-Prop $sat "routes" $null
+        if ($null -ne $satRoutes) {
+            foreach ($agent in @("codex", "claude")) {
+                $route = Get-Prop $satRoutes $agent $null
+                if ($null -ne $route -and -not [string]::IsNullOrWhiteSpace([string]$route)) {
+                    Assert-NodeAllowed ([string]$route) $forbiddenNodes "satellites[$satName].routes.$agent"
+                    Assert-NodeKnown ([string]$route) $nodes "satellites[$satName].routes.$agent"
+                }
+            }
+        }
         $satRepo = Resolve-FromBase $ManifestDir (Require-Prop $sat "repo" "satellites[$satName]")
         $satTeam = [string](Get-Prop $sat "team" $satName)
         $satWatch = [string](Get-Prop $sat "watch" $satTeam)
@@ -1032,6 +1067,7 @@ function Write-SampleManifest([string]$Path) {
     $sample = @'
 {
   "nodes": ["m1", "m2", "m3", "m4", "m5"],
+  "forbidden_nodes": [],
   "conductor": "m1",
   "service": {
     "port": 8788
@@ -1057,7 +1093,11 @@ function Write-SampleManifest([string]$Path) {
       "team": "sat-a",
       "watch": "sat-a",
       "task": "phase2 satellite A smoke run",
-      "test": "cargo test --quiet"
+      "test": "cargo test --quiet",
+      "routes": {
+        "codex": "m2",
+        "claude": "m5"
+      }
     },
     {
       "name": "sat-b",
@@ -1120,10 +1160,14 @@ function Invoke-SelfTest {
         }
         satellites = @(
             @{
-                name = "sat-a"
-                repo = $satRepo
-                node = "m2"
-                test = "echo sat"
+                name   = "sat-a"
+                repo   = $satRepo
+                node   = "m2"
+                test   = "echo sat"
+                routes = @{
+                    codex  = "m2"
+                    claude = "m1"
+                }
             }
         )
     } | ConvertTo-Json -Depth 6
@@ -1193,7 +1237,10 @@ function Invoke-SelfTest {
         Fail "self-test expected satellite generated crew to include a codex audit reviewer"
     }
     if ($sat.Text -notmatch 'node = "http://m2:8788"') {
-        Fail "self-test expected satellite node to be normalized"
+        Fail "self-test expected satellite codex route to default or normalize to m2"
+    }
+    if ($sat.Text -notmatch 'node = "http://m1:8788"') {
+        Fail "self-test expected satellite claude route override to normalize to m1"
     }
     Materialize-Plan $nodePlan
     $fakeBin = Join-Path $root "fake-bin"
@@ -1530,10 +1577,14 @@ function Invoke-SelfTest {
         }
         satellites = @(
             @{
-                name = "sat-a"
-                repo = $satRepo
-                node = "m2"
-                test = "echo sat"
+                name   = "sat-a"
+                repo   = $satRepo
+                node   = "m2"
+                test   = "echo sat"
+                routes = @{
+                    codex  = "m2"
+                    claude = "m2"
+                }
             }
         )
     } | ConvertTo-Json -Depth 6

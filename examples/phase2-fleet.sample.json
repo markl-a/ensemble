@@ -26,7 +26,11 @@
       "team": "sat-a",
       "watch": "sat-a",
       "task": "phase2 satellite A smoke run",
-      "test": "cargo test --quiet"
+      "test": "cargo test --quiet",
+      "routes": {
+        "codex": "m2",
+        "claude": "m5"
+      }
     },
     {
       "name": "sat-b",

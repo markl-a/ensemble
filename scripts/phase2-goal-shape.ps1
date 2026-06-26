@@ -156,6 +156,18 @@ function Assert-Phase2GoalShape($Fleet) {
         if (-not (Test-NodeKnown $satNode $nodes)) {
             Fail "Phase 2 goal satellite '$satName' node '$satNode' is not listed in manifest.nodes"
         }
+        $satRoutes = Get-Prop $sat "routes" $null
+        if ($null -ne $satRoutes) {
+            foreach ($agent in @("codex", "claude")) {
+                $route = Get-Prop $satRoutes $agent $null
+                if ($null -ne $route -and -not [string]::IsNullOrWhiteSpace([string]$route)) {
+                    Assert-NodeAllowed ([string]$route) $forbiddenNodes "satellites[$satName].routes.$agent"
+                    if (-not (Test-NodeKnown ([string]$route) $nodes)) {
+                        Fail "Phase 2 goal satellite '$satName' route '$agent=$route' does not point at a manifest node"
+                    }
+                }
+            }
+        }
         $satTeam = [string](Get-Prop $sat "team" $satName)
         $satWatch = [string](Get-Prop $sat "watch" $satTeam)
         $satNames.Add($satName)
