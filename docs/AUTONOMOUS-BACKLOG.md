@@ -65,6 +65,14 @@ queue a recurring cron drains — **one double-gated task per tick.**
   processes so fixed manifest tasks can rerun, and main-project routes that point at the conductor generate
   local agents instead of forcing remote git-sync for the conductor's own CLIs. The remote adapter response cap
   was raised from 128 MiB to 512 MiB while keeping the explicit over-cap rejection.
+- **Current-code Phase 2 goal verification refreshed:** after landing the repeatable fleet-run fixes, current
+  `phase2-verify-fixes` passed `cargo fmt --check`, targeted `worktree` and `remote_adapter` regressions,
+  `phase2-fleet.ps1 -SelfTest`, `phase2-goal-shape.ps1`, Phase-1 deterministic acceptance, Phantom
+  single-machine bridge, Phase-2 Slice A/B-preflight/C-local, the hermetic `cross_machine` regression, Slice D
+  clean reinstall (`uninstall -> install -> service dry-run -> smoke -> up/mesh/nodes -> uninstall`), and
+  `phase2-fleet.ps1 -Node all -VerifyReports -RepeatCount 2` against the private 5-node manifest. A verifier
+  glue fix now treats `-FleetNode all` as "check all manifest nodes" while still excluding the conductor from
+  expected remote mesh peers, because `mesh/nodes` list tailnet peers rather than the local host.
 
 ## ▶ CURRENT FOCUS (2026-06-21) — finish Phase 1 of the two-phase plan
 Spec: `docs/specs/2026-06-20-two-phase-real-tests-design.md` + `docs/specs/2026-06-20-ensemble-mcp-design.md`.

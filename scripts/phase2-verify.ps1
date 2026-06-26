@@ -1194,7 +1194,7 @@ function Run-SliceC {
             }
             $nodesToCheck = @(Expand-NodeList $manifestInfo.Nodes)
             if ([string]::IsNullOrWhiteSpace($localNodeForCheck)) {
-                $localNodeForCheck = if (-not [string]::IsNullOrWhiteSpace($FleetNode)) {
+                $localNodeForCheck = if (-not [string]::IsNullOrWhiteSpace($FleetNode) -and -not $FleetNode.Equals("all", [System.StringComparison]::OrdinalIgnoreCase)) {
                     $FleetNode
                 } else {
                     $manifestInfo.Conductor
@@ -1205,7 +1205,7 @@ function Run-SliceC {
         if ($nodesToCheck.Count -gt 0) {
             $hosts = @(Get-UrlHosts $mesh.Stdout)
             $expectedNodes = @($nodesToCheck | Where-Object {
-                    -not ($localNodeForCheck -and ([string]$_).Equals($localNodeForCheck, [System.StringComparison]::OrdinalIgnoreCase))
+                    -not ($localNodeForCheck -and (Test-NodeSame ([string]$_) $localNodeForCheck))
                 })
             $missing = New-Object System.Collections.Generic.List[string]
             foreach ($expectedHost in $expectedNodes) {
