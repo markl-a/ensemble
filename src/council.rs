@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn short_host_strips_scheme_port_and_domain() {
         assert_eq!(short_host("http://node-b.example.ts.net:7878"), "node-b");
-        assert_eq!(short_host("http://100.x.y.z:7878"), "100.x.y.z"); // IPv4 kept whole
+        assert_eq!(short_host("http://100.64.12.34:7878"), "100.64.12.34"); // IPv4 kept whole
         assert_eq!(short_host("http://[fd7a::1]:7878"), "[fd7a::1]"); // v6 kept whole
         assert_eq!(short_host("http://node-a:7878"), "node-a"); // bare host, no domain
     }

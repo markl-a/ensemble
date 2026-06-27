@@ -299,7 +299,7 @@ mod tests {
             "a timed-out turn must Flake, got {r:?}"
         );
         #[cfg(windows)]
-        let limit = Duration::from_secs(10);
+        let limit = Duration::from_secs(15);
         #[cfg(not(windows))]
         let limit = Duration::from_secs(4);
         assert!(

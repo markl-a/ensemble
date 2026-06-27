@@ -18,6 +18,7 @@ const DEFAULT_SERVE_PORT: u16 = 7878;
 const USAGE: &str = "usage:\n  \
     ensemble run \"<task>\" [--crew <crew.toml>] [--repo <path>] [--team <name>] [--merge [--into <target>]] [--watch <name>]\n  \
     ensemble run-many \"<task1>\" \"<task2>\" ... [--crew <crew.toml>] [--repo <path>]\n  \
+    ensemble version | --version | -V   (print the package version)\n  \
     ensemble crew inspect [--crew <crew.toml>] [--json]   (print parsed crew/gate/reviewer metadata for verification)\n  \
     ensemble dispatch \"<task1>\" ... --ledger <db> [--crew <crew.toml>] [--repo <path>]   (durable, resumable)\n  \
     ensemble ledger <status|recover> --ledger <db> [--stale-secs N]\n  \
@@ -45,6 +46,13 @@ const USAGE: &str = "usage:\n  \
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if matches!(
+        args.get(1).map(|s| s.as_str()),
+        Some("version") | Some("--version") | Some("-V")
+    ) {
+        println!("{}", env!("CARGO_PKG_VERSION"));
+        std::process::exit(0);
+    }
     match parse_launcher_invocation(&args) {
         Ok(Some(LauncherInvocation::Member {
             client,

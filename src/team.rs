@@ -228,14 +228,17 @@ mod tests {
     fn default_member_name_supports_all_local_clients_including_agy() {
         assert_eq!(
             default_member_name("codex", Some("YOYOGOOD.local")),
-            "codex@node-a"
+            "codex@yoyogood"
         );
-        assert_eq!(default_member_name("claude", Some("node-a")), "claude@node-a");
+        assert_eq!(
+            default_member_name("claude", Some("node-a")),
+            "claude@node-a"
+        );
         assert_eq!(
             default_member_name("opencode", Some("my box!")),
             "opencode@mybox"
         );
-        assert_eq!(default_member_name("agy", Some("AYANEO")), "agy@node-b");
+        assert_eq!(default_member_name("agy", Some("AYANEO")), "agy@ayaneo");
         assert_eq!(default_member_name("agy", Some("...")), "agy");
     }
 
