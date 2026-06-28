@@ -286,10 +286,11 @@ mod tests {
         let mut nodes = parse_tailscale_status(json);
         nodes.sort_by(|a, b| a.name.cmp(&b.name));
         assert_eq!(nodes.len(), 2);
-        assert_eq!(nodes[0].name, "node-d");
-        assert_eq!(nodes[0].dns_name, "node-d.tail.ts.net"); // trailing dot trimmed
-        assert!(nodes[0].online);
-        assert!(!nodes[1].online);
+        let node_d = nodes.iter().find(|n| n.name == "node-d").expect("node-d");
+        assert_eq!(node_d.dns_name, "node-d.tail.ts.net"); // trailing dot trimmed
+        assert!(node_d.online);
+        let node_b = nodes.iter().find(|n| n.name == "node-b").expect("node-b");
+        assert!(!node_b.online);
     }
 
     #[test]
