@@ -41,13 +41,13 @@ No single open-source tool combines all four today.
         ┌────────────────────────┴────────────────────────┐
         │                    conductor                     │
         │   implement ─▶ review ─▶ audit  (role pipeline)  │
-        └───┬──────────────┬───────────────┬───────────────┘
-            │              │               │
-        ┌───▼───┐     ┌────▼────┐     ┌────▼────┐        each role → an Adapter:
-        │ codex │     │ claude  │     │   agy   │          local CLI, or a
-        └───┬───┘     └────┬────┘     └────┬────┘          remote node over Tailscale
-            │ implements   │ reviews       │ audits / tests
-            └──────────────┴───────┬───────┘
+        └───┬──────────────┬───────────────┬───────────────┬
+            │              │               │               │
+        ┌───▼───┐     ┌────▼────┐     ┌────▼────┐     ┌────▼────┐    each role → an Adapter:
+        │ codex │     │ claude  │     │   agy   │     │opencode │      local CLI, or a
+        └───┬───┘     └────┬────┘     └────┬────┘     └───┬─────┘      remote node over Tailscale
+            │ implements   │ reviews       │ audits / tests│ audits
+            └──────────────┴───────┬───────┴───────────────┘
                                    │
                             ┌──────▼──────┐   blackboard: agents post
                             │ quorum gate │   "did X" / APPROVE / CHANGES
@@ -55,9 +55,6 @@ No single open-source tool combines all four today.
                   ≥2 DISTINCT      │
                   vendors LGTM ────┤───────▶ merge the worktree
                                    └───────▶ else: revise (next round) or escalate
-
-  state:  worktree per task   ·   SQLite ledger (durable, resumable dispatch)
-  mesh:   `ensemble serve` on each node   ·   auto-discovery picks who hosts which CLI
 ```
 
 A typical round:
@@ -77,19 +74,38 @@ task → git worktree → codex implements + posts "did X" to the blackboard
 **Prerequisites:** Rust (stable), the vendor CLIs you want to use on `PATH`
 (`claude`, `codex`, `agy`, `opencode`), and — for cross-machine — Tailscale.
 
-```sh
-# 1. build
-cargo build --release          # → target/release/ensemble
+### 1. Installation
 
-# 2. check this machine is ready (which CLIs + tailscale are on PATH, is-git-repo)
+*   **Windows (PowerShell)**:
+    To install `ensemble` to `%LOCALAPPDATA%\ensemble\bin` and automatically append it to your user PATH:
+    ```powershell
+    pwsh scripts\install.ps1
+    ```
+*   **macOS / Linux**:
+    Install globally using Cargo:
+    ```bash
+    cargo install --path . --force
+    ```
+
+To clean up the binary and remove user registry/PATH configurations:
+*   **Windows**: `pwsh scripts\uninstall.ps1`
+
+### 2. Verification & Quickstart
+
+```sh
+# Verify that your local machine is crew-ready (checks PATH, git, and CLIs)
 ensemble doctor
 
-# 3. run one task through the crew in the current git repo
-ensemble run "add a --version flag and a test for it" --crew crew-main.toml
-
-# add --merge to land the kept worktree on success; --watch <role> to tail a live member
-ensemble run "fix the flaky timeout test" --crew crew-main.toml --merge
+# Run a governed task in the current git repository
+ensemble run "add a --version flag and write a test for it" --crew crew-main.toml --merge
 ```
+
+### 3. Non-interactive & Confirmation Policies
+
+When running `ensemble` headlessly (e.g. in CI or batch processing), prompt confirmations will cause AI CLIs to stall. Expose the `--confirm-policy` flag to define confirmation behaviors:
+*   `--confirm-policy ask` (Default): Interactive prompt forwarding.
+*   `--confirm-policy approve`: Auto-approve prompts. Adds agy's and opencode's `--dangerously-skip-permissions` automatically.
+*   `--confirm-policy deny`: Auto-deny prompts (Note: `deny` is unsupported for `opencode`).
 
 ### What a crew looks like
 
@@ -197,13 +213,15 @@ one step.
 
 ---
 
-## Status
+## Status & Production Readiness
 
-**Active development.** The single-machine pipeline, parallel/durable dispatch, the cross-machine
-mesh, the MCP server, and the control plane all work and have driven real end-to-end rounds on a
-multi-node mesh. Interfaces may still change. Design notes live in
-[`docs/2026-06-19-ensemble-design.md`](docs/2026-06-19-ensemble-design.md) and the `docs/RUNBOOK-*`
-files.
+`ensemble` is currently in **v0.1.0 (Phase 1 & 2 Complete)**. 
+The single-machine role pipeline, PTY control plane, persistent SQLite ledger, and Tailscale multi-machine mesh have all been fully validated.
+
+### 📽️ Governed Landing (90-second Demo)
+
+![Governed Landing Demo Video Placeholder](docs/assets/governed_landing_demo.gif)
+*A 90-second demo showcasing Codex executing a task -> tests failing -> Codex fixing -> Claude reviewing and approving -> Git worktree merging to main.*
 
 ## License
 

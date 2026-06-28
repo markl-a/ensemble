@@ -1753,11 +1753,13 @@ fn member_confirmation_args(
         (ensemble::mcp_install::ClientKind::Claude, ConfirmPolicy::Deny) => {
             vec!["--permission-mode".to_string(), "dontAsk".to_string()]
         }
-        (ensemble::mcp_install::ClientKind::Opencode, unsupported) => {
+        (ensemble::mcp_install::ClientKind::Opencode, ConfirmPolicy::Approve) => {
+            vec!["--dangerously-skip-permissions".to_string()]
+        }
+        (ensemble::mcp_install::ClientKind::Opencode, ConfirmPolicy::Deny) => {
             return Err(format!(
-                "`opencode --help` does not expose a stable non-interactive confirmation flag; \
-                 --confirm-policy {} is unsupported for opencode",
-                unsupported.as_str()
+                "`opencode --help` does not expose a stable non-interactive deny flag; \
+                 --confirm-policy deny is unsupported for opencode"
             ));
         }
     };
@@ -4591,7 +4593,7 @@ node = "http://m2:7878"
     }
 
     #[test]
-    fn member_launcher_confirm_policy_rejects_unsupported_clients() {
+    fn member_launcher_confirm_policy_rejects_deny_but_accepts_approve_for_opencode() {
         let cwd = test_abs("cwd");
         let env = MemberLauncherEnv {
             cwd,
@@ -4601,20 +4603,30 @@ node = "http://m2:7878"
             codex_home: None,
             vendor_bin: None,
         };
-        let parsed = parse_member_launcher_args(&argv(&[
+        let parsed_approve = parse_member_launcher_args(&argv(&[
             "ensemble",
             "--confirm-policy",
             "approve",
             "opencode",
         ]))
         .unwrap();
+        let plan_approve =
+            build_member_launch_plan(ensemble::mcp_install::ClientKind::Opencode, parsed_approve, &env)
+                .unwrap();
+        assert_eq!(build_member_vendor_argv(&plan_approve), vec!["--dangerously-skip-permissions".to_string()]);
 
+        let parsed_deny = parse_member_launcher_args(&argv(&[
+            "ensemble",
+            "--confirm-policy",
+            "deny",
+            "opencode",
+        ]))
+        .unwrap();
         let err =
-            build_member_launch_plan(ensemble::mcp_install::ClientKind::Opencode, parsed, &env)
+            build_member_launch_plan(ensemble::mcp_install::ClientKind::Opencode, parsed_deny, &env)
                 .unwrap_err();
-
         assert!(err.contains("opencode"));
-        assert!(err.contains("--confirm-policy approve"));
+        assert!(err.contains("--confirm-policy deny"));
     }
 
     #[test]
