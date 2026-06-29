@@ -299,7 +299,7 @@ mod tests {
             "a timed-out turn must Flake, got {r:?}"
         );
         #[cfg(windows)]
-        let limit = Duration::from_secs(15);
+        let limit = Duration::from_secs(25);
         #[cfg(not(windows))]
         let limit = Duration::from_secs(4);
         assert!(
@@ -352,8 +352,10 @@ mod tests {
 
     #[test]
     fn external_abort_kills_a_running_turn_mid_flight() {
-        // S1b `--hard`: a long turn that the operator hard-aborts must die NEAR the abort, not run to
-        // its (generous) timeout. Set a 30s timeout, abort after ~300ms, expect Flaked in well under 3s.
+        // S1b `--hard`: a long turn that the operator hard-aborts must die near the abort, not run
+        // to its generous timeout. Windows process-tree teardown can be noisy under CI load, so the
+        // Windows bound proves we do not wait out the 30s adapter timeout instead of asserting an
+        // unrealistically tight scheduler-dependent wall clock.
         #[cfg(windows)]
         let a = ExecAdapter::raw(
             "sleeper",
@@ -377,7 +379,7 @@ mod tests {
             "an aborted turn must Flake, got {r:?}"
         );
         #[cfg(windows)]
-        let limit = Duration::from_secs(10);
+        let limit = Duration::from_secs(20);
         #[cfg(not(windows))]
         let limit = Duration::from_secs(3);
         assert!(

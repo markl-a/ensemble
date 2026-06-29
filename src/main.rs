@@ -1768,10 +1768,11 @@ fn member_confirmation_args(
             vec!["--dangerously-skip-permissions".to_string()]
         }
         (ensemble::mcp_install::ClientKind::Opencode, ConfirmPolicy::Deny) => {
-            return Err(format!(
+            return Err(
                 "`opencode --help` does not expose a stable non-interactive deny flag; \
                  --confirm-policy deny is unsupported for opencode"
-            ));
+                    .to_string(),
+            );
         }
     };
     Ok(args)
