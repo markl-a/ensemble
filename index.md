@@ -5,7 +5,7 @@
 > lives *before* writing new code, so the same functionality is never implemented twice.
 >
 > Maintenance rule: when you add/rename/delete a tracked file, update the matching row here.
-> Last synced: 2026-06-28 (97 tracked files).
+> Last synced: 2026-06-30 (100 tracked files).
 
 ## Repo map (top level)
 
@@ -29,7 +29,7 @@ this file — do not re-implement it elsewhere. See [Known duplication](#known-d
 ### Orchestration core
 | File | Single responsibility | Key public types |
 |---|---|---|
-| `main.rs` | CLI entry point + every subcommand handler (argument parsing → library calls). **Oversized (~5k lines)** — see dup #2/#3. | (CLI driver) |
+| `main.rs` | CLI entry point + every subcommand handler (argument parsing → library calls). **Oversized (~4.9k lines)** — see dup #2/#3. | (CLI driver) |
 | `lib.rs` | Module declarations + public API re-exports. | — |
 | `conductor.rs` | Drives one task: agents → gate → worktree land. | `Conductor`, `Decision`, `RunOutcome` |
 | `crew.rs` | Crew config model (pipeline, gate, roles, agents, test). | `CrewConfig`, `GatePolicy`, `RoleConfig`, `AgentConfig`, `TestConfig` |
@@ -103,10 +103,8 @@ this file — do not re-implement it elsewhere. See [Known duplication](#known-d
 | `docs/decisions/ADR-001-control-plane-boundary.md` | ADR: control-plane boundary. |
 | `docs/plans/*.md` | Phased implementation plans (phase1 → stage2 federation, dated). |
 | `docs/specs/*.md` | Feature specs (MCP design, firewalls/test-gate, OSS onboarding, two-phase tests, live supervision). |
-| `docs/RUNBOOK-*.md` | Operator runbooks (live MCP crew, single-machine team CLI). |
+| `docs/RUNBOOK-*.md` | Operator runbooks (live MCP crew, single-machine team CLI, Phase 1/2 manual validation). |
 | `docs/FLEET-SSH-METHOD.md` | Fleet SSH method notes. |
-
-> Untracked (working notes, not in git): `docs/RUNBOOK-phase1-phase2-manual-testing.md`.
 
 ## `scripts/` — PowerShell ops/verify
 | File | What |
