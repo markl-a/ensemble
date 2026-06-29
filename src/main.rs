@@ -4633,10 +4633,16 @@ node = "http://m2:7878"
             "opencode",
         ]))
         .unwrap();
-        let plan_approve =
-            build_member_launch_plan(ensemble::mcp_install::ClientKind::Opencode, parsed_approve, &env)
-                .unwrap();
-        assert_eq!(build_member_vendor_argv(&plan_approve), vec!["--dangerously-skip-permissions".to_string()]);
+        let plan_approve = build_member_launch_plan(
+            ensemble::mcp_install::ClientKind::Opencode,
+            parsed_approve,
+            &env,
+        )
+        .unwrap();
+        assert_eq!(
+            build_member_vendor_argv(&plan_approve),
+            vec!["--dangerously-skip-permissions".to_string()]
+        );
 
         let parsed_deny = parse_member_launcher_args(&argv(&[
             "ensemble",
@@ -4645,9 +4651,12 @@ node = "http://m2:7878"
             "opencode",
         ]))
         .unwrap();
-        let err =
-            build_member_launch_plan(ensemble::mcp_install::ClientKind::Opencode, parsed_deny, &env)
-                .unwrap_err();
+        let err = build_member_launch_plan(
+            ensemble::mcp_install::ClientKind::Opencode,
+            parsed_deny,
+            &env,
+        )
+        .unwrap_err();
         assert!(err.contains("opencode"));
         assert!(err.contains("--confirm-policy deny"));
     }

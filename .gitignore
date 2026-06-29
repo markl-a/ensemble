@@ -8,3 +8,4 @@ Cargo.lock
 /.ensemble/
 *.blackboard.jsonl
 phase2-fleet.local.json
+phase2-fleet.local.json.*
