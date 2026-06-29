@@ -23,15 +23,7 @@ static NODE_SEQ: AtomicU64 = AtomicU64::new(0);
 /// Make a ref/id safe to embed in a filesystem path (a branch like `dispatch/codex-0` contains `/`,
 /// which is a path separator). Non `[A-Za-z0-9_-]` → `-`.
 fn sanitize_ref(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect()
+    crate::util::sanitize_component(s, false)
 }
 
 /// A file removed on drop — so a staged bundle never leaks, even on an early `?` return.

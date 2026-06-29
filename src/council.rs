@@ -68,11 +68,7 @@ pub fn short_host(url: &str) -> String {
         _ => s,
     };
     // an IPv4 (every dotted segment numeric) is kept whole; a DNS name → its first label
-    let is_ipv4 = host.contains('.')
-        && host
-            .split('.')
-            .all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_digit()));
-    if is_ipv4 {
+    if crate::util::is_ipv4_literal(host) {
         host.to_string()
     } else {
         host.split('.').next().unwrap_or(host).to_string()

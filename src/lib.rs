@@ -29,6 +29,7 @@ pub mod supervise;
 pub mod supervisor;
 pub mod team;
 pub mod test_gate;
+pub mod util;
 pub mod verdict;
 pub mod wire;
 pub mod worktree;
@@ -45,6 +46,7 @@ pub use controlled::{
     control_script, pty_program_for_vendor, run_controlled_pty, ControlledPtyConfig,
 };
 pub use council::{council_targets, render_council, short_host, CouncilTarget};
+pub use util::is_ipv4_literal;
 pub use crew::{
     AgentConfig, CrewConfig, CrewError, CrewInspection, CrewRoleInspection, GatePolicy, OnFlake,
     RoleConfig, TestConfig,

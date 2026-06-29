@@ -147,12 +147,7 @@ fn count_messages(f: &mut std::fs::File) -> std::io::Result<usize> {
 
 /// Excerpt `s` to at most `max` chars (char-boundary safe), appending `…` when truncated.
 fn excerpt(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let cut: String = s.chars().take(max).collect();
-        format!("{cut}…")
-    }
+    crate::util::excerpt(s, max)
 }
 
 #[cfg(test)]
