@@ -78,13 +78,19 @@ mod tests {
         // never drifting across Rust toolchain upgrades (else a drained batch silently re-runs).
         assert_eq!(task_id("hello"), "a430d84680aabd0b");
         assert_eq!(task_id("world"), "4f59ff5e730c8af3");
-        assert_eq!(task_id(""), "cbf29ce484222325", "empty input = the FNV offset basis");
+        assert_eq!(
+            task_id(""),
+            "cbf29ce484222325",
+            "empty input = the FNV offset basis"
+        );
         // Deterministic + distinct.
         assert_eq!(task_id("hello"), task_id("hello"));
         assert_ne!(task_id("hello"), task_id("world"));
         // Always 16 lowercase hex chars (zero-padded).
         let id = task_id("deploy the thing");
         assert_eq!(id.len(), 16);
-        assert!(id.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(id
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     }
 }

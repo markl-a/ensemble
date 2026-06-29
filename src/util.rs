@@ -57,7 +57,10 @@ mod tests {
 
     #[test]
     fn sanitize_maps_unsafe_chars_to_dash() {
-        assert_eq!(sanitize_component("dispatch/codex-0", false), "dispatch-codex-0");
+        assert_eq!(
+            sanitize_component("dispatch/codex-0", false),
+            "dispatch-codex-0"
+        );
         assert_eq!(sanitize_component("a b.c", false), "a-b-c");
         // dots kept only when allowed
         assert_eq!(sanitize_component("a.b", true), "a.b");

@@ -46,7 +46,6 @@ pub use controlled::{
     control_script, pty_program_for_vendor, run_controlled_pty, ControlledPtyConfig,
 };
 pub use council::{council_targets, render_council, short_host, CouncilTarget};
-pub use util::is_ipv4_literal;
 pub use crew::{
     AgentConfig, CrewConfig, CrewError, CrewInspection, CrewRoleInspection, GatePolicy, OnFlake,
     RoleConfig, TestConfig,
@@ -88,6 +87,7 @@ pub use team::{
     TeamLedgerCounts, TeamObserver, TeamSession, TeamStatus,
 };
 pub use test_gate::{run_tests, TestOutcome};
+pub use util::is_ipv4_literal;
 pub use verdict::{parse_verdict, Verdict};
 pub use wire::{RunRequest, RunResponse};
 pub use worktree::{ensure_kept_worktree, KeptWorktree, Worktree};
