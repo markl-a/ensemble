@@ -1,9 +1,12 @@
-//! A generic append-only NDJSON feed: one JSON object per line, multi-process safe. Generalizes the
-//! locking discipline proven in `board.rs` (an `fs2` exclusive lock serializes appends, a shared lock
-//! guards reads, a torn trailing line is repaired before the next append, and bad lines are skipped)
-//! over ARBITRARY JSON lines — the caller serde-encodes/decodes its own record type. Backs the
-//! live-supervision feeds (.ensemble/stream/<member>.ndjson, control/<member>.ndjson). NOTE: mirrors
-//! board.rs:115-141 deliberately; board.rs is left untouched (it could later move onto this primitive).
+//! A generic append-only NDJSON feed: one JSON object per line, multi-process safe. Backs the
+//! live-supervision feeds (.ensemble/stream/<member>.ndjson, control/<member>.ndjson).
+//!
+//! This module is the SINGLE OWNER of the append-only file discipline (an `fs2` exclusive lock
+//! serializes appends, a shared lock guards reads, a torn trailing line is repaired before the next
+//! append, and the lossless cursor is the line count read back while the lock is still held). That
+//! discipline is exposed as `append_line_locked` / `read_lines_locked`, each taking the caller's own
+//! per-line validity predicate. `Feed` is the JSON-value flavor used here; `board::FileBoard` is the
+//! `Message` flavor — both delegate to these helpers, so the locking code lives in exactly one place.
 
 use fs2::FileExt;
 use serde_json::Value;
@@ -46,43 +49,23 @@ impl Feed {
                 "ndjson append: line is not valid JSON",
             ));
         }
-        if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
         let mut buf = trimmed.to_string();
         buf.push('\n');
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .append(true)
-            .open(&self.path)?;
-        f.lock_exclusive()?;
-        let r = append_terminated(&mut f, buf.as_bytes()).and_then(|()| count_valid(&mut f));
-        let _ = f.unlock();
-        r
+        append_line_locked(&self.path, buf.as_bytes(), |l| {
+            serde_json::from_slice::<Value>(l).is_ok()
+        })
     }
 
     /// All valid JSON lines at index ≥ `n`, in append order, under a SHARED lock (so a concurrent
     /// append can't expose a half-written line). Torn/non-JSON lines are skipped individually. Empty if
     /// the feed doesn't exist yet.
     pub fn read_since(&self, n: usize) -> std::io::Result<Vec<String>> {
-        let mut f = match std::fs::File::open(&self.path) {
-            Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(e),
-        };
-        f.lock_shared()?;
-        let mut bytes = Vec::new();
-        let read = f.read_to_end(&mut bytes);
-        let _ = f.unlock();
-        read?;
-        let lines: Vec<String> = bytes
-            .split(|&b| b == b'\n')
-            .filter(|l| !l.is_empty())
+        Ok(read_lines_locked(&self.path)?
+            .into_iter()
             .filter(|l| serde_json::from_slice::<Value>(l).is_ok())
-            .map(|l| String::from_utf8_lossy(l).into_owned())
-            .collect();
-        Ok(lines.into_iter().skip(n).collect())
+            .map(|l| String::from_utf8_lossy(&l).into_owned())
+            .skip(n)
+            .collect())
     }
 
     /// Total valid-line count — the cursor a poller advances to.
@@ -95,9 +78,56 @@ impl Feed {
     }
 }
 
+/// Append a single record's `line` bytes to the NDJSON file at `path` under an EXCLUSIVE advisory
+/// lock (so concurrent appends from any process serialize), creating the parent dir if needed, and
+/// return the feed CURSOR — the count of existing lines for which `valid` is true — read back while
+/// the lock is STILL HELD, so polling `read_lines_locked` from that cursor never skips a concurrently
+/// appended line. A torn trailing line is repaired first (see `append_terminated`). The caller owns
+/// the per-record predicate (`Value` for `Feed`, `Message` for `FileBoard`) and must pass exactly one
+/// record with no interior newline. This is the single home for the append/lock/cursor discipline.
+pub(crate) fn append_line_locked<F: Fn(&[u8]) -> bool>(
+    path: &Path,
+    line: &[u8],
+    valid: F,
+) -> std::io::Result<usize> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(path)?;
+    f.lock_exclusive()?; // blocks until no other writer holds it; released on unlock/close
+    let r = append_terminated(&mut f, line).and_then(|()| count_lines(&mut f, &valid));
+    let _ = f.unlock();
+    r
+}
+
+/// Read every non-empty line of the NDJSON file at `path` under a SHARED lock (so a concurrent append
+/// can't expose a half-written line), returning each line's raw bytes in append order. The caller
+/// parses/filters and applies its own `skip(cursor)`. Empty if the file doesn't exist yet.
+pub(crate) fn read_lines_locked(path: &Path) -> std::io::Result<Vec<Vec<u8>>> {
+    let mut f = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    f.lock_shared()?;
+    let mut bytes = Vec::new();
+    let read = f.read_to_end(&mut bytes);
+    let _ = f.unlock();
+    read?;
+    Ok(bytes
+        .split(|&b| b == b'\n')
+        .filter(|l| !l.is_empty())
+        .map(|l| l.to_vec())
+        .collect())
+}
+
 /// Append `line` to `f` (held under an exclusive lock, opened read+append), repairing a torn tail
 /// first: if the file is non-empty and does NOT end in `\n`, terminate the partial line before
-/// appending so O_APPEND can't weld our record onto it. (Mirrors board.rs::append_terminated.)
+/// appending so O_APPEND can't weld our record onto it.
 fn append_terminated(f: &mut std::fs::File, line: &[u8]) -> std::io::Result<()> {
     let len = f.metadata()?.len();
     if len > 0 {
@@ -111,17 +141,17 @@ fn append_terminated(f: &mut std::fs::File, line: &[u8]) -> std::io::Result<()> 
     f.write_all(line)
 }
 
-/// Count valid JSON lines in `f` (held under the exclusive lock), using the SAME non-empty + JSON-
-/// parseable filter as `read_since`, so the count equals the cursor a reader polls from. Seeks to the
-/// start first (the caller left the position at EOF after appending).
-fn count_valid(f: &mut std::fs::File) -> std::io::Result<usize> {
+/// Count lines in `f` (held under the exclusive lock) for which `valid` is true, using the SAME
+/// non-empty filter as `read_lines_locked` so the count equals the cursor a reader polls from. Seeks
+/// to the start first (the caller left the position at EOF after appending).
+fn count_lines<F: Fn(&[u8]) -> bool>(f: &mut std::fs::File, valid: &F) -> std::io::Result<usize> {
     f.seek(SeekFrom::Start(0))?;
     let mut bytes = Vec::new();
     f.read_to_end(&mut bytes)?;
     Ok(bytes
         .split(|&b| b == b'\n')
         .filter(|l| !l.is_empty())
-        .filter(|l| serde_json::from_slice::<Value>(l).is_ok())
+        .filter(|l| valid(l))
         .count())
 }
 

@@ -12,8 +12,6 @@
 //! take a SHARED lock so they never observe a half-written line.
 
 use crate::blackboard::Message;
-use fs2::FileExt;
-use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 /// Bound a posted body so the board stays readable (hygiene). Excerpted to this many chars.
@@ -58,9 +56,6 @@ impl FileBoard {
     /// message landed — delivery is at-least-once, so a caller that retries on error may double-post;
     /// reporting the failure is the safer default than returning a possibly-wrong cursor.
     pub fn post(&self, from: &str, kind: &str, body: &str) -> std::io::Result<usize> {
-        if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
         let msg = Message {
             from: from.to_string(),
             kind: excerpt(kind, MAX_KIND),
@@ -68,15 +63,11 @@ impl FileBoard {
         };
         let mut line = serde_json::to_string(&msg).map_err(std::io::Error::other)?;
         line.push('\n');
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .append(true)
-            .open(&self.path)?;
-        f.lock_exclusive()?; // blocks until no other writer holds it; released on unlock/close
-        let r = append_terminated(&mut f, line.as_bytes()).and_then(|()| count_messages(&mut f));
-        let _ = f.unlock();
-        r
+        // Delegate the append/lock/torn-tail/cursor discipline to `ndjson`; the board's record
+        // predicate is "parses as a Message", keeping the cursor consistent with `read_since`.
+        crate::ndjson::append_line_locked(&self.path, line.as_bytes(), |l| {
+            serde_json::from_slice::<Message>(l).is_ok()
+        })
     }
 
     /// All messages at index ≥ `n`, in post order, taken under a SHARED lock (so a concurrent append
@@ -84,22 +75,11 @@ impl FileBoard {
     /// malformed OR non-UTF-8 line is skipped INDIVIDUALLY — it never stops the scan or hides later
     /// messages. Empty if the board doesn't exist yet.
     pub fn read_since(&self, n: usize) -> std::io::Result<Vec<Message>> {
-        let mut f = match std::fs::File::open(&self.path) {
-            Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(e) => return Err(e),
-        };
-        f.lock_shared()?;
-        let mut bytes = Vec::new();
-        let read = f.read_to_end(&mut bytes);
-        let _ = f.unlock();
-        read?;
-        let msgs: Vec<Message> = bytes
-            .split(|&b| b == b'\n')
-            .filter(|l| !l.is_empty())
-            .filter_map(|l| serde_json::from_slice::<Message>(l).ok())
-            .collect();
-        Ok(msgs.into_iter().skip(n).collect())
+        Ok(crate::ndjson::read_lines_locked(&self.path)?
+            .into_iter()
+            .filter_map(|l| serde_json::from_slice::<Message>(&l).ok())
+            .skip(n)
+            .collect())
     }
 
     /// Total message count — the cursor a poller advances to.
@@ -112,39 +92,6 @@ impl FileBoard {
     }
 }
 
-/// Append `line` to `f` (held under an exclusive lock, opened read+append). REPAIRS a torn tail
-/// first: if the file is non-empty and does NOT end in `\n` (a previous writer crashed mid-append, or
-/// a partial write), terminate that partial line with a `\n` before appending — otherwise O_APPEND
-/// would weld our new message onto the partial bytes, making ONE malformed line that a reader skips,
-/// swallowing this post. The partial line stays its own (skipped) line; our message lands clean.
-fn append_terminated(f: &mut std::fs::File, line: &[u8]) -> std::io::Result<()> {
-    let len = f.metadata()?.len();
-    if len > 0 {
-        f.seek(SeekFrom::Start(len - 1))?;
-        let mut last = [0u8; 1];
-        f.read_exact(&mut last)?;
-        if last[0] != b'\n' {
-            f.write_all(b"\n")?; // O_APPEND → lands at EOF, closing the torn line
-        }
-    }
-    f.write_all(line)
-}
-
-/// Count the messages currently in `f` (held under the exclusive lock by the caller), using the SAME
-/// non-empty + parseable filter as `read_since` so the count equals the index one past the last
-/// message — i.e. a cursor a reader can poll from. Seeks to the start first (the caller left the file
-/// position at EOF after appending), then reads the whole file.
-fn count_messages(f: &mut std::fs::File) -> std::io::Result<usize> {
-    f.seek(SeekFrom::Start(0))?;
-    let mut bytes = Vec::new();
-    f.read_to_end(&mut bytes)?;
-    Ok(bytes
-        .split(|&b| b == b'\n')
-        .filter(|l| !l.is_empty())
-        .filter(|l| serde_json::from_slice::<Message>(l).is_ok())
-        .count())
-}
-
 /// Excerpt `s` to at most `max` chars (char-boundary safe), appending `…` when truncated.
 fn excerpt(s: &str, max: usize) -> String {
     crate::util::excerpt(s, max)
@@ -153,6 +100,7 @@ fn excerpt(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn post_then_read_roundtrips_with_a_cursor() {
