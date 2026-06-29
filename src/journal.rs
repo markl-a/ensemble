@@ -54,14 +54,7 @@ pub fn render(msgs: &[Message], outcome: &str, detail: &str, rounds: u32) -> Str
 /// (The internal caller `Worktree::slug()` is already sanitized; this guards the public surface.)
 /// Note: this does NOT truncate — truncating could chop the seq suffix and reintroduce collisions.
 pub(crate) fn sanitize_slug(slug: &str) -> String {
-    let cleaned: String = slug
-        .chars()
-        .map(|c| match c {
-            c if c.is_ascii_alphanumeric() => c,
-            '-' | '_' | '.' => c,
-            _ => '-',
-        })
-        .collect();
+    let cleaned = crate::util::sanitize_component(slug, true);
     // strip leading/trailing dots so "", ".", ".." can never name a traversal/hidden entry
     let trimmed = cleaned.trim_matches('.');
     if trimmed.is_empty() {

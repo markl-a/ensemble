@@ -367,16 +367,7 @@ fn parse_worktrees(porcelain: &str) -> Vec<WtEntry> {
 
 /// Make a task id safe for a branch name + a directory name.
 fn sanitize(s: &str) -> String {
-    let mut out: String = s
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
+    let mut out = crate::util::sanitize_component(s, false);
     out.truncate(48);
     if out.is_empty() {
         out.push_str("task");

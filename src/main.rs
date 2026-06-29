@@ -1195,11 +1195,7 @@ fn normalized_control_host(raw: &str) -> Option<String> {
         return Some(raw.to_string());
     }
     let host = ensemble::short_host(raw);
-    let is_ipv4 = host.contains('.')
-        && host
-            .split('.')
-            .all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_digit()));
-    if is_ipv4 || host.starts_with('[') {
+    if ensemble::is_ipv4_literal(&host) || host.starts_with('[') {
         return Some(host.to_ascii_lowercase());
     }
     let short = ensemble::default_member_name("probe", Some(&host));

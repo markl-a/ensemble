@@ -54,13 +54,7 @@ pub fn run_tests(worktree: &Path, command: &str) -> TestOutcome {
 
 /// Keep the LAST `max` chars (test failures/tracebacks are at the end of the output).
 fn tail(s: &str, max: usize) -> String {
-    let n = s.chars().count();
-    if n <= max {
-        s.to_string()
-    } else {
-        let skip = n - max;
-        format!("…{}", s.chars().skip(skip).collect::<String>())
-    }
+    crate::util::tail(s, max)
 }
 
 #[cfg(test)]
