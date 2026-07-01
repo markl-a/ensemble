@@ -17,23 +17,36 @@ pub fn parse_verdict(text: &str) -> Verdict {
     let mut result: Option<Verdict> = None;
     for line in text.lines() {
         let low = line.to_ascii_lowercase();
-        if !low.contains("verdict") {
+        let Some(verdict_idx) = low.find("verdict") else {
             continue;
-        }
-        if low.contains("lgtm") || low.contains("approve") {
-            result = Some(Verdict::Approve);
-        } else if let Some(idx) = low.find("changes") {
-            // message after "changes" (+ an optional ':'); byte indices match since lowercasing
-            // ASCII preserves positions.
-            let after = line[idx + "changes".len()..]
-                .trim_start_matches(|c: char| c == ':' || c.is_whitespace());
-            result = Some(Verdict::Changes(after.to_string()));
-        } else {
-            result = Some(Verdict::Changes(format!(
+        };
+        // Classify by whichever token appears FIRST after "verdict" — not by an unordered
+        // `contains` check — so a changes-request whose message happens to mention
+        // "approve"/"lgtm" in prose (e.g. "CHANGES: approve once you fix X") is never
+        // misread as an approval.
+        let after_start = verdict_idx + "verdict".len();
+        let after = &low[after_start..];
+        let changes_pos = after.find("changes");
+        let approve_pos = [after.find("lgtm"), after.find("approve")]
+            .into_iter()
+            .flatten()
+            .min();
+
+        result = Some(match (changes_pos, approve_pos) {
+            (Some(c), Some(a)) if a < c => Verdict::Approve,
+            (Some(c), _) => {
+                // byte indices match since lowercasing ASCII preserves positions.
+                let idx = after_start + c;
+                let msg = line[idx + "changes".len()..]
+                    .trim_start_matches(|ch: char| ch == ':' || ch.is_whitespace());
+                Verdict::Changes(msg.to_string())
+            }
+            (None, Some(_)) => Verdict::Approve,
+            (None, None) => Verdict::Changes(format!(
                 "unrecognized verdict line: {}",
                 line.trim()
-            )));
-        }
+            )),
+        });
     }
     result.unwrap_or_else(|| {
         Verdict::Changes("no explicit VERDICT line; treating as changes-requested".to_string())
@@ -56,6 +69,16 @@ mod tests {
         assert_eq!(
             parse_verdict("I think it is fine"),
             Verdict::Changes("no explicit VERDICT line; treating as changes-requested".to_string())
+        );
+    }
+
+    #[test]
+    fn changes_line_mentioning_approve_is_not_misclassified() {
+        // "changes" appears before "approve" after the VERDICT marker ⇒ still Changes,
+        // even though the message text itself contains the word "approve".
+        assert_eq!(
+            parse_verdict("VERDICT: CHANGES: approve once you fix X"),
+            Verdict::Changes("approve once you fix X".to_string())
         );
     }
 }
