@@ -730,6 +730,66 @@ mod tests {
     }
 
     #[test]
+    fn parse_multi_worktree_yields_correct_path_and_branch_per_block() {
+        let porcelain = "worktree /main/repo
+branch refs/heads/main
+
+worktree /main/repo/.ensemble/worktrees/codex-feat-0
+branch refs/heads/ensemble/codex-feat-0
+
+worktree /main/repo/.ensemble/worktrees/agy-fix-1
+branch refs/heads/ensemble/agy-fix-1
+";
+        let entries = parse_worktrees(porcelain);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].path, "/main/repo");
+        assert_eq!(entries[0].branch.as_deref(), Some("refs/heads/main"));
+        assert_eq!(entries[1].path, "/main/repo/.ensemble/worktrees/codex-feat-0");
+        assert_eq!(entries[1].branch.as_deref(), Some("refs/heads/ensemble/codex-feat-0"));
+        assert_eq!(entries[2].path, "/main/repo/.ensemble/worktrees/agy-fix-1");
+        assert_eq!(entries[2].branch.as_deref(), Some("refs/heads/ensemble/agy-fix-1"));
+        assert!(!entries[0].prunable);
+        assert!(!entries[1].prunable);
+        assert!(!entries[2].prunable);
+    }
+
+    #[test]
+    fn parse_no_branch_line_yields_none() {
+        let porcelain = "worktree /detached/repo
+
+worktree /main/repo
+branch refs/heads/main
+";
+        let entries = parse_worktrees(porcelain);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].path, "/detached/repo");
+        assert_eq!(entries[0].branch, None);
+        assert_eq!(entries[1].path, "/main/repo");
+        assert_eq!(entries[1].branch.as_deref(), Some("refs/heads/main"));
+    }
+
+    #[test]
+    fn parse_prunable_sets_flag_only_on_current_entry() {
+        let porcelain = "worktree /main/repo
+branch refs/heads/main
+
+worktree /main/repo/.ensemble/worktrees/gone-0
+prunable gitdir file points to non-existent location
+
+worktree /main/repo/.ensemble/worktrees/ok-1
+branch refs/heads/ensemble/ok-1
+";
+        let entries = parse_worktrees(porcelain);
+        assert_eq!(entries.len(), 3);
+        assert!(!entries[0].prunable, "main worktree is not prunable");
+        assert!(entries[1].prunable, "gone worktree is prunable");
+        assert!(!entries[2].prunable, "ok worktree is not prunable");
+        assert_eq!(entries[0].path, "/main/repo");
+        assert_eq!(entries[1].path, "/main/repo/.ensemble/worktrees/gone-0");
+        assert_eq!(entries[2].path, "/main/repo/.ensemble/worktrees/ok-1");
+    }
+
+    #[test]
     fn concurrent_same_member_task_calls_create_exactly_one_worktree() {
         // Regression (codex gate, slice 3a): without the per-repo lock, concurrent same-(member,task)
         // requests raced the registered/exists checks → double-create or a spurious "stale dir" error.
