@@ -62,7 +62,7 @@ mod tests {
                 vec!["codex".to_string(), "claude".to_string()],
             ),
             (
-                "http://dev-host:7878".to_string(),
+                "http://node-c:7878".to_string(),
                 vec!["agy".to_string(), "opencode".to_string()],
             ),
         ];
@@ -73,7 +73,7 @@ mod tests {
             "got:\n{out}"
         );
         assert!(
-            out.contains("http://dev-host:7878 → agy, opencode"),
+            out.contains("http://node-c:7878 → agy, opencode"),
             "got:\n{out}"
         );
     }
