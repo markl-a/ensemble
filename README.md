@@ -207,7 +207,26 @@ Run `ensemble help` for the full, authoritative usage.
 ### MCP server
 
 `ensemble mcp` runs a stdio MCP server that makes a **live** vendor CLI a first-class crew
-member — it exposes the mesh, blackboard, work queue, worktree, merge, and run as MCP tools.
+member. It implements these MCP tools:
+
+- `ensemble_mesh` — List local AI CLIs and the agents available from tailnet peers.
+- `ensemble_board_read` — Read the shared crew blackboard from a cursor.
+- `ensemble_board_post` — Post a message to the shared crew blackboard as this member.
+- `ensemble_team_status` — Read board, ledger, stream, and control state for a repo-local team.
+- `ensemble_team_say` — Post a message to the repo-local team board as this member.
+- `ensemble_team_inbox` — Read a bounded page of repo-local team messages from a cursor.
+- `ensemble_watch` — Read bounded live-run stream events from a cursor.
+- `ensemble_steer` — Append a corrective prompt to a live run's control feed.
+- `ensemble_abort` — Request a clean or hard abort through a live run's control feed.
+- `ensemble_supervise` — Ask a configured supervisor to inspect live-run evidence and recommend action; available only in supervisor mode.
+- `ensemble_worktree` — Create or reattach this member's persistent isolated task worktree.
+- `ensemble_enqueue` — Add an idempotent task to the durable shared work queue.
+- `ensemble_claim` — Atomically claim the oldest available task as this member.
+- `ensemble_merge` — Land a member branch with serialized, conflict-safe merge handling.
+- `ensemble_complete` — Record terminal success for a task claimed by this member.
+- `ensemble_fail` — Record terminal failure for a task claimed by this member.
+- `ensemble_run` — Delegate a task to a governed headless crew sub-run; available only in runner mode.
+
 `ensemble mcp install --client <claude|codex|opencode>` registers it into that CLI's config in
 one step.
 
