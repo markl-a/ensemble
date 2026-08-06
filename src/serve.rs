@@ -92,7 +92,15 @@ fn serve_loop_with_token(
         } else if method == tiny_http::Method::Post && url == "/run" {
             let mut body = String::new();
             let _ = req.as_reader().read_to_string(&mut body);
-            let resp = handle_run(&local, &body);
+            let supplied = request_header(&req, CONTROL_TOKEN_HEADER);
+            // `/run` spawns an agent CLI (an RCE-shaped side effect), so gate it with the same
+            // shared token as `/control` mutations. With no token configured we keep the open
+            // single-tenant behavior but warn loudly (once) that the port is unauthenticated.
+            let resp = if run_authorized(token.as_deref(), supplied.as_deref()) {
+                handle_run(&local, &body)
+            } else {
+                RunResponse::err("?", "Unauthorized", "run requires token")
+            };
             let _ = req.respond(json_response(
                 serde_json::to_string(&resp).unwrap_or_default(),
             ));
@@ -246,6 +254,31 @@ fn control_authorized(required: Option<&str>, supplied: Option<&str>) -> bool {
         Some(required) => supplied == Some(required),
         None => true,
     }
+}
+
+/// Gate `POST /run` (which spawns an agent CLI). When a token is configured the request MUST present
+/// the matching `x-ensemble-token` header — mirroring the `/control` mutation gate. When NO token is
+/// configured, preserve the open single-tenant behavior but warn loudly (once) that the agent-host
+/// port is unauthenticated and reachable /run callers can execute CLIs on this node.
+fn run_authorized(required: Option<&str>, supplied: Option<&str>) -> bool {
+    match required {
+        Some(required) => supplied == Some(required),
+        None => {
+            warn_run_unauthenticated();
+            true
+        }
+    }
+}
+
+fn warn_run_unauthenticated() {
+    static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+    WARN_ONCE.call_once(|| {
+        eprintln!(
+            "ensemble: WARNING — POST /run is UNAUTHENTICATED (no ENSEMBLE_TOKEN configured); \
+             anyone who can reach this port can execute agent CLIs on this node. \
+             Set ENSEMBLE_TOKEN to require a shared token."
+        );
+    });
 }
 
 fn resolve_control_repo(repo: &str) -> Result<PathBuf, String> {
@@ -682,6 +715,52 @@ mod tests {
             .unwrap();
         assert_eq!(stream.len(), 1);
         assert!(stream[0].contains("done"));
+        h.join().unwrap();
+    }
+
+    #[test]
+    fn run_route_rejects_unauthenticated_when_token_configured() {
+        // `/run` spawns an agent CLI, so a configured token must be presented. Post directly so the
+        // gate itself is exercised (not just a client that always attaches the header).
+        let mut local: HashMap<String, Box<dyn Adapter>> = HashMap::new();
+        local.insert(
+            "codex".into(),
+            Box::new(MockAdapter::new("codex", vec![Ok("did the work".into())])),
+        );
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/run", server.server_addr());
+        let h =
+            std::thread::spawn(move || serve_until_n_with_token(server, local, 2, Some("secret")));
+
+        let body = serde_json::to_string(&RunRequest {
+            agent: "codex".into(),
+            prompt: "hi".into(),
+            repo: None,
+        })
+        .unwrap();
+
+        // No token header → rejected as Unauthorized (the CLI is NOT spawned).
+        let raw = ureq::post(&url)
+            .set("content-type", "application/json")
+            .send_string(&body)
+            .unwrap()
+            .into_string()
+            .unwrap();
+        let rr: RunResponse = serde_json::from_str(&raw).unwrap();
+        assert!(!rr.ok, "unauthenticated run must be rejected: {rr:?}");
+        assert_eq!(rr.error_kind.as_deref(), Some("Unauthorized"));
+
+        // Correct token → allowed, adapter runs.
+        let raw = ureq::post(&url)
+            .set("content-type", "application/json")
+            .set(CONTROL_TOKEN_HEADER, "secret")
+            .send_string(&body)
+            .unwrap()
+            .into_string()
+            .unwrap();
+        let rr: RunResponse = serde_json::from_str(&raw).unwrap();
+        assert!(rr.ok, "authorized run should succeed: {rr:?}");
+        assert_eq!(rr.text, "did the work");
         h.join().unwrap();
     }
 

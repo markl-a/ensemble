@@ -1258,6 +1258,12 @@ fn control_token_env() -> Option<String> {
     std::env::var("ENSEMBLE_TOKEN").ok()
 }
 
+/// The shared token to present on outbound `/run` dispatches, taken from the ambient `ENSEMBLE_TOKEN`
+/// (same secret that gates `/control`). `None` when unset → unauthenticated single-tenant dispatch.
+fn ambient_run_token() -> Option<String> {
+    control_token_env().and_then(normalize_control_token)
+}
+
 fn normalize_control_token(token: String) -> Option<String> {
     if token.chars().any(char::is_control) {
         return None;
@@ -2586,7 +2592,7 @@ fn council_run_one(
     cwd: &Path,
 ) -> (String, Result<String, String>) {
     let adapter: Box<dyn Adapter> = match &t.node {
-        Some(url) => Box::new(RemoteAdapter::new(&t.agent, url)),
+        Some(url) => Box::new(RemoteAdapter::new(&t.agent, url).with_token(ambient_run_token())),
         None => match t.agent.as_str() {
             "codex" => Box::new(ExecAdapter::codex()),
             "claude" => Box::new(ExecAdapter::claude()),
@@ -3022,9 +3028,15 @@ fn adapters_for(crew: &CrewConfig, discover: bool) -> HashMap<String, Box<dyn Ad
     for agent in &agents {
         let agent = agent.as_str();
         if let Some(node) = crew.node_for(agent) {
-            m.insert(agent.into(), Box::new(RemoteAdapter::new(agent, node))); // explicit wins
+            m.insert(
+                agent.into(),
+                Box::new(RemoteAdapter::new(agent, node).with_token(ambient_run_token())),
+            ); // explicit wins
         } else if let Some(node) = discovered.get(agent) {
-            m.insert(agent.into(), Box::new(RemoteAdapter::new(agent, node))); // auto-discovered
+            m.insert(
+                agent.into(),
+                Box::new(RemoteAdapter::new(agent, node).with_token(ambient_run_token())),
+            ); // auto-discovered
         } else {
             match agent {
                 "codex" => {
@@ -3074,11 +3086,17 @@ fn resolve_one(
         } else {
             format!("http://{node}:7878")
         };
-        return Some((Box::new(RemoteAdapter::new(name, &url)), url));
+        return Some((
+            Box::new(RemoteAdapter::new(name, &url).with_token(ambient_run_token())),
+            url,
+        ));
     }
     if discover {
         if let Some(url) = ensemble::discovery::discover_agent_hosts(7878).get(name) {
-            return Some((Box::new(RemoteAdapter::new(name, url)), url.clone()));
+            return Some((
+                Box::new(RemoteAdapter::new(name, url).with_token(ambient_run_token())),
+                url.clone(),
+            ));
         }
     }
     local_agent_adapter(name).map(|adapter| (adapter, "local".to_string()))

@@ -21,6 +21,7 @@ pub struct RemoteAdapter {
     name: String,
     base_url: String,
     timeout: Duration,
+    token: Option<String>,
 }
 
 impl RemoteAdapter {
@@ -29,6 +30,7 @@ impl RemoteAdapter {
             name: name.into(),
             base_url: base_url.trim_end_matches('/').into(),
             timeout: Duration::from_secs(300),
+            token: None,
         }
     }
     pub fn with_timeout(name: &str, base_url: &str, timeout: Duration) -> Self {
@@ -36,7 +38,14 @@ impl RemoteAdapter {
             name: name.into(),
             base_url: base_url.trim_end_matches('/').into(),
             timeout,
+            token: None,
         }
+    }
+    /// Attach the shared `x-ensemble-token` sent on every `/run` so a token-gated node accepts this
+    /// adapter's dispatches. `None` leaves requests unauthenticated (open single-tenant node).
+    pub fn with_token(mut self, token: Option<String>) -> Self {
+        self.token = token.filter(|t| !t.is_empty());
+        self
     }
 }
 
@@ -61,10 +70,13 @@ impl Adapter for RemoteAdapter {
         let body = serde_json::to_string(&req)
             .map_err(|e| AdapterError::Flaked(format!("encode: {e}")))?;
         let url = format!("{}/run", self.base_url);
-        let resp = ureq::post(&url)
+        let mut request = ureq::post(&url)
             .timeout(self.timeout)
-            .set("content-type", "application/json")
-            .send_string(&body);
+            .set("content-type", "application/json");
+        if let Some(token) = &self.token {
+            request = request.set("x-ensemble-token", token);
+        }
+        let resp = request.send_string(&body);
         match resp {
             Ok(r) => {
                 let s = read_response_body_limited(r.into_reader(), MAX_REMOTE_RESPONSE_BYTES)
