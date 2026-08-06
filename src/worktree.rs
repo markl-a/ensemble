@@ -735,10 +735,19 @@ branch refs/heads/ensemble/agy-fix-1
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].path, "/main/repo");
         assert_eq!(entries[0].branch.as_deref(), Some("refs/heads/main"));
-        assert_eq!(entries[1].path, "/main/repo/.ensemble/worktrees/codex-feat-0");
-        assert_eq!(entries[1].branch.as_deref(), Some("refs/heads/ensemble/codex-feat-0"));
+        assert_eq!(
+            entries[1].path,
+            "/main/repo/.ensemble/worktrees/codex-feat-0"
+        );
+        assert_eq!(
+            entries[1].branch.as_deref(),
+            Some("refs/heads/ensemble/codex-feat-0")
+        );
         assert_eq!(entries[2].path, "/main/repo/.ensemble/worktrees/agy-fix-1");
-        assert_eq!(entries[2].branch.as_deref(), Some("refs/heads/ensemble/agy-fix-1"));
+        assert_eq!(
+            entries[2].branch.as_deref(),
+            Some("refs/heads/ensemble/agy-fix-1")
+        );
         assert!(!entries[0].prunable);
         assert!(!entries[1].prunable);
         assert!(!entries[2].prunable);

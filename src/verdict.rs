@@ -42,10 +42,7 @@ pub fn parse_verdict(text: &str) -> Verdict {
                 Verdict::Changes(msg.to_string())
             }
             (None, Some(_)) => Verdict::Approve,
-            (None, None) => Verdict::Changes(format!(
-                "unrecognized verdict line: {}",
-                line.trim()
-            )),
+            (None, None) => Verdict::Changes(format!("unrecognized verdict line: {}", line.trim())),
         });
     }
     result.unwrap_or_else(|| {
