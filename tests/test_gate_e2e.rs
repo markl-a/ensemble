@@ -30,8 +30,8 @@ impl Adapter for Writer {
     }
 }
 
-/// Exit 0 iff ok.txt contains "PASS" — same contract on both shells (`findstr` exits 1 on no
-/// match and 2 on a missing file; `grep -q` exits 1 / 2 likewise).
+/// Exit 0 iff ok.txt contains "PASS" — same contract on both shells: any nonzero blocks the
+/// landing (`findstr` measured 1 on both no-match and missing file; `grep -q` exits 1 / 2).
 #[cfg(windows)]
 const GREP_PASS: &str = "findstr PASS ok.txt";
 #[cfg(not(windows))]
