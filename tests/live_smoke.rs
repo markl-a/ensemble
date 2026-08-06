@@ -10,7 +10,9 @@ fn codex_exec_adapter_answers() {
             assert_eq!(out.agent, "codex");
             assert!(out.text.to_uppercase().contains("PONG"));
         }
-        Err(AdapterError::NotInstalled(_)) => eprintln!("codex not installed — skipping assertion"),
+        Err(AdapterError::NotInstalled(_)) => {
+            panic!("codex CLI not installed - live smoke must not pass by absence")
+        }
         Err(e) => panic!("codex live smoke failed: {e}"),
     }
 }
@@ -25,7 +27,7 @@ fn claude_exec_adapter_answers() {
             assert!(out.text.to_uppercase().contains("PONG"));
         }
         Err(AdapterError::NotInstalled(_)) => {
-            eprintln!("claude not installed — skipping assertion")
+            panic!("claude CLI not installed - live smoke must not pass by absence")
         }
         Err(e) => panic!("claude live smoke failed: {e}"),
     }
@@ -41,7 +43,7 @@ fn opencode_exec_adapter_answers() {
             assert!(out.text.to_uppercase().contains("PONG"));
         }
         Err(AdapterError::NotInstalled(_)) => {
-            eprintln!("opencode not installed — skipping assertion")
+            panic!("opencode CLI not installed - live smoke must not pass by absence")
         }
         Err(e) => panic!("opencode live smoke failed: {e}"),
     }
@@ -56,7 +58,9 @@ fn agy_pty_adapter_answers() {
             assert_eq!(out.agent, "agy");
             assert!(out.text.to_uppercase().contains("PONG"));
         }
-        Err(AdapterError::NotInstalled(_)) => eprintln!("agy not installed — skipping assertion"),
+        Err(AdapterError::NotInstalled(_)) => {
+            panic!("agy CLI not installed - live smoke must not pass by absence")
+        }
         Err(e) => panic!("agy live smoke failed: {e}"),
     }
 }

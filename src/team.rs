@@ -90,6 +90,29 @@ pub fn member_file_stem(member: &str) -> String {
     crate::journal::sanitize_slug(member)
 }
 
+/// Reject a `--repo` that does not point at an existing git repository, so a
+/// mangled path (e.g. `D:Projectsensemble`) fails loudly instead of silently
+/// growing a stray `.ensemble` board directory. Worktrees keep `.git` as a
+/// file rather than a directory, so any `.git` entry counts.
+pub fn validate_repo_path(repo: &Path) -> Result<(), String> {
+    if !repo.exists() {
+        return Err(format!("--repo path does not exist: {}", repo.display()));
+    }
+    if !repo.is_dir() {
+        return Err(format!(
+            "--repo path is not a directory: {}",
+            repo.display()
+        ));
+    }
+    if !repo.join(".git").exists() {
+        return Err(format!(
+            "--repo path is not a git repository (no .git): {}",
+            repo.display()
+        ));
+    }
+    Ok(())
+}
+
 pub fn team_root(repo: &Path, team: &str) -> PathBuf {
     let team = default_team_name(Some(team));
     if team == DEFAULT_TEAM {
@@ -207,6 +230,37 @@ fn tame_client(client: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_repo_path_rejects_nonexistent_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("no-such-dir");
+        let err = validate_repo_path(&missing).unwrap_err();
+        assert!(err.contains("does not exist"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn validate_repo_path_rejects_directory_that_is_not_a_git_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = validate_repo_path(tmp.path()).unwrap_err();
+        assert!(
+            err.contains("not a git repository"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_repo_path_accepts_git_dir_and_worktree_git_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let normal = tmp.path().join("normal");
+        std::fs::create_dir_all(normal.join(".git")).unwrap();
+        assert_eq!(validate_repo_path(&normal), Ok(()));
+
+        let worktree = tmp.path().join("worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(worktree.join(".git"), "gitdir: ../elsewhere\n").unwrap();
+        assert_eq!(validate_repo_path(&worktree), Ok(()));
+    }
 
     #[test]
     fn default_team_is_default_and_uses_existing_ensemble_root() {
