@@ -8,10 +8,10 @@
 
 ## What is already proven (autonomously, no operator needed)
 
-- **169 hermetic unit/integration tests** green (`cargo test`), incl. the pure MCP `dispatch` for every tool.
+- **393 hermetic unit/integration tests** green (`cargo test` — 301 lib + 92 bin/integration; 4 `#[ignore]`d live smokes), incl. the pure MCP `dispatch` for every tool.
 - **An empirical end-to-end stdio smoke of the REAL `ensemble mcp` binary** (driven like an MCP client
   would, one JSON-RPC request per line, reading each response before the next) — 13/13 checks:
-  `initialize` handshake · `tools/list` advertises all 10 tools · `board_post`→`board_read` round-trip ·
+  `initialize` handshake · `tools/list` advertises all 17 tools · `board_post`→`board_read` round-trip ·
   `enqueue`→`claim`→`complete` work-queue · ownership-guarded `complete`/`fail` no-op on an unowned task ·
   `worktree` isolation under `--repo` · capability gating (`ensemble_run` advertised **iff** a `--crew`
   runner is wired; an unconfigured call → `-32603`).
@@ -45,7 +45,7 @@ ensemble mcp --repo <repo> --name <UNIQUE-member-name> [--crew <crew.toml>]
 ```
 
 `--name` is this member's identity for board posts + claims (server-set, never client-supplied → no
-impersonation). `--crew` is needed only if you want `ensemble_run` (Part 3); without it the other 9
+impersonation). `--crew` is needed only if you want `ensemble_run` (Part 3); without it the other 16
 tools work and `ensemble_run` is simply not advertised.
 
 **One-click (recommended) — `ensemble mcp install`** writes each CLI's MCP-server config for you, so you
@@ -145,7 +145,7 @@ Phase-1 step 4 is **proven** when, from real live CLIs, you have observed: (a) a
 ## Troubleshooting
 
 - `ensemble_run` returns `-32603 "not configured"` or isn't listed → launch `ensemble mcp` **with
-  `--crew <crew.toml>`** (a missing/unparseable crew.toml leaves the runner off; the other 9 tools still work).
+  `--crew <crew.toml>`** (a missing/unparseable crew.toml leaves the runner off; the other 16 tools still work).
 - Peers invisible in `ensemble mesh` → `tailscale status`; resolve the your VPN↔Tailscale conflict.
 - A claimed task stuck `claimed` → the member died before a terminal write; `ensemble ledger recover`
   requeues stale claims (or the member calls `ensemble_complete`/`ensemble_fail`).
