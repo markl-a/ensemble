@@ -237,10 +237,12 @@ one step.
 `ensemble` is currently in **v0.1.0 (Phase 1 & 2 Complete)**. 
 The single-machine role pipeline, PTY control plane, persistent SQLite ledger, and Tailscale multi-machine mesh have all been fully validated.
 
-### 📽️ Governed Landing (90-second Demo)
+### Governed Landing Demo
 
-![Governed Landing Demo Video Placeholder](docs/assets/governed_landing_demo.gif)
-*A 90-second demo showcasing Codex executing a task -> tests failing -> Codex fixing -> Claude reviewing and approving -> Git worktree merging to main.*
+A narrated demo GIF is not recorded yet; the repeatable manual pass is documented in
+[`docs/RUNBOOK-phase1-phase2-manual-testing.md`](docs/RUNBOOK-phase1-phase2-manual-testing.md).
+It covers the single-machine governed landing path, live `watch` / `steer` / `abort`, clean
+install/reinstall, and the Phase 2 five-machine fleet evidence checks.
 
 ## License
 
