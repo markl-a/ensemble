@@ -1,6 +1,6 @@
 //! Firewall A e2e: the conductor's test gate gates landing on a real (shell) test command.
-//! Uses `grep` so these run on the WSL/Linux test runner (the project's build target).
-#![cfg(unix)]
+//! The gate shells out via `sh -c` on Unix and `cmd /C` on Windows (see `test_gate::shell`),
+//! so the probe command is picked per-platform: `grep -q` vs `findstr`.
 
 use ensemble::*;
 use std::collections::HashMap;
@@ -29,6 +29,13 @@ impl Adapter for Writer {
         })
     }
 }
+
+/// Exit 0 iff ok.txt contains "PASS" — same contract on both shells (`findstr` exits 1 on no
+/// match and 2 on a missing file; `grep -q` exits 1 / 2 likewise).
+#[cfg(windows)]
+const GREP_PASS: &str = "findstr PASS ok.txt";
+#[cfg(not(windows))]
+const GREP_PASS: &str = "grep -q PASS ok.txt";
 
 fn crew_with_test(cmd: &str) -> CrewConfig {
     CrewConfig::from_toml(&format!(
@@ -74,7 +81,7 @@ fn writers(content: &str) -> HashMap<String, Box<dyn Adapter>> {
 fn green_tests_allow_a_landing() {
     // implementer writes ok.txt="PASS"; the test command greps it → exit 0 (GREEN)
     let cwd = tempfile::tempdir().unwrap();
-    let c = Conductor::new(crew_with_test("grep -q PASS ok.txt"), writers("PASS"));
+    let c = Conductor::new(crew_with_test(GREP_PASS), writers("PASS"));
     let out = c.run("do it", cwd.path());
     assert!(
         matches!(out.decision, Decision::Landed),
@@ -87,7 +94,7 @@ fn green_tests_allow_a_landing() {
 fn red_tests_never_land_and_escalate() {
     // implementer writes ok.txt="NOPE"; the test command greps for PASS → exit 1 every round
     let cwd = tempfile::tempdir().unwrap();
-    let c = Conductor::new(crew_with_test("grep -q PASS ok.txt"), writers("NOPE"));
+    let c = Conductor::new(crew_with_test(GREP_PASS), writers("NOPE"));
     let out = c.run("do it", cwd.path());
     match out.decision {
         Decision::Escalated(why) => {
