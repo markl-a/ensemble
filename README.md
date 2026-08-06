@@ -234,15 +234,22 @@ one step.
 
 ## Status & Production Readiness
 
-`ensemble` is currently in **v0.1.0 (Phase 1 & 2 Complete)**. 
-The single-machine role pipeline, PTY control plane, persistent SQLite ledger, and Tailscale multi-machine mesh have all been fully validated.
+`ensemble` is **v0.1.0** — a first release, not a mature tool.
+
+Exercised on real work: the single-machine role pipeline (multiple vendor CLIs implementing,
+reviewing, and landing through the quorum gate), the PTY control plane (`watch` / `steer` /
+`abort`), the persistent SQLite ledger, the repo-local team board, and the MCP server. Tailnet
+serve/discovery works between machines, but the five-machine fleet loop has not been run
+end-to-end — treat multi-machine operation as usable-but-unproven, and expect rough edges.
+
+Windows, macOS, and Linux are supported; CI runs the gates on Linux and Windows.
 
 ### Governed Landing Demo
 
 The repeatable manual pass is documented in
 [`docs/RUNBOOK-phase1-phase2-manual-testing.md`](docs/RUNBOOK-phase1-phase2-manual-testing.md).
 It covers the single-machine governed landing path, live `watch` / `steer` / `abort`, clean
-install/reinstall, and the Phase 2 five-machine fleet evidence checks.
+install/reinstall, and the multi-machine fleet evidence checks.
 
 ## License
 
