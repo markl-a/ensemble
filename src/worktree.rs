@@ -367,16 +367,7 @@ fn parse_worktrees(porcelain: &str) -> Vec<WtEntry> {
 
 /// Make a task id safe for a branch name + a directory name.
 fn sanitize(s: &str) -> String {
-    let mut out: String = s
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
+    let mut out = crate::util::sanitize_component(s, false);
     out.truncate(48);
     if out.is_empty() {
         out.push_str("task");
@@ -744,10 +735,19 @@ branch refs/heads/ensemble/agy-fix-1
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].path, "/main/repo");
         assert_eq!(entries[0].branch.as_deref(), Some("refs/heads/main"));
-        assert_eq!(entries[1].path, "/main/repo/.ensemble/worktrees/codex-feat-0");
-        assert_eq!(entries[1].branch.as_deref(), Some("refs/heads/ensemble/codex-feat-0"));
+        assert_eq!(
+            entries[1].path,
+            "/main/repo/.ensemble/worktrees/codex-feat-0"
+        );
+        assert_eq!(
+            entries[1].branch.as_deref(),
+            Some("refs/heads/ensemble/codex-feat-0")
+        );
         assert_eq!(entries[2].path, "/main/repo/.ensemble/worktrees/agy-fix-1");
-        assert_eq!(entries[2].branch.as_deref(), Some("refs/heads/ensemble/agy-fix-1"));
+        assert_eq!(
+            entries[2].branch.as_deref(),
+            Some("refs/heads/ensemble/agy-fix-1")
+        );
         assert!(!entries[0].prunable);
         assert!(!entries[1].prunable);
         assert!(!entries[2].prunable);

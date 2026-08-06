@@ -29,6 +29,7 @@ pub mod supervise;
 pub mod supervisor;
 pub mod team;
 pub mod test_gate;
+pub mod util;
 pub mod verdict;
 pub mod wire;
 pub mod worktree;
@@ -86,6 +87,7 @@ pub use team::{
     validate_repo_path, TeamInbox, TeamLedgerCounts, TeamObserver, TeamSession, TeamStatus,
 };
 pub use test_gate::{run_tests, TestOutcome};
+pub use util::is_ipv4_literal;
 pub use verdict::{parse_verdict, Verdict};
 pub use wire::{RunRequest, RunResponse};
 pub use worktree::{ensure_kept_worktree, KeptWorktree, Worktree};

@@ -258,8 +258,13 @@ mod tests {
     #[test]
     fn local_control_plane_roundtrips_team_board() {
         let tmp = tempfile::tempdir().unwrap();
-        let session =
-            crate::team::resolve_team_session(tmp.path(), Some("ops"), "codex", None, Some("node-a"));
+        let session = crate::team::resolve_team_session(
+            tmp.path(),
+            Some("ops"),
+            "codex",
+            None,
+            Some("node-a"),
+        );
         let cp = LocalControlPlane::new();
 
         let cursor = cp
@@ -277,8 +282,13 @@ mod tests {
     #[test]
     fn local_control_plane_reports_status_and_feeds() {
         let tmp = tempfile::tempdir().unwrap();
-        let session =
-            crate::team::resolve_team_session(tmp.path(), None, "codex", Some("codex@node-a"), None);
+        let session = crate::team::resolve_team_session(
+            tmp.path(),
+            None,
+            "codex",
+            Some("codex@node-a"),
+            None,
+        );
         let cp = LocalControlPlane::new();
         cp.post_team_message(&session, "operator", "note", "online")
             .unwrap();

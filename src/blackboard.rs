@@ -54,13 +54,7 @@ impl Blackboard {
 }
 
 fn excerpt(s: &str, max: usize) -> String {
-    let s = s.replace('\n', " ");
-    if s.chars().count() <= max {
-        s
-    } else {
-        let cut: String = s.chars().take(max).collect();
-        format!("{cut}…")
-    }
+    crate::util::excerpt(&s.replace('\n', " "), max)
 }
 
 #[cfg(test)]

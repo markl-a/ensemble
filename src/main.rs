@@ -1195,11 +1195,7 @@ fn normalized_control_host(raw: &str) -> Option<String> {
         return Some(raw.to_string());
     }
     let host = ensemble::short_host(raw);
-    let is_ipv4 = host.contains('.')
-        && host
-            .split('.')
-            .all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_digit()));
-    if is_ipv4 || host.starts_with('[') {
+    if ensemble::is_ipv4_literal(&host) || host.starts_with('[') {
         return Some(host.to_ascii_lowercase());
     }
     let short = ensemble::default_member_name("probe", Some(&host));
@@ -1772,10 +1768,11 @@ fn member_confirmation_args(
             vec!["--dangerously-skip-permissions".to_string()]
         }
         (ensemble::mcp_install::ClientKind::Opencode, ConfirmPolicy::Deny) => {
-            return Err(format!(
+            return Err(
                 "`opencode --help` does not expose a stable non-interactive deny flag; \
                  --confirm-policy deny is unsupported for opencode"
-            ));
+                    .to_string(),
+            );
         }
     };
     Ok(args)
@@ -4637,10 +4634,16 @@ node = "http://m2:7878"
             "opencode",
         ]))
         .unwrap();
-        let plan_approve =
-            build_member_launch_plan(ensemble::mcp_install::ClientKind::Opencode, parsed_approve, &env)
-                .unwrap();
-        assert_eq!(build_member_vendor_argv(&plan_approve), vec!["--dangerously-skip-permissions".to_string()]);
+        let plan_approve = build_member_launch_plan(
+            ensemble::mcp_install::ClientKind::Opencode,
+            parsed_approve,
+            &env,
+        )
+        .unwrap();
+        assert_eq!(
+            build_member_vendor_argv(&plan_approve),
+            vec!["--dangerously-skip-permissions".to_string()]
+        );
 
         let parsed_deny = parse_member_launcher_args(&argv(&[
             "ensemble",
@@ -4649,9 +4652,12 @@ node = "http://m2:7878"
             "opencode",
         ]))
         .unwrap();
-        let err =
-            build_member_launch_plan(ensemble::mcp_install::ClientKind::Opencode, parsed_deny, &env)
-                .unwrap_err();
+        let err = build_member_launch_plan(
+            ensemble::mcp_install::ClientKind::Opencode,
+            parsed_deny,
+            &env,
+        )
+        .unwrap_err();
         assert!(err.contains("opencode"));
         assert!(err.contains("--confirm-policy deny"));
     }
