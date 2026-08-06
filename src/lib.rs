@@ -82,8 +82,8 @@ pub use supervisor::{
 };
 pub use team::{
     default_member_name, default_team_name, member_file_stem, post_team_message, read_team_inbox,
-    render_team_inbox, render_team_status, resolve_team_session, team_root, team_status, TeamInbox,
-    TeamLedgerCounts, TeamObserver, TeamSession, TeamStatus,
+    render_team_inbox, render_team_status, resolve_team_session, team_root, team_status,
+    validate_repo_path, TeamInbox, TeamLedgerCounts, TeamObserver, TeamSession, TeamStatus,
 };
 pub use test_gate::{run_tests, TestOutcome};
 pub use verdict::{parse_verdict, Verdict};
