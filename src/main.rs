@@ -1398,6 +1398,15 @@ fn team_cmd(args: &[String]) {
         std::process::exit(2);
     });
     let repo = absolutize(std::path::PathBuf::from(&parsed.repo));
+    // A mangled --repo (e.g. `D:Projectsensemble`) must fail here, before the
+    // local plane create_dir_all's a stray board. Remote nodes interpret the
+    // path on their own filesystem, so only the local plane is checked.
+    if parsed.node.is_none() {
+        if let Err(e) = ensemble::validate_repo_path(&repo) {
+            eprintln!("ensemble team: {e}");
+            std::process::exit(2);
+        }
+    }
     let session = ensemble::resolve_team_session(
         &repo,
         parsed.team.as_deref(),
