@@ -93,7 +93,20 @@ pub fn member_file_stem(member: &str) -> String {
 /// Reject a `--repo` that does not point at an existing git repository, so a
 /// mangled path (e.g. `D:Projectsensemble`) fails loudly instead of silently
 /// growing a stray `.ensemble` board directory. Worktrees keep `.git` as a
-/// file rather than a directory, so any `.git` entry counts.
+/// file rather than a directory, so any `.git` entry counts; a bare repo has
+/// no `.git` at all and is recognized by its layout (HEAD + objects + refs).
+/// A bare repo's `HEAD` is either a symref (`ref: refs/heads/<name>`) or a raw 40-hex object id.
+/// Requiring that shape keeps an unrelated directory that merely happens to hold `HEAD`,
+/// `objects/`, and `refs/` from being mistaken for a repository.
+fn head_is_gitish(repo: &Path) -> bool {
+    let Ok(head) = std::fs::read_to_string(repo.join("HEAD")) else {
+        return false;
+    };
+    let head = head.trim();
+    head.starts_with("ref: refs/")
+        || (head.len() == 40 && head.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
 pub fn validate_repo_path(repo: &Path) -> Result<(), String> {
     if !repo.exists() {
         return Err(format!("--repo path does not exist: {}", repo.display()));
@@ -104,9 +117,12 @@ pub fn validate_repo_path(repo: &Path) -> Result<(), String> {
             repo.display()
         ));
     }
-    if !repo.join(".git").exists() {
+    let has_git_entry = repo.join(".git").exists();
+    let is_bare =
+        repo.join("objects").is_dir() && repo.join("refs").is_dir() && head_is_gitish(repo);
+    if !has_git_entry && !is_bare {
         return Err(format!(
-            "--repo path is not a git repository (no .git): {}",
+            "--repo path is not a git repository (no .git entry and not a bare repo layout): {}",
             repo.display()
         ));
     }
@@ -260,6 +276,43 @@ mod tests {
         std::fs::create_dir_all(&worktree).unwrap();
         std::fs::write(worktree.join(".git"), "gitdir: ../elsewhere\n").unwrap();
         assert_eq!(validate_repo_path(&worktree), Ok(()));
+    }
+
+    #[test]
+    fn validate_repo_path_accepts_bare_repo_layout() {
+        // `git init --bare` has no `.git` entry; it IS the git dir: HEAD + objects/ + refs/.
+        let tmp = tempfile::tempdir().unwrap();
+        let bare = tmp.path().join("bare.git");
+        std::fs::create_dir_all(bare.join("objects")).unwrap();
+        std::fs::create_dir_all(bare.join("refs")).unwrap();
+        std::fs::write(bare.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        assert_eq!(validate_repo_path(&bare), Ok(()));
+    }
+
+    #[test]
+    fn validate_repo_path_rejects_partial_bare_layout() {
+        // HEAD as a bare file alone (no objects/refs) must not pass as a repo.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        let err = validate_repo_path(tmp.path()).unwrap_err();
+        assert!(
+            err.contains("not a git repository"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_repo_path_rejects_gitish_names_without_a_real_head() {
+        // The full layout with a HEAD that is neither a symref nor an object id is not a repo.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("objects")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("refs")).unwrap();
+        std::fs::write(tmp.path().join("HEAD"), "just some notes\n").unwrap();
+        let err = validate_repo_path(tmp.path()).unwrap_err();
+        assert!(
+            err.contains("not a git repository"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
