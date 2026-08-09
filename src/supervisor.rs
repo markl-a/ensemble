@@ -160,6 +160,7 @@ pub fn control_action_for_report(
             report.steer.as_deref().map(|prompt| ControlCmd::Steer {
                 from: from.to_string(),
                 prompt: prompt.to_string(),
+                interrupt: true,
             })
         }
         SupervisorRecommendation::Abort
@@ -339,6 +340,7 @@ mod tests {
             Some(ControlCmd::Steer {
                 from: "supervisor".to_string(),
                 prompt: "stay on Task 6".to_string(),
+                interrupt: true,
             })
         );
     }

@@ -179,13 +179,31 @@ impl RunObserver for FeedObserver {
     }
 }
 
+/// serde default for `ControlCmd::Steer::interrupt`: keep the old behaviour for
+/// feeds written before the field existed.
+fn yes() -> bool {
+    true
+}
+
 /// One line in a run's CONTROL feed (.ensemble/control/<name>.ndjson) — the operator's channel to steer
 /// or interrupt a live governed run (S1b). Internally tagged on `"cmd"` (like StreamEvent's `"ev"`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum ControlCmd {
     /// Inject `prompt` into the NEXT round's implementer prompt (redirect a run that is drifting).
-    Steer { from: String, prompt: String },
+    Steer {
+        from: String,
+        prompt: String,
+        /// Send ESC before the prompt to interrupt whatever the CLI is doing.
+        ///
+        /// Right for a running turn, WRONG when the agent is sitting on a modal:
+        /// ESC there is "cancel", and for a workspace-trust dialog cancel means
+        /// "No, exit" — steering a freshly-launched agy killed it every time,
+        /// which read as "agy fails to start". Defaults to true so existing
+        /// control feeds and callers are unchanged.
+        #[serde(default = "yes")]
+        interrupt: bool,
+    },
     /// Stop the run: cleanly at the next round boundary, or `hard` = kill the running CLI immediately.
     Abort {
         from: String,
@@ -465,6 +483,7 @@ mod tests {
         let s = ControlCmd::Steer {
             from: "main@node-a".into(),
             prompt: "skip the UI".into(),
+            interrupt: true,
         };
         let line = serde_json::to_string(&s).unwrap();
         assert!(line.contains(r#""cmd":"steer""#), "got {line}");
@@ -515,6 +534,7 @@ mod tests {
             &serde_json::to_string(&ControlCmd::Steer {
                 from: "m".into(),
                 prompt: "focus".into(),
+                interrupt: true,
             })
             .unwrap(),
         )

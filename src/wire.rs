@@ -262,6 +262,7 @@ mod tests {
             cmd: ControlCmd::Steer {
                 from: "operator".into(),
                 prompt: "focus".into(),
+                interrupt: true,
             },
         };
         let s = serde_json::to_string(&req).unwrap();
@@ -274,7 +275,8 @@ mod tests {
                     cmd,
                     ControlCmd::Steer {
                         from: "operator".into(),
-                        prompt: "focus".into()
+                        prompt: "focus".into(),
+                        interrupt: true,
                     }
                 );
             }

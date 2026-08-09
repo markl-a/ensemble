@@ -608,6 +608,7 @@ mod tests {
                 &crate::ControlCmd::Steer {
                     from: "operator".into(),
                     prompt: "focus".into(),
+                    interrupt: true,
                 },
             )
             .unwrap();
@@ -619,7 +620,10 @@ mod tests {
             serde_json::from_str::<crate::ControlCmd>(&control[0]).unwrap(),
             crate::ControlCmd::Steer {
                 from: "operator".into(),
-                prompt: "focus".into()
+                prompt: "focus".into(),
+                // The wire had no `interrupt` field before; serde's default
+                // must keep deserialising an old line as an interrupting steer.
+                interrupt: true,
             }
         );
 

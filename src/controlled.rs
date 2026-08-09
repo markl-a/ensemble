@@ -92,8 +92,10 @@ pub fn pty_program_for_vendor(program: &str, args: &[String]) -> PtyProgram {
 
 pub fn control_script(cmd: &ControlCmd) -> ControlScript {
     match cmd {
-        ControlCmd::Steer { prompt, .. } => ControlScript {
-            interrupt: true,
+        ControlCmd::Steer {
+            prompt, interrupt, ..
+        } => ControlScript {
+            interrupt: *interrupt,
             prompt: Some(prompt.clone()),
             kill: false,
         },
@@ -169,6 +171,24 @@ pub fn run_controlled_pty(config: ControlledPtyConfig) -> Result<i32, String> {
         cmd.arg(arg);
     }
     cmd.cwd(&config.cwd);
+
+    // Tell the child it has a colour terminal. A ConPTY carries the escape
+    // codes fine, but a CLI decides whether to EMIT them by looking at the
+    // environment, and ensemble was passing only its own ENSEMBLE_* vars — so
+    // agents came up monochrome under the launcher while the same CLI run
+    // directly was in colour. For a coding agent that is not decoration:
+    // diffs, error levels and approval prompts are colour-coded.
+    //
+    // Defaults, not overrides. An operator who has deliberately set TERM (or
+    // NO_COLOR, which the vendors read themselves) keeps their choice, and
+    // config.envs is applied afterwards so a caller can still win.
+    if std::env::var_os("TERM").is_none() {
+        cmd.env("TERM", "xterm-256color");
+    }
+    if std::env::var_os("COLORTERM").is_none() {
+        cmd.env("COLORTERM", "truecolor");
+    }
+
     for (key, value) in &config.envs {
         cmd.env(key, value);
     }
@@ -336,6 +356,7 @@ mod tests {
         let script = control_script(&ControlCmd::Steer {
             from: "codex@host".to_string(),
             prompt: "focus on auth only".to_string(),
+            interrupt: true,
         });
         assert_eq!(
             script,
@@ -374,6 +395,49 @@ mod tests {
                 assert_eq!((size.cols, size.rows), (200, 40), "fallback changed");
             }
         }
+    }
+
+    #[test]
+    fn a_steer_can_be_sent_without_the_interrupt_that_dismisses_modals() {
+        // Concrete incident: agy parks on "Do you trust the contents of this
+        // project?" at first launch. `steer` sent ESC before the prompt, the
+        // dialog read that as cancel, and cancel there is "No, exit" — so the
+        // agent died on every steer and it looked like agy could not start.
+        //
+        // ESC is still right for redirecting a turn already in flight, so this
+        // is a choice per steer, not a change of default.
+        let quiet = control_script(&ControlCmd::Steer {
+            from: "operator".to_string(),
+            prompt: "yes".to_string(),
+            interrupt: false,
+        });
+        assert_eq!(
+            quiet,
+            ControlScript {
+                interrupt: false,
+                prompt: Some("yes".to_string()),
+                kill: false,
+            }
+        );
+
+        // Default unchanged.
+        let loud = control_script(&ControlCmd::Steer {
+            from: "operator".to_string(),
+            prompt: "yes".to_string(),
+            interrupt: true,
+        });
+        assert!(loud.interrupt);
+    }
+
+    #[test]
+    fn a_control_line_written_before_the_interrupt_field_still_interrupts() {
+        // Forward-compat on the wire: feeds written by an older binary have no
+        // `interrupt` key, and must keep their old meaning rather than silently
+        // becoming quiet steers.
+        let old = r#"{"cmd":"steer","from":"operator","prompt":"focus"}"#;
+        let cmd: ControlCmd = serde_json::from_str(old).expect("old line must still parse");
+
+        assert!(control_script(&cmd).interrupt, "old steer stopped interrupting");
     }
 
     #[test]

@@ -710,6 +710,7 @@ fn tool_steer(args: &Value, ctx: &Ctx) -> Result<String, RpcError> {
     let cmd = crate::ControlCmd::Steer {
         from: ctx.name.clone(),
         prompt: prompt.to_string(),
+        interrupt: true,
     };
     let next = append_control(ctx, name, &cmd)?;
     Ok(json!({
@@ -1525,6 +1526,7 @@ mod tests {
             crate::ControlCmd::Steer {
                 from: "tester".into(),
                 prompt: "stay focused".into(),
+                interrupt: true,
             }
         );
         assert_eq!(
