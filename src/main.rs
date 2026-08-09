@@ -1972,6 +1972,143 @@ fn resolve_work_dir(
     Ok(dir)
 }
 
+/// Where the LAUNCHER puts the member's MCP registration.
+///
+/// Deliberately not `mcp_install::config_path`, which `ensemble mcp install`
+/// keeps using: that one answers "where does this client read project config
+/// from", and writing there means writing into the user's working tree. For
+/// Claude that file is `<repo>/.mcp.json`, which in a real project is TRACKED —
+/// launching an agent would show up as a source change the operator never made.
+/// (It did: this function exists because a launcher probe silently added an
+/// `ensemble` server to a tracked `.mcp.json` in another repo.)
+///
+/// It also broke under `--cwd`. The vendor reads project config from its OWN
+/// working directory, so a config written to `repo` while the agent runs in a
+/// worktree is a file the agent never sees — it would come up with no ensemble
+/// tools at all, able to be steered but unable to answer on the board.
+///
+/// Per client, because they genuinely differ:
+///   * Claude — `--mcp-config <file>` takes an explicit path, so the file goes
+///     under `.ensemble/` (gitignored in both repos) and the work tree is never
+///     touched. Passed WITHOUT `--strict-mcp-config` so the project's own
+///     servers still load; strict would silence them.
+///   * Opencode — no such flag exists (checked `opencode --help`: `mcp` is a
+///     subcommand, not an override), so its `opencode.json` has to sit in the
+///     directory it runs in. Following `work_dir` at least makes `--cwd` work;
+///     it does leave an untracked file there, which is the honest cost. Note
+///     this file is per-DIRECTORY, not per-member — see
+///     `reject_opencode_config_owned_by_another_member`, which turns the
+///     resulting identity clash into an error instead of a silent takeover.
+///   * Codex — reads `$CODEX_HOME/config.toml`, already outside any work tree
+///     and unaffected by cwd. Left exactly as it was.
+fn launcher_config_path(
+    client: ensemble::mcp_install::ClientKind,
+    repo: &std::path::Path,
+    work_dir: &std::path::Path,
+    session_root: &std::path::Path,
+    member: &str,
+    env: &ensemble::mcp_install::Env,
+) -> std::path::PathBuf {
+    match client {
+        // Per MEMBER, not per team. `session_root` is shared by everyone on the
+        // team, so a single `mcp.json` there means the second session launched
+        // overwrites the first one's `--name` — and both agents then report to
+        // the board as whoever started last. That is precisely the case this
+        // whole change exists to support: several members, one board.
+        ensemble::mcp_install::ClientKind::Claude => session_root
+            .join("mcp")
+            .join(format!("{}.json", ensemble::sanitize_slug(member))),
+        ensemble::mcp_install::ClientKind::Opencode => work_dir.join("opencode.json"),
+        ensemble::mcp_install::ClientKind::Codex => {
+            ensemble::mcp_install::config_path(client, repo, env)
+        }
+    }
+}
+
+/// Refuse to launch an opencode member into a directory another member already
+/// owns.
+///
+/// Claude gets one config file per member because `--mcp-config` names the file.
+/// Opencode has no such flag: it reads `opencode.json` from the directory it
+/// runs in, so two opencode members sharing a `--cwd` share one registration —
+/// the second launch rewrites the first one's `--name`, and BOTH agents then
+/// report to the board as whoever started last. That is the same identity
+/// takeover the per-member split fixed for Claude, and it cannot be fixed the
+/// same way here, so it is refused loudly instead of half-working.
+///
+/// FAIL-CLOSED. A file with no `ensemble` entry is genuinely not ours and is
+/// left alone, but once one is present this refuses unless it can positively
+/// confirm the owner is this member.
+///
+/// The first cut was fail-open — it recognised exactly one shape
+/// (`mcpServers.ensemble.args` as an array containing a separate `--name`
+/// token) and allowed the launch through whenever it could not parse that.
+/// Review pointed out the polarity was backwards for a guard against identity
+/// takeover: `--name=X` inline, the argv living under `command`, or a file with
+/// a BOM / trailing comma would each read as "no owner" and let the second
+/// member overwrite the first. Not recognising a config is precisely when you
+/// know least, so it is now the case that refuses.
+fn reject_opencode_config_owned_by_another_member(
+    path: &std::path::Path,
+    member: &str,
+) -> Result<(), String> {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return Ok(()); // absent (the common first launch) — the write reports any real IO error
+    };
+    let refuse = |why: &str| {
+        Err(format!(
+            "{} {why}; opencode reads its config from the directory it runs in, so `{member}` \
+             would take over that registration. Give this member its own --cwd.",
+            path.display()
+        ))
+    };
+
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        // Unparseable. If it does not even mention us it is somebody else's
+        // file and none of our business; if it does, we cannot tell whose.
+        return if raw.contains("ensemble") {
+            refuse("could not be parsed and mentions an ensemble server, so its owner is unknown")
+        } else {
+            Ok(())
+        };
+    };
+    let Some(entry) = json.get("mcpServers").and_then(|s| s.get("ensemble")) else {
+        return Ok(()); // no ensemble server here at all
+    };
+
+    // Look in BOTH `args` and `command`: which one carries the argv differs by
+    // client and by version, and guessing wrong used to mean silent approval.
+    // `command` is a bare string in every file ensemble writes and an array in
+    // some hand-written ones; a string one was a FALSE REJECT in the first
+    // fail-closed cut (`as_array()` → None → "owner unknown" → refuse), which
+    // is the cost of getting the polarity right and has to be paid back here
+    // rather than by loosening the guard.
+    let mut tokens: Vec<&str> = Vec::new();
+    for key in ["args", "command"] {
+        match entry.get(key) {
+            Some(serde_json::Value::Array(items)) => {
+                tokens.extend(items.iter().filter_map(|v| v.as_str()))
+            }
+            Some(serde_json::Value::String(s)) => tokens.extend(s.split_whitespace()),
+            _ => {}
+        }
+    }
+    let owner = tokens
+        .iter()
+        .enumerate()
+        .find_map(|(i, t)| match t.strip_prefix("--name=") {
+            Some(v) => Some(v),
+            None if *t == "--name" => tokens.get(i + 1).copied(),
+            None => None,
+        });
+
+    match owner {
+        Some(existing) if existing == member => Ok(()), // our own file; a restart
+        Some(existing) => refuse(&format!("already registers member `{existing}`")),
+        None => refuse("registers an ensemble server whose member name could not be read"),
+    }
+}
+
 fn build_member_launch_plan(
     client: ensemble::mcp_install::ClientKind,
     parsed: MemberLauncherArgs,
@@ -2022,7 +2159,11 @@ fn build_member_launch_plan(
         home: env.home.clone(),
         codex_home: env.codex_home.clone(),
     };
-    let config_path = ensemble::mcp_install::config_path(client, &repo, &config_env);
+    let config_path =
+        launcher_config_path(client, &repo, &work_dir, &session.root, &member, &config_env);
+    if client == ensemble::mcp_install::ClientKind::Opencode {
+        reject_opencode_config_owned_by_another_member(&config_path, &member)?;
+    }
     if !config_path.is_absolute() {
         return Err(format!(
             "could not determine a config location for `{}`; pass a real home/CODEX_HOME to the process",
@@ -2210,6 +2351,18 @@ fn print_member_launch_banner(plan: &MemberLaunchPlan) {
 
 fn build_member_vendor_argv(plan: &MemberLaunchPlan) -> Vec<String> {
     let mut args = member_confirmation_args(plan.client, plan.confirm_policy).unwrap_or_default();
+    // Claude reads project MCP config from its cwd, so the file we wrote under
+    // `.ensemble/` is invisible unless we name it. Without this the whole
+    // out-of-tree config is written and then ignored — worse than the old
+    // behaviour, because it looks like it worked.
+    //
+    // No `--strict-mcp-config`: that would make this the ONLY source and hide
+    // the project's own servers (in this fleet, `spectyn`), which the agent
+    // needs just as much.
+    if plan.client == ensemble::mcp_install::ClientKind::Claude {
+        args.push("--mcp-config".to_string());
+        args.push(plan.config_path.display().to_string());
+    }
     args.extend(plan.vendor_args.iter().cloned());
     args
 }
@@ -4842,6 +4995,334 @@ node = "http://m2:7878"
         assert_eq!(plan.work_dir, work);
         assert_eq!(plan.session.repo, test_abs("repo"));
         let _ = std::fs::remove_dir_all(&work);
+    }
+
+    #[test]
+    fn launcher_never_writes_claude_config_into_a_work_tree() {
+        // The concrete incident: a launcher probe added an `ensemble` server to
+        // a TRACKED `.mcp.json`, so starting an agent showed up as a source
+        // change nobody made. The config now lives under `.ensemble/`, which is
+        // gitignored, and Claude is told where to find it.
+        // Asserted on a built PLAN, not on `launcher_config_path` alone: the
+        // function being right proves nothing if the plan does not use it, and
+        // the first version of this test stayed green when the call site was
+        // reverted for exactly that reason.
+        let env = cwd_test_env();
+        let repo = test_abs("repo");
+        let work = std::env::temp_dir().join("ensemble-claude-cfg-3a5c");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let parsed = parse_member_launcher_args(&argv(&[
+            "ensemble",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--cwd",
+            work.to_str().unwrap(),
+            "claude",
+        ]))
+        .unwrap();
+        let plan =
+            build_member_launch_plan(ensemble::mcp_install::ClientKind::Claude, parsed, &env)
+                .unwrap();
+
+        assert_ne!(
+            plan.config_path,
+            repo.join(".mcp.json"),
+            "still writing the tracked project file",
+        );
+        assert!(
+            !plan.config_path.starts_with(&work),
+            "claude config landed in the work tree: {:?}",
+            plan.config_path,
+        );
+        assert!(
+            plan.config_path.starts_with(&plan.session.root),
+            "claude config escaped .ensemble: {:?}",
+            plan.config_path,
+        );
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    #[test]
+    fn writing_a_claude_members_config_leaves_the_work_tree_untouched() {
+        // Raised in review, and the right criticism: every other test here
+        // checks which path was CHOSEN. None ran the write, so if the writer
+        // used a different path the whole set would stay green while the repo
+        // got dirtied again — the exact accident this change exists to prevent.
+        let base = std::env::temp_dir().join("ensemble-write-check-5e04");
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = base.join("repo");
+        let work = base.join("worktree");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&work).unwrap();
+
+        let env = MemberLauncherEnv {
+            cwd: base.clone(),
+            exe: test_abs("bin").join("ensemble"),
+            raw_host: Some("node-a".to_string()),
+            home: base.join("home"),
+            codex_home: None,
+            vendor_bin: None,
+        };
+        let parsed = parse_member_launcher_args(&argv(&[
+            "ensemble",
+            "--repo",
+            repo.to_str().unwrap(),
+            "--cwd",
+            work.to_str().unwrap(),
+            "--name",
+            "claude-w",
+            "claude",
+        ]))
+        .unwrap();
+        let plan =
+            build_member_launch_plan(ensemble::mcp_install::ClientKind::Claude, parsed, &env)
+                .unwrap();
+
+        let merged = render_member_mcp_config(&plan).unwrap();
+        write_member_mcp_config(&plan, &merged).unwrap();
+
+        // The two directories a person would be upset to find modified.
+        assert!(
+            !work.join("opencode.json").exists() && !work.join(".mcp.json").exists(),
+            "wrote into the work tree",
+        );
+        assert!(!repo.join(".mcp.json").exists(), "wrote the tracked project file");
+        // And it did land somewhere — an assertion of absence alone would pass
+        // if the write silently did nothing.
+        assert!(plan.config_path.exists(), "config was never written");
+        assert!(plan.config_path.starts_with(repo.join(".ensemble")));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn two_opencode_members_in_one_cwd_are_refused_not_silently_merged() {
+        // Raised in review: the per-member split fixed Claude but opencode's
+        // config is per-DIRECTORY, so the same identity takeover was still
+        // possible there and no test covered it.
+        let dir = std::env::temp_dir().join("ensemble-oc-clash-6b21");
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("opencode.json");
+        std::fs::write(
+            &cfg,
+            r#"{"mcpServers":{"ensemble":{"command":"ensemble",
+               "args":["mcp","--repo","r","--name","opencode-a"]}}}"#,
+        )
+        .unwrap();
+
+        let err = reject_opencode_config_owned_by_another_member(&cfg, "opencode-b")
+            .expect_err("a second member must not silently take over");
+        assert!(err.contains("opencode-a"), "error names the owner: {err}");
+        assert!(err.contains("--cwd"), "error says how to fix it: {err}");
+
+        // Re-launching the SAME member is a normal restart, not a clash.
+        reject_opencode_config_owned_by_another_member(&cfg, "opencode-a").unwrap();
+
+        // A project's own opencode.json with no ensemble entry is none of our
+        // business; refusing there would block launches for no reason.
+        std::fs::write(&cfg, r#"{"mcpServers":{"something-else":{}}}"#).unwrap();
+        reject_opencode_config_owned_by_another_member(&cfg, "opencode-b").unwrap();
+
+        // Absent file: the common first-launch case.
+        std::fs::remove_file(&cfg).unwrap();
+        reject_opencode_config_owned_by_another_member(&cfg, "opencode-b").unwrap();
+
+        // ── The shapes the first, fail-open version waved through ───────────
+        // Each of these registers a member; none of them matched the single
+        // shape that version knew, so each let a second member silently take
+        // the first one's identity.
+
+        // `--name=X` inline instead of two tokens.
+        std::fs::write(
+            &cfg,
+            r#"{"mcpServers":{"ensemble":{"args":["mcp","--name=opencode-a"]}}}"#,
+        )
+        .unwrap();
+        assert!(
+            reject_opencode_config_owned_by_another_member(&cfg, "opencode-b")
+                .unwrap_err()
+                .contains("opencode-a"),
+            "--name=X form must be recognised",
+        );
+
+        // argv under `command` rather than `args`.
+        std::fs::write(
+            &cfg,
+            r#"{"mcpServers":{"ensemble":{"command":["ensemble","mcp","--name","opencode-a"]}}}"#,
+        )
+        .unwrap();
+        reject_opencode_config_owned_by_another_member(&cfg, "opencode-b")
+            .expect_err("command-array form must be recognised");
+
+        // An ensemble entry we cannot read an owner out of: unknown ≠ safe.
+        std::fs::write(&cfg, r#"{"mcpServers":{"ensemble":{"args":["mcp"]}}}"#).unwrap();
+        reject_opencode_config_owned_by_another_member(&cfg, "opencode-b")
+            .expect_err("unknown owner must refuse, not default to allow");
+
+        // Unparseable but mentions ensemble → unknown owner → refuse.
+        std::fs::write(&cfg, "{ \"mcpServers\": { \"ensemble\": }, }").unwrap();
+        reject_opencode_config_owned_by_another_member(&cfg, "opencode-b")
+            .expect_err("unparseable ensemble config must refuse");
+
+        // Unparseable and nothing to do with us → still not our business.
+        std::fs::write(&cfg, "{ this is not json at all").unwrap();
+        reject_opencode_config_owned_by_another_member(&cfg, "opencode-b").unwrap();
+
+        // ── The false reject fail-closed introduced ─────────────────────────
+        // `command` as a bare string (the form ensemble itself writes, and the
+        // form a hand-written config usually takes). Reading it as an array
+        // yields nothing, which under fail-closed means "unknown owner" and
+        // refuses a launch that should be allowed — the price of the correct
+        // polarity, paid here instead of by weakening the guard.
+        std::fs::write(
+            &cfg,
+            r#"{"mcpServers":{"ensemble":{"command":"ensemble mcp --name opencode-a"}}}"#,
+        )
+        .unwrap();
+        reject_opencode_config_owned_by_another_member(&cfg, "opencode-a")
+            .expect("string command naming THIS member must be allowed");
+        reject_opencode_config_owned_by_another_member(&cfg, "opencode-b")
+            .expect_err("string command naming ANOTHER member must still refuse");
+
+        // The realistic mixed shape: string command + args array.
+        std::fs::write(
+            &cfg,
+            r#"{"mcpServers":{"ensemble":{"command":"C:\\bin\\ensemble.exe",
+               "args":["mcp","--name","opencode-a"]}}}"#,
+        )
+        .unwrap();
+        reject_opencode_config_owned_by_another_member(&cfg, "opencode-a").unwrap();
+        reject_opencode_config_owned_by_another_member(&cfg, "opencode-b").unwrap_err();
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_claude_members_do_not_share_one_config_file() {
+        // Found by running --print-config for two names and seeing the same
+        // path twice. `session_root` is per TEAM, so a single mcp.json there
+        // means the second session launched overwrites the first one's --name,
+        // and both agents then post to the board as whoever started last —
+        // in the exact scenario (several members, one board) this whole change
+        // exists to enable.
+        let env = ensemble::mcp_install::Env {
+            home: test_abs("home"),
+            codex_home: None,
+        };
+        let repo = test_abs("repo");
+        let root = repo.join(".ensemble");
+
+        let a = launcher_config_path(
+            ensemble::mcp_install::ClientKind::Claude,
+            &repo,
+            &repo,
+            &root,
+            "claude-d",
+            &env,
+        );
+        let b = launcher_config_path(
+            ensemble::mcp_install::ClientKind::Claude,
+            &repo,
+            &repo,
+            &root,
+            "claude-e",
+            &env,
+        );
+
+        assert_ne!(a, b, "two members would clobber each other's registration");
+        // `@` and `/` appear in default member names (claude@host); the control
+        // feed already sanitizes them, and this must agree or the two files
+        // stop lining up.
+        let slashed = launcher_config_path(
+            ensemble::mcp_install::ClientKind::Claude,
+            &repo,
+            &repo,
+            &root,
+            "claude@asus/z13",
+            &env,
+        );
+        let name = slashed.file_name().unwrap().to_string_lossy().to_string();
+        assert!(!name.contains('/'), "unsanitised member name in path: {name}");
+        assert!(!name.contains('@'), "unsanitised member name in path: {name}");
+    }
+
+    #[test]
+    fn claude_is_told_where_its_mcp_config_is() {
+        // Writing the file out of tree only helps if Claude is pointed at it;
+        // otherwise the registration is written and silently ignored, which
+        // looks like success and produces an agent with no ensemble tools.
+        let env = cwd_test_env();
+        let parsed = parse_member_launcher_args(&argv(&[
+            "ensemble",
+            "--repo",
+            test_abs("repo").to_str().unwrap(),
+            "claude",
+        ]))
+        .unwrap();
+        let plan =
+            build_member_launch_plan(ensemble::mcp_install::ClientKind::Claude, parsed, &env)
+                .unwrap();
+
+        let argv = build_member_vendor_argv(&plan);
+        let i = argv
+            .iter()
+            .position(|a| a == "--mcp-config")
+            .expect("claude must be given --mcp-config");
+        assert_eq!(argv.get(i + 1), Some(&plan.config_path.display().to_string()));
+        // strict would drop the project's own servers (spectyn on this fleet).
+        assert!(!argv.iter().any(|a| a == "--strict-mcp-config"));
+    }
+
+    #[test]
+    fn opencode_config_follows_the_work_dir_because_it_has_no_override_flag() {
+        // `opencode --help` has no --mcp-config; it reads opencode.json from the
+        // directory it runs in. Leaving this on `repo` meant an opencode member
+        // launched with --cwd never saw its own registration.
+        let repo = test_abs("repo");
+        let work = test_abs("worktree");
+        let env = ensemble::mcp_install::Env {
+            home: test_abs("home"),
+            codex_home: None,
+        };
+
+        let path = launcher_config_path(
+            ensemble::mcp_install::ClientKind::Opencode,
+            &repo,
+            &work,
+            &repo.join(".ensemble"),
+            "m",
+            &env,
+        );
+
+        assert_eq!(path, work.join("opencode.json"));
+    }
+
+    #[test]
+    fn codex_config_is_untouched_by_cwd() {
+        // Codex reads $CODEX_HOME/config.toml — already outside any work tree,
+        // and cwd cannot move it. Pinned so a future "make them consistent"
+        // refactor does not drag it into a worktree.
+        let repo = test_abs("repo");
+        let work = test_abs("worktree");
+        let codex_home = test_abs("codex-home");
+        let env = ensemble::mcp_install::Env {
+            home: test_abs("home"),
+            codex_home: Some(codex_home.clone()),
+        };
+
+        let path = launcher_config_path(
+            ensemble::mcp_install::ClientKind::Codex,
+            &repo,
+            &work,
+            &repo.join(".ensemble"),
+            "m",
+            &env,
+        );
+
+        assert_eq!(path, codex_home.join("config.toml"));
+        assert!(!path.starts_with(&work));
+        assert!(!path.starts_with(&repo));
     }
 
     #[test]
