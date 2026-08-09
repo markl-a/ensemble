@@ -1715,6 +1715,7 @@ fn is_launcher_leading_flag(flag: &str) -> bool {
     matches!(
         flag,
         "--repo"
+            | "--cwd"
             | "--team"
             | "--member"
             | "--name"
@@ -1730,7 +1731,14 @@ fn is_launcher_leading_flag(flag: &str) -> bool {
 fn launcher_flag_takes_value(flag: &str) -> bool {
     matches!(
         flag,
-        "--repo" | "--team" | "--member" | "--name" | "--confirm-policy" | "--timeout" | "--prompt"
+        "--repo"
+            | "--cwd"
+            | "--team"
+            | "--member"
+            | "--name"
+            | "--confirm-policy"
+            | "--timeout"
+            | "--prompt"
     )
 }
 
@@ -1781,6 +1789,12 @@ fn member_confirmation_args(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MemberLauncherArgs {
     repo: String,
+    /// Where the agent actually works. `--repo` alone made this the same
+    /// directory as the board, so putting two agents in two git worktrees also
+    /// put them on two separate boards, where they cannot see each other — the
+    /// exact thing the board exists to prevent. `None` keeps the old behaviour
+    /// (cwd = repo).
+    cwd: Option<String>,
     team: String,
     name: Option<String>,
     vendor_args: Vec<String>,
@@ -1820,6 +1834,10 @@ fn vendor_bin_override(client: ensemble::mcp_install::ClientKind) -> Option<Stri
 struct MemberLaunchPlan {
     client: ensemble::mcp_install::ClientKind,
     repo: std::path::PathBuf,
+    /// Working directory for the vendor CLI. Equals `repo` unless `--cwd` was
+    /// given; keeping them separate is what lets N agents sit in N worktrees
+    /// while sharing ONE board.
+    work_dir: std::path::PathBuf,
     team: String,
     member: String,
     crew: std::path::PathBuf,
@@ -1848,6 +1866,7 @@ fn parse_member_launcher_args_at(
     launcher_idx: usize,
 ) -> Result<MemberLauncherArgs, String> {
     let mut repo = ".".to_string();
+    let mut cwd = None;
     let mut team = ensemble::default_team_name(None);
     let mut name = None;
     let mut confirm_policy = ConfirmPolicy::Ask;
@@ -1867,6 +1886,9 @@ fn parse_member_launcher_args_at(
             }
             "--member" => {
                 name = Some(take_member_flag_value(args, &mut i, "--member")?);
+            }
+            "--cwd" => {
+                cwd = Some(take_member_flag_value(args, &mut i, "--cwd")?);
             }
             "--confirm-policy" => {
                 let raw = take_member_flag_value(args, &mut i, "--confirm-policy")?;
@@ -1897,6 +1919,7 @@ fn parse_member_launcher_args_at(
 
     Ok(MemberLauncherArgs {
         repo,
+        cwd,
         team,
         name,
         vendor_args,
@@ -1915,6 +1938,40 @@ fn take_member_flag_value(args: &[String], i: &mut usize, flag: &str) -> Result<
     Ok(value)
 }
 
+/// Resolve `--cwd` into the directory the vendor CLI runs in.
+///
+/// `None` (or an all-whitespace value) means "same as the board's repo", which
+/// is what every invocation did before this flag existed — so omitting it is
+/// byte-for-byte the old behaviour.
+///
+/// Resolved against `caller_cwd`, NOT against `repo`: `--repo D:/a --cwd ../b`
+/// has to mean the shell's `../b`. Resolving it against the repo would silently
+/// land the agent in `D:/a/../b`, which is a different directory and a very
+/// quiet way to have an agent edit the wrong tree.
+fn resolve_work_dir(
+    flag: Option<&str>,
+    repo: &std::path::Path,
+    caller_cwd: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    let Some(raw) = flag.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(repo.to_path_buf());
+    };
+    let dir = absolutize_from(std::path::PathBuf::from(raw), caller_cwd);
+    if !dir.is_absolute() {
+        return Err(format!(
+            "--cwd did not resolve to an absolute path ({})",
+            dir.display()
+        ));
+    }
+    // Checked here rather than left to the PTY: a typo'd --cwd otherwise
+    // surfaces as the vendor CLI failing to start, several layers away from
+    // the flag that caused it.
+    if !dir.is_dir() {
+        return Err(format!("--cwd is not a directory ({})", dir.display()));
+    }
+    Ok(dir)
+}
+
 fn build_member_launch_plan(
     client: ensemble::mcp_install::ClientKind,
     parsed: MemberLauncherArgs,
@@ -1928,6 +1985,7 @@ fn build_member_launch_plan(
             repo.display()
         ));
     }
+    let work_dir = resolve_work_dir(parsed.cwd.as_deref(), &repo, &env.cwd)?;
     if !exe.is_absolute() {
         return Err(format!(
             "ensemble binary did not resolve to an absolute path ({})",
@@ -1975,6 +2033,7 @@ fn build_member_launch_plan(
     Ok(MemberLaunchPlan {
         client,
         repo,
+        work_dir,
         team,
         member,
         crew,
@@ -2025,9 +2084,13 @@ fn member_launcher_cmd(client: ensemble::mcp_install::ClientKind, parsed: Member
     let argv = build_member_vendor_argv(&plan);
     let config = ensemble::ControlledPtyConfig::new(
         plan.client.as_str(),
+        // repo — where the control feed and board live. Steer must reach this
+        // member wherever it is working, so this stays the board's repo.
         plan.repo.clone(),
         plan.member.clone(),
-        plan.repo.clone(),
+        // cwd — where the vendor CLI runs. Was `plan.repo` too, which is why a
+        // per-worktree agent got a per-worktree board and vanished from the team.
+        plan.work_dir.clone(),
         plan.vendor_program.clone(),
         argv,
     )
@@ -2113,6 +2176,12 @@ fn print_member_launch_banner(plan: &MemberLaunchPlan) {
         plan.member
     );
     println!("  repo: {}", plan.repo.display());
+    // Printed only when it differs, so the common case stays as terse as it
+    // was — but when an agent is working somewhere other than the board's
+    // repo, that is the single most important line for the operator to see.
+    if plan.work_dir != plan.repo {
+        println!("  cwd:  {}", plan.work_dir.display());
+    }
     println!("  crew: {}", plan.crew.display());
     println!("  team: {}", plan.team);
     println!("  confirm-policy: {}", plan.confirm_policy.as_str());
@@ -2151,6 +2220,8 @@ const AGY_CONTEXT_LIMIT: usize = 20;
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AgyCliArgs {
     repo: String,
+    /// See `MemberLauncherArgs::cwd`. `None` keeps cwd = repo.
+    cwd: Option<String>,
     team: String,
     name: Option<String>,
     timeout_secs: u64,
@@ -2164,6 +2235,8 @@ struct AgyCliArgs {
 #[derive(Debug, Clone)]
 struct AgyRunPlan {
     session: ensemble::TeamSession,
+    /// Working directory for the agy CLI; equals the session repo unless --cwd.
+    work_dir: std::path::PathBuf,
     timeout_secs: u64,
     confirm_policy: ConfirmPolicy,
     prompt: Option<String>,
@@ -2201,6 +2274,7 @@ fn parse_agy_args(args: &[String]) -> Result<AgyCliArgs, String> {
 
 fn parse_agy_args_at(args: &[String], launcher_idx: usize) -> Result<AgyCliArgs, String> {
     let mut repo = ".".to_string();
+    let mut cwd = None;
     let mut team = ensemble::default_team_name(None);
     let mut name = None;
     let mut timeout_secs = DEFAULT_AGY_TIMEOUT_SECS;
@@ -2222,6 +2296,9 @@ fn parse_agy_args_at(args: &[String], launcher_idx: usize) -> Result<AgyCliArgs,
             }
             "--member" => {
                 name = Some(take_member_flag_value(args, &mut i, "--member")?);
+            }
+            "--cwd" => {
+                cwd = Some(take_member_flag_value(args, &mut i, "--cwd")?);
             }
             "--timeout" => {
                 let raw = take_member_flag_value(args, &mut i, "--timeout")?;
@@ -2266,6 +2343,7 @@ fn parse_agy_args_at(args: &[String], launcher_idx: usize) -> Result<AgyCliArgs,
     reject_old_member_tail(&args[launcher_idx], &vendor_args)?;
     Ok(AgyCliArgs {
         repo,
+        cwd,
         team,
         name,
         timeout_secs,
@@ -2314,8 +2392,13 @@ fn set_single_agy_prompt(slot: &mut Option<String>, value: String) -> Result<(),
     Ok(())
 }
 
-fn build_agy_plan(parsed: AgyCliArgs, cwd: &std::path::Path, raw_host: Option<&str>) -> AgyRunPlan {
+fn build_agy_plan(
+    parsed: AgyCliArgs,
+    cwd: &std::path::Path,
+    raw_host: Option<&str>,
+) -> Result<AgyRunPlan, String> {
     let repo = absolutize_from(std::path::PathBuf::from(parsed.repo), cwd);
+    let work_dir = resolve_work_dir(parsed.cwd.as_deref(), &repo, cwd)?;
     let team = ensemble::default_team_name(Some(&parsed.team));
     let member = parsed
         .name
@@ -2324,15 +2407,16 @@ fn build_agy_plan(parsed: AgyCliArgs, cwd: &std::path::Path, raw_host: Option<&s
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| ensemble::default_member_name("agy", raw_host));
-    AgyRunPlan {
+    Ok(AgyRunPlan {
         session: ensemble::resolve_team_session(&repo, Some(&team), "agy", Some(&member), raw_host),
+        work_dir,
         timeout_secs: parsed.timeout_secs,
         confirm_policy: parsed.confirm_policy,
         prompt: parsed.prompt,
         vendor_args: parsed.vendor_args,
         print_prompt: parsed.print_prompt,
         json: parsed.json,
-    }
+    })
 }
 
 fn build_agy_team_prompt(
@@ -2396,6 +2480,9 @@ fn print_agy_interactive_banner(plan: &AgyRunPlan, argv: &[String]) {
         plan.session.member
     );
     println!("  repo: {}", plan.session.repo.display());
+    if plan.work_dir != plan.session.repo {
+        println!("  cwd:  {}", plan.work_dir.display());
+    }
     println!("  team: {}", plan.session.team);
     println!("  confirm-policy: {}", plan.confirm_policy.as_str());
     println!("  board: {}", plan.session.board.display());
@@ -2434,9 +2521,11 @@ fn run_agy_interactive(plan: &AgyRunPlan) -> i32 {
     print_agy_interactive_banner(plan, &argv);
     let config = ensemble::ControlledPtyConfig::new(
         "agy",
+        // repo — control feed + board; steer has to reach this member here.
         plan.session.repo.clone(),
         plan.session.member.clone(),
-        plan.session.repo.clone(),
+        // cwd — where agy runs. Was the repo too; see resolve_work_dir.
+        plan.work_dir.clone(),
         "agy",
         argv,
     )
@@ -2480,8 +2569,13 @@ fn run_agy_team_turn(
     session: &ensemble::TeamSession,
     adapter: &dyn Adapter,
     prompt: &str,
+    // The non-interactive twin of the PTY path, and it used `session.repo` as
+    // the cwd. Left that way, `--cwd X --prompt Y` would post its result to the
+    // right board while having run in the wrong tree — a flag that silently
+    // does nothing on one of the two modes it names.
+    work_dir: &std::path::Path,
 ) -> Result<(AgyTurnReport, i32), String> {
-    match adapter.run(prompt, &session.repo) {
+    match adapter.run(prompt, work_dir) {
         Ok(out) => {
             let cursor = ensemble::post_team_message(session, &session.member, "result", &out.text)
                 .map_err(|e| format!("post agy result: {e}"))?;
@@ -2529,7 +2623,10 @@ fn adapter_error_kind(e: &ensemble::AdapterError) -> &'static str {
 
 fn agy_cmd(parsed: AgyCliArgs) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let plan = build_agy_plan(parsed, &cwd, raw_hostname().as_deref());
+    let plan = build_agy_plan(parsed, &cwd, raw_hostname().as_deref()).unwrap_or_else(|e| {
+        eprintln!("ensemble agy: {e}");
+        std::process::exit(2);
+    });
     if agy_launch_mode(&plan) == AgyLaunchMode::Interactive {
         let exit_code = run_agy_interactive(&plan);
         if exit_code != 0 {
@@ -2556,7 +2653,7 @@ fn agy_cmd(parsed: AgyCliArgs) {
             .with_dangerously_skip_permissions(plan.confirm_policy == ConfirmPolicy::Approve)
             .with_vendor_args(plan.vendor_args.clone());
     let (report, exit_code) =
-        run_agy_team_turn(&plan.session, &adapter, &prompt).unwrap_or_else(|e| {
+        run_agy_team_turn(&plan.session, &adapter, &prompt, &plan.work_dir).unwrap_or_else(|e| {
             eprintln!("ensemble agy: {e}");
             std::process::exit(1);
         });
@@ -4616,6 +4713,187 @@ node = "http://m2:7878"
         );
     }
 
+    // ── --cwd: separate the board's repo from where the agent works ─────────
+    //
+    // Without this, `--repo` set both, so two agents in two git worktrees also
+    // got two separate boards and could not see each other — which defeats the
+    // point of a team board. These tests pin both halves: that the split works,
+    // and that omitting the flag changes nothing.
+
+    fn cwd_test_env() -> MemberLauncherEnv {
+        MemberLauncherEnv {
+            cwd: test_abs("cwd"),
+            exe: test_abs("bin").join("ensemble"),
+            raw_host: Some("node-a".to_string()),
+            home: test_abs("home"),
+            codex_home: None,
+            vendor_bin: None,
+        }
+    }
+
+    #[test]
+    fn work_dir_defaults_to_repo_so_omitting_cwd_is_the_old_behaviour() {
+        let repo = test_abs("repo");
+        let caller = test_abs("cwd");
+
+        assert_eq!(resolve_work_dir(None, &repo, &caller).unwrap(), repo);
+        // A whitespace-only value is a shell accident (`--cwd ""`), not a
+        // request to run in a directory named " ".
+        assert_eq!(resolve_work_dir(Some("   "), &repo, &caller).unwrap(), repo);
+    }
+
+    #[test]
+    fn work_dir_resolves_a_relative_cwd_against_the_caller_not_the_repo() {
+        // The whole hazard in one assertion: resolving `..` against the repo
+        // would silently put the agent in a sibling of the REPO instead of a
+        // sibling of the shell's directory — a different tree, no error.
+        let tmp = std::env::temp_dir().join("ensemble-cwd-test-4f2a");
+        let work = tmp.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let repo = test_abs("some").join("other").join("repo");
+
+        let got = resolve_work_dir(Some("work"), &repo, &tmp).unwrap();
+
+        assert_eq!(got, work);
+        assert!(!got.starts_with(&repo), "resolved against the repo: {got:?}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn work_dir_rejects_a_cwd_that_is_not_a_directory() {
+        // Caught at the flag rather than surfacing later as "the vendor CLI
+        // failed to start", which is several layers from the actual typo.
+        let repo = test_abs("repo");
+        let caller = test_abs("cwd");
+        let missing = std::env::temp_dir().join("ensemble-cwd-does-not-exist-9c71");
+        let _ = std::fs::remove_dir_all(&missing);
+
+        let err = resolve_work_dir(Some(missing.to_str().unwrap()), &repo, &caller).unwrap_err();
+
+        assert!(err.contains("--cwd is not a directory"), "got {err}");
+    }
+
+    #[test]
+    fn member_launcher_cwd_flag_moves_the_agent_without_moving_the_board() {
+        let env = cwd_test_env();
+        let work = std::env::temp_dir().join("ensemble-member-cwd-1b8e");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let parsed = parse_member_launcher_args(&argv(&[
+            "ensemble",
+            "--repo",
+            test_abs("repo").to_str().unwrap(),
+            "--cwd",
+            work.to_str().unwrap(),
+            "claude",
+        ]))
+        .unwrap();
+        let plan = build_member_launch_plan(
+            ensemble::mcp_install::ClientKind::Claude,
+            parsed,
+            &env,
+        )
+        .unwrap();
+
+        assert_eq!(plan.work_dir, work, "agent must run in --cwd");
+        assert_eq!(plan.repo, test_abs("repo"), "board must stay on --repo");
+        assert_ne!(plan.work_dir, plan.repo);
+        // The board is what makes them one team; if it followed --cwd, every
+        // worktree would be its own island and this flag would be pointless.
+        assert!(plan.session.board.starts_with(&plan.repo), "board followed cwd");
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    #[test]
+    fn member_launcher_without_cwd_keeps_work_dir_equal_to_repo() {
+        let env = cwd_test_env();
+        let parsed = parse_member_launcher_args(&argv(&[
+            "ensemble",
+            "--repo",
+            test_abs("repo").to_str().unwrap(),
+            "claude",
+        ]))
+        .unwrap();
+
+        let plan =
+            build_member_launch_plan(ensemble::mcp_install::ClientKind::Claude, parsed, &env)
+                .unwrap();
+
+        assert_eq!(plan.work_dir, plan.repo);
+    }
+
+    #[test]
+    fn agy_launcher_cwd_flag_moves_the_agent_without_moving_the_board() {
+        let caller = test_abs("cwd");
+        let work = std::env::temp_dir().join("ensemble-agy-cwd-77d3");
+        std::fs::create_dir_all(&work).unwrap();
+
+        let parsed = parse_agy_args(&argv(&[
+            "ensemble",
+            "--repo",
+            test_abs("repo").to_str().unwrap(),
+            "--cwd",
+            work.to_str().unwrap(),
+            "agy",
+        ]))
+        .unwrap();
+        let plan = build_agy_plan(parsed, &caller, Some("node-a.local")).unwrap();
+
+        assert_eq!(plan.work_dir, work);
+        assert_eq!(plan.session.repo, test_abs("repo"));
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    #[test]
+    fn agy_team_turn_runs_in_the_work_dir_not_the_board_repo() {
+        // The non-interactive twin of the PTY path. It took `session.repo` as
+        // the cwd, so `--cwd X --prompt Y` would have posted to the right board
+        // after running in the wrong tree — a flag that works in one of the two
+        // modes it names is worse than one that works in neither, because the
+        // failure is silent. Found by adversarial review, not by the tests
+        // above: they only covered the interactive path.
+        struct CwdSpy(std::sync::Mutex<Option<std::path::PathBuf>>);
+        impl Adapter for CwdSpy {
+            fn name(&self) -> &str {
+                "agy"
+            }
+            fn run(
+                &self,
+                _prompt: &str,
+                cwd: &std::path::Path,
+            ) -> Result<ensemble::AgentOutput, ensemble::AdapterError> {
+                *self.0.lock().unwrap() = Some(cwd.to_path_buf());
+                Ok(ensemble::AgentOutput {
+                    agent: "agy".to_string(),
+                    text: "ok".to_string(),
+                })
+            }
+        }
+
+        let repo = test_abs("board-repo");
+        let work = test_abs("some").join("worktree");
+        let session =
+            ensemble::resolve_team_session(&repo, Some("default"), "agy", Some("agy-a"), None);
+        let spy = CwdSpy(std::sync::Mutex::new(None));
+
+        let _ = run_agy_team_turn(&session, &spy, "prompt", &work);
+
+        assert_eq!(
+            spy.0.lock().unwrap().clone(),
+            Some(work),
+            "team-turn must run where --cwd said, not in the board repo",
+        );
+    }
+
+    #[test]
+    fn cwd_is_a_leading_flag_for_every_launcher() {
+        // A flag missing from these two tables is silently forwarded to the
+        // vendor CLI, which rejects it — the exact failure `--repo` after the
+        // verb produces ("error: unknown option '--repo'").
+        assert!(is_launcher_leading_flag("--cwd"));
+        assert!(launcher_flag_takes_value("--cwd"));
+    }
+
     #[test]
     fn member_launcher_confirm_policy_rejects_deny_but_accepts_approve_for_opencode() {
         let cwd = test_abs("cwd");
@@ -4724,7 +5002,7 @@ node = "http://m2:7878"
             "--continue",
         ]))
         .unwrap();
-        let plan = build_agy_plan(parsed, &cwd, Some("node-a.local"));
+        let plan = build_agy_plan(parsed, &cwd, Some("node-a.local")).unwrap();
 
         assert_eq!(agy_launch_mode(&plan), AgyLaunchMode::Interactive);
         assert_eq!(
@@ -4743,21 +5021,24 @@ node = "http://m2:7878"
             parse_agy_args(&argv(&["ensemble", "agy", "--prompt", "read board"])).unwrap(),
             &cwd,
             Some("node-a.local"),
-        );
+        )
+        .unwrap();
         assert_eq!(agy_launch_mode(&with_prompt), AgyLaunchMode::TeamTurn);
 
         let with_json = build_agy_plan(
             parse_agy_args(&argv(&["ensemble", "--json", "agy"])).unwrap(),
             &cwd,
             Some("node-a.local"),
-        );
+        )
+        .unwrap();
         assert_eq!(agy_launch_mode(&with_json), AgyLaunchMode::TeamTurn);
 
         let with_print_prompt = build_agy_plan(
             parse_agy_args(&argv(&["ensemble", "--print-prompt", "agy"])).unwrap(),
             &cwd,
             Some("node-a.local"),
-        );
+        )
+        .unwrap();
         assert_eq!(agy_launch_mode(&with_print_prompt), AgyLaunchMode::TeamTurn);
     }
 
@@ -4802,7 +5083,7 @@ node = "http://m2:7878"
             ensemble::resolve_team_session(tmp.path(), None, "agy", Some("agy@host"), None);
         let adapter = ensemble::MockAdapter::new("agy", vec![Ok("hello from agy".to_string())]);
 
-        let (report, exit_code) = run_agy_team_turn(&session, &adapter, "prompt").unwrap();
+        let (report, exit_code) = run_agy_team_turn(&session, &adapter, "prompt", &session.repo).unwrap();
 
         assert_eq!(exit_code, 0);
         assert!(report.ok);
@@ -4820,7 +5101,7 @@ node = "http://m2:7878"
             ensemble::resolve_team_session(tmp.path(), None, "agy", Some("agy@host"), None);
         let adapter = ensemble::MockAdapter::new("agy", vec![Err(ensemble::AdapterError::Empty)]);
 
-        let (report, exit_code) = run_agy_team_turn(&session, &adapter, "prompt").unwrap();
+        let (report, exit_code) = run_agy_team_turn(&session, &adapter, "prompt", &session.repo).unwrap();
 
         assert_eq!(exit_code, ensemble::AdapterError::Empty.exit_code());
         assert!(!report.ok);
