@@ -204,6 +204,32 @@ ensemble mesh             # this node's CLIs + which agents each peer hosts
 
 Run `ensemble help` for the full, authoritative usage.
 
+#### Launching a live CLI as a crew member
+
+`ensemble [global flags] <codex|claude|opencode|agy> [vendor args…]` starts that
+CLI inside a controlled PTY, so `steer` / `abort` reach it while it runs. **Global
+flags go BEFORE the vendor name** — anything after it is forwarded to the vendor,
+so `ensemble claude --repo X` hands `--repo` to Claude Code, which rejects it.
+
+| Flag | Meaning |
+| --- | --- |
+| `--repo <path>` | Where the board and the control feed live. `steer` finds the member here. |
+| `--cwd <path>` | Where the CLI actually runs. Defaults to `--repo`. |
+| `--name <id>` | The member id `steer` / `abort` address. Defaults to `<vendor>@<host>`. |
+
+`--cwd` is what lets several members work in separate git worktrees while sharing
+ONE board. Without it they would each get a board inside their own worktree and
+stop being a team:
+
+```bash
+ensemble --repo ~/proj --cwd ~/proj-wt/feature-a --name claude-a claude
+ensemble --repo ~/proj --cwd ~/proj-wt/feature-b --name codex-b  codex
+ensemble steer claude-a "start with the auth module" --repo ~/proj
+```
+
+Note: a vendor's first-run modal (workspace trust, MCP approval) consumes the
+first steer's Enter. Let a new session settle before steering it real work.
+
 ### MCP server
 
 `ensemble mcp` runs a stdio MCP server that makes a **live** vendor CLI a first-class crew
