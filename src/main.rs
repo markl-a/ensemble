@@ -1772,8 +1772,18 @@ fn member_confirmation_args(
         (ensemble::mcp_install::ClientKind::Claude, ConfirmPolicy::Deny) => {
             vec!["--permission-mode".to_string(), "dontAsk".to_string()]
         }
+        // `--auto`, not `--dangerously-skip-permissions`. That is Claude's flag;
+        // opencode does not have it — `opencode --help` and `opencode run
+        // --help` (v1.18.15) list exactly one permission control:
+        //
+        //   --auto  auto-approve permissions that are not explicitly denied (dangerous!)
+        //
+        // and opencode's parser is lenient, so the wrong flag was accepted and
+        // ignored: the launch succeeded, the operator believed prompts were off,
+        // and opencode kept asking. The Deny arm below was written against the
+        // real `--help` and is right; only this one was copied from Claude.
         (ensemble::mcp_install::ClientKind::Opencode, ConfirmPolicy::Approve) => {
-            vec!["--dangerously-skip-permissions".to_string()]
+            vec!["--auto".to_string()]
         }
         (ensemble::mcp_install::ClientKind::Opencode, ConfirmPolicy::Deny) => {
             return Err(
@@ -5399,9 +5409,14 @@ node = "http://m2:7878"
             &env,
         )
         .unwrap();
+        // Was pinned to `--dangerously-skip-permissions`, which is CLAUDE's flag
+        // (and agy's). opencode has no such option — v1.18.15's `--help` lists
+        // `--auto` and nothing else for permissions — and its parser ignores
+        // unknown flags rather than rejecting them, so the wrong one launched
+        // cleanly while opencode kept prompting. The test made that the spec.
         assert_eq!(
             build_member_vendor_argv(&plan_approve),
-            vec!["--dangerously-skip-permissions".to_string()]
+            vec!["--auto".to_string()]
         );
 
         let parsed_deny = parse_member_launcher_args(&argv(&[
