@@ -131,15 +131,36 @@ fn write_script(
     }
 }
 
-pub fn run_controlled_pty(config: ControlledPtyConfig) -> Result<i32, String> {
-    let pty = native_pty_system();
-    let pair = pty
-        .openpty(PtySize {
+/// The size of the terminal ensemble itself is running in.
+///
+/// This used to be hardcoded to 40×200. A vendor TUI lays itself out for the
+/// size the PTY reports, so on any window that is not exactly 200 columns the
+/// agent draws 200-column lines into a narrower terminal and every box, rule
+/// and status line wraps into garbage. Falls back to the old constant when
+/// there is no terminal to ask (piped output, headless, a CI runner).
+fn host_pty_size() -> PtySize {
+    match terminal_size::terminal_size() {
+        Some((terminal_size::Width(cols), terminal_size::Height(rows))) if cols > 0 && rows > 0 => {
+            PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            }
+        }
+        _ => PtySize {
             rows: 40,
             cols: 200,
             pixel_width: 0,
             pixel_height: 0,
-        })
+        },
+    }
+}
+
+pub fn run_controlled_pty(config: ControlledPtyConfig) -> Result<i32, String> {
+    let pty = native_pty_system();
+    let pair = pty
+        .openpty(host_pty_size())
         .map_err(|e| format!("openpty: {e}"))?;
 
     let program = pty_program_for_vendor(&config.program, &config.args);
@@ -236,11 +257,31 @@ pub fn run_controlled_pty(config: ControlledPtyConfig) -> Result<i32, String> {
         cursor += lines.len();
     });
 
+    // Keep the PTY the same size as the window it is being watched in. Sizing
+    // it once at startup is not enough: the operator drags the window, the
+    // vendor TUI is never told, and it keeps laying out at the old width — the
+    // same garbled output the hardcoded 40x200 produced, just triggered later.
+    //
+    // Windows has no SIGWINCH, so this polls, on the wait loop that was already
+    // waking every 50 ms. Throttled to ~500 ms and only issued when the value
+    // actually changed, so the child sees one resize per real change rather
+    // than a stream of no-ops.
+    let mut last_size = host_pty_size();
+    let mut ticks: u32 = 0;
+
     let exit = loop {
         if hard_abort.load(Ordering::Relaxed) {
             let _ = child.kill();
             let _ = child.wait();
             break 130;
+        }
+        ticks = ticks.wrapping_add(1);
+        if ticks % 10 == 0 {
+            let now = host_pty_size();
+            if now.rows != last_size.rows || now.cols != last_size.cols {
+                let _ = pair.master.resize(now);
+                last_size = now;
+            }
         }
         match child.try_wait() {
             Ok(Some(status)) => break status.exit_code() as i32,
@@ -305,6 +346,34 @@ mod tests {
             }
         );
         assert_eq!(prompt_enter_bytes("focus"), b"focus\r");
+    }
+
+    #[test]
+    fn host_pty_size_is_never_the_old_hardcoded_guess_when_a_terminal_answers() {
+        // The bug this replaces: every controlled session opened its PTY at
+        // 40x200 regardless of the window, so a vendor TUI laid out 200-column
+        // lines into whatever width the operator actually had and every box and
+        // rule wrapped into garbage.
+        //
+        // Under `cargo test` stdout is captured, so `terminal_size` reports
+        // nothing and this exercises the FALLBACK arm — which must still be a
+        // usable size rather than zero, because a PTY sized 0x0 renders nothing
+        // at all and would turn a cosmetic bug into a blank screen.
+        let size = host_pty_size();
+
+        assert!(size.rows > 0 && size.cols > 0, "unusable PTY size: {size:?}");
+        match terminal_size::terminal_size() {
+            Some((terminal_size::Width(c), terminal_size::Height(r))) if c > 0 && r > 0 => {
+                assert_eq!(
+                    (size.cols, size.rows),
+                    (c, r),
+                    "a real terminal was available and was ignored",
+                );
+            }
+            _ => {
+                assert_eq!((size.cols, size.rows), (200, 40), "fallback changed");
+            }
+        }
     }
 
     #[test]
