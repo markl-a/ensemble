@@ -1057,8 +1057,26 @@ fn steer_cmd(args: &[String]) {
         }
     };
     let from = parse_flag(args, "--from").unwrap_or_else(|| "operator".to_string());
-    append_control(args, &name, &ensemble::ControlCmd::Steer { from, prompt });
-    println!("steered `{name}`");
+    // `--no-interrupt`: send the prompt WITHOUT the leading ESC.
+    //
+    // The ESC is right for redirecting a running turn and wrong when the agent
+    // is parked on a modal — there it reads as "cancel", and a workspace-trust
+    // dialog's cancel is "No, exit". Steering a freshly launched agy killed it
+    // every time, which looked like agy failing to start.
+    let interrupt = !has_flag(args, "--no-interrupt");
+    append_control(
+        args,
+        &name,
+        &ensemble::ControlCmd::Steer {
+            from,
+            prompt,
+            interrupt,
+        },
+    );
+    println!(
+        "steered `{name}`{}",
+        if interrupt { "" } else { " (no interrupt)" }
+    );
 }
 
 /// `ensemble abort <name[@node]> [--hard] [--repo <p>] [--node <host|url>] [--from <id>]` — stop the live run started with
@@ -3160,7 +3178,17 @@ fn ledger_cmd(args: &[String]) {
 
 /// Value-less switches: they take NO following value, so the arg parser must advance past them by
 /// one (not two) — otherwise `--no-discover "task"` would swallow the task as a phantom flag value.
-const BARE_SWITCHES: &[&str] = &["--no-discover", "--json", "--merge", "--hard"];
+const BARE_SWITCHES: &[&str] = &[
+    "--no-discover",
+    "--json",
+    "--merge",
+    "--hard",
+    // Missing from this list, `--no-interrupt` was parsed as a VALUE flag: it
+    // ate the following argument, so `steer <name> "<prompt>" --no-interrupt`
+    // came out as three positionals and hit the usage error. A new bare switch
+    // has to be registered here or it silently corrupts the positional split.
+    "--no-interrupt",
+];
 
 /// The prompt handed to a `--resolver <agent>` CLI on a merge conflict: it runs in the conflicted
 /// (mid-merge) worktree and must edit the listed files to a coherent merged result with NO markers,
@@ -4415,6 +4443,30 @@ node = "http://m2:7878"
         let err = parse_team_cmd_args(&argv(&["ensemble", "team", "inbox", "--since", "later"]))
             .unwrap_err();
         assert!(err.contains("--since must be a non-negative integer"));
+    }
+
+    #[test]
+    fn positional_tasks_treats_no_interrupt_as_a_bare_switch() {
+        // A bare switch missing from BARE_SWITCHES is treated as a VALUE flag,
+        // so it swallows the next argument. `--no-interrupt` did exactly that
+        // on its first cut and every steer using it died on the usage error.
+        assert_eq!(
+            positional_tasks(&argv(&[
+                "ensemble",
+                "steer",
+                "agy-i",
+                "yes",
+                "--no-interrupt",
+                "--repo",
+                "D:/r",
+            ])),
+            vec!["agy-i".to_string(), "yes".to_string()]
+        );
+        // Flag BEFORE the prompt must not eat it either.
+        assert_eq!(
+            positional_tasks(&argv(&["ensemble", "steer", "agy-i", "--no-interrupt", "yes"])),
+            vec!["agy-i".to_string(), "yes".to_string()]
+        );
     }
 
     #[test]

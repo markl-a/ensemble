@@ -305,6 +305,7 @@ mod tests {
             &ControlCmd::Steer {
                 from: "operator".into(),
                 prompt: "focus".into(),
+                interrupt: true,
             },
         )
         .unwrap();
