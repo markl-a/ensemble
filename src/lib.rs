@@ -57,7 +57,9 @@ pub use discovery::{
 pub use doctor::{check_tools, is_ready, present_clis, run_checks, ToolStatus};
 pub use exec_adapter::ExecAdapter;
 pub use gate::{decide, GateDecision, RoleVerdict};
-pub use journal::{journal_path, parse as parse_journal, write_run, Entry as JournalEntry};
+pub use journal::{
+    journal_path, parse as parse_journal, sanitize_slug, write_run, Entry as JournalEntry,
+};
 pub use ledger::{Counts, Ledger, LedgerError, Task, TaskState};
 pub use mesh::{render_mesh, render_up};
 pub use ndjson::Feed;
