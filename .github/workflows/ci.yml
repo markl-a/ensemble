@@ -2,15 +2,18 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    # wp/** so a work-package branch can be tested before it is merged.
+    branches: [main, "wp/**"]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   check:
     strategy:
+      # Off so a failure on one OS does not cancel and hide the others.
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
