@@ -5,7 +5,7 @@
 //! the orchestrator's worktree just like a local agent's. No git server; rides the HTTP wire.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The filesystem name prefix every node-side scratch repo carries (see `NodeJobDir::new`). GC keys
@@ -402,10 +402,14 @@ pub fn materialize_base(
 /// was nothing to commit (the agent produced no edits).
 pub fn commit_all(dir: &Path, message: &str) -> std::io::Result<bool> {
     git_run(dir, &["add", "-A"])?;
+    // stdin null: an inherited open stdin pipe made Git for Windows hang here (10-31 test-suite hang).
     let clean = Command::new("git")
         .arg("-C")
         .arg(dir)
         .args(["diff", "--cached", "--quiet"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()?
         .success();
     if clean {
