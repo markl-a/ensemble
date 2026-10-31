@@ -285,6 +285,20 @@ impl Adapter for ExecAdapter {
                 return Err(AdapterError::NotInstalled(self.program.clone()));
             }
         }
+        // spectyn --json: an answer spectyn delivered (exit 0, or the one excused early-stop exit 1)
+        // is returned before the quota scan below, just as an exit-0 answer is never scanned: the
+        // partial text may merely mention quota.
+        let spectyn =
+            (self.reply == ReplyFormat::SpectynJsonl).then(|| spectyn_reply(&text, status.code()));
+        if let Some(SpectynReply::Answer(answer)) = spectyn {
+            if answer.is_empty() {
+                return Err(AdapterError::Empty);
+            }
+            return Ok(AgentOutput {
+                agent: self.name.clone(),
+                text: answer,
+            });
+        }
         // Quota/rate-limit: vendors print this to EITHER stream and may exit 0 (codex prints
         // "You've hit your usage limit … try again at <when>" with an empty answer) or non-zero, so
         // scan the combined output and preserve the reason + reset time instead of a bare `Empty` /
@@ -295,39 +309,23 @@ impl Adapter for ExecAdapter {
                 return Err(AdapterError::RateLimited(info));
             }
         }
-        if self.reply == ReplyFormat::SpectynJsonl {
-            match spectyn_reply(&text) {
-                // A run spectyn itself says stopped early also exits 1 (with an error line explaining
-                // the stop); its text is still real work, so it is returned, flagged by the note.
-                SpectynReply::Answer {
-                    text,
-                    stopped_early,
-                } if status.success() || stopped_early => {
-                    if text.is_empty() {
-                        return Err(AdapterError::Empty);
-                    }
-                    return Ok(AgentOutput {
-                        agent: self.name.clone(),
-                        text,
-                    });
-                }
-                SpectynReply::Error(msg) => {
-                    return Err(AdapterError::Flaked(format!(
-                        "{} reported an error: {}",
-                        self.program,
-                        tail_chars(msg.trim(), EXIT_TAIL_CHARS)
-                    )));
-                }
-                SpectynReply::NoDone if status.success() => {
-                    return Err(AdapterError::Flaked(format!(
-                        "{} --json printed no done event",
-                        self.program
-                    )));
-                }
-                // A clean `done` with a non-zero exit, or no `done` at all after a failed exit: the
-                // generic non-zero handling below reports the exit code and stderr tail.
-                _ => {}
+        match spectyn {
+            Some(SpectynReply::Error(msg)) => {
+                return Err(AdapterError::Flaked(format!(
+                    "{} reported an error: {}",
+                    self.program,
+                    tail_chars(msg.trim(), EXIT_TAIL_CHARS)
+                )));
             }
+            Some(SpectynReply::NoDone) if status.success() => {
+                return Err(AdapterError::Flaked(format!(
+                    "{} --json printed no done event",
+                    self.program
+                )));
+            }
+            // `ExitFailure` (only returned for a non-zero exit or a signal) or no `done` after a
+            // failed exit: the generic non-zero handling below reports the code and stderr tail.
+            _ => {}
         }
         // A non-zero exit is a failed turn even when the CLI printed something (spectyn exits 1 on an
         // agent error, codex on failures): that text is an error message, and counting it as a
@@ -358,45 +356,56 @@ impl Adapter for ExecAdapter {
     }
 }
 
-/// What a `spectyn exec --json` stdout amounts to.
+/// What a `spectyn exec --json` run amounts to (its stdout plus its exit code).
 #[derive(Debug, PartialEq, Eq)]
 enum SpectynReply {
-    /// The last `done` event's `output`, with `[spectyn stopped early: <reason>]` appended when the
-    /// event says the run did not finish (`truncated`, `stop_reason`, or the older `stopped`).
-    Answer { text: String, stopped_early: bool },
+    /// The reply: the last `done` event's `output`, with `[spectyn stopped early: <reason>]`
+    /// appended when that event says the run did not finish (`truncated`, `stop_reason`, or the
+    /// older `stopped`).
+    Answer(String),
     /// A top-level `{"type":"error"}` line (its `message`), or an early stop with no text at all.
     Error(String),
+    /// The exit code alone is the failure: non-zero (or a signal) with nothing that excuses it.
+    ExitFailure,
     /// Neither a `done` nor an `error` event.
     NoDone,
 }
 
-/// Parse `spectyn exec --json` stdout (one JSON event per line; non-JSON lines are ignored). An
-/// `error` line makes the turn an error, except when the `done` event itself reports an early stop:
-/// spectyn then prints an `error` line explaining that stop, and the partial text is still returned
-/// with the note so reviewers and the gate can see it was cut short.
-fn spectyn_reply(stdout: &str) -> SpectynReply {
-    let mut done: Option<serde_json::Value> = None;
-    let mut error: Option<String> = None;
-    for line in stdout.lines() {
-        let Ok(ev) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
-            continue;
-        };
-        match ev.get("type").and_then(|t| t.as_str()) {
-            Some("done") => done = Some(ev),
-            Some("error") => {
-                let msg = ev
-                    .get("message")
-                    .and_then(|m| m.as_str())
-                    .map(str::to_string)
-                    .unwrap_or_else(|| format!("error event {ev}"));
-                error = Some(msg);
-            }
-            _ => {}
-        }
-    }
-    let Some(done) = done else {
-        return error.map_or(SpectynReply::NoDone, SpectynReply::Error);
+/// Parse a `spectyn exec --json` run: one JSON event per line (non-JSON lines are ignored) and
+/// the exit `code` (`None` = killed by a signal).
+///
+/// Any `error` event fails the turn, with ONE narrow exception. When the `done` event reports an
+/// early stop, spectyn prints exactly one `error` line right after it explaining that stop and
+/// exits 1 (e.g. "the answer is INCOMPLETE" for `truncated`, "… Raise max_rounds …" for
+/// `max_rounds`). Only that line — the very next event, the last one, and saying the same thing as
+/// the stop reason — together with exit code 1 is excused; the partial text is then returned with
+/// the note so reviewers and the gate can see it was cut short. Any other error event, any other
+/// non-zero exit code, or a signal stays a failure. (An older spectyn that reports the stop and
+/// exits 0 with no error line also delivers the text with the note.)
+fn spectyn_reply(stdout: &str, code: Option<i32>) -> SpectynReply {
+    let events: Vec<serde_json::Value> = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line.trim()).ok())
+        .collect();
+    let kind = |ev: &serde_json::Value| ev.get("type").and_then(|t| t.as_str()).map(str::to_string);
+    let message = |ev: &serde_json::Value| {
+        ev.get("message")
+            .and_then(|m| m.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("error event {ev}"))
     };
+    let errors: Vec<usize> = (0..events.len())
+        .filter(|&i| kind(&events[i]).as_deref() == Some("error"))
+        .collect();
+    let Some(d) = (0..events.len())
+        .rev()
+        .find(|&i| kind(&events[i]).as_deref() == Some("done"))
+    else {
+        return errors.first().map_or(SpectynReply::NoDone, |&i| {
+            SpectynReply::Error(message(&events[i]))
+        });
+    };
+    let done = &events[d];
     let field = |k: &str| {
         done.get(k)
             .and_then(|v| v.as_str())
@@ -411,25 +420,54 @@ fn spectyn_reply(stdout: &str) -> SpectynReply {
         .trim()
         .to_string();
     let truncated = done.get("truncated").and_then(|t| t.as_bool()) == Some(true);
-    let reason = field("stop_reason")
-        .or_else(|| field("stopped"))
-        .or_else(|| truncated.then(|| "truncated".to_string()));
-    match reason {
-        Some(reason) if output.is_empty() => {
-            SpectynReply::Error(format!("stopped early before any answer: {reason}"))
-        }
-        Some(reason) => SpectynReply::Answer {
-            text: format!("{output}\n\n[spectyn stopped early: {reason}]"),
-            stopped_early: true,
-        },
-        None => match error {
-            Some(msg) => SpectynReply::Error(msg),
-            None => SpectynReply::Answer {
-                text: output,
-                stopped_early: false,
-            },
-        },
+    let stop_reason = field("stop_reason");
+    let stopped = field("stopped");
+    let Some(reason) = stop_reason
+        .clone()
+        .or_else(|| stopped.clone())
+        .or_else(|| truncated.then(|| "truncated".to_string()))
+    else {
+        // The model finished: any error event or non-zero exit is a failure.
+        return match (errors.first(), code) {
+            (Some(&i), _) => SpectynReply::Error(message(&events[i])),
+            (None, Some(0)) => SpectynReply::Answer(output),
+            (None, _) => SpectynReply::ExitFailure,
+        };
+    };
+    // Does `msg` explain THIS stop? The stop's own words (spectyn prints them in English or
+    // Chinese) or the reason's machine token itself (the max_rounds line says "Raise max_rounds
+    // …"); only `snake_case` tokens count, so a plain word such as "error" cannot match anything.
+    let explains = |msg: &str| {
+        let low = msg.to_lowercase();
+        let named = [&stop_reason, &stopped]
+            .into_iter()
+            .flatten()
+            .filter(|r| r.contains('_'))
+            .any(|r| low.contains(&r.to_lowercase()));
+        let rounds = [&stop_reason, &stopped]
+            .into_iter()
+            .flatten()
+            .any(|r| r.to_lowercase().contains("round"))
+            && (low.contains("round limit") || msg.contains("回合數用完"));
+        let cut = truncated && (low.contains("incomplete") || msg.contains("不完整"));
+        named || rounds || cut
+    };
+    // Only the line right after `done`, as the last event, that explains the stop is excused; any
+    // other error event is the real failure. (At most one event can pass, so `explained` means
+    // exactly that one line is present.)
+    let excused = |e: usize| e == d + 1 && e + 1 == events.len() && explains(&message(&events[e]));
+    if let Some(&e) = errors.iter().find(|&&e| !excused(e)) {
+        return SpectynReply::Error(message(&events[e]));
     }
+    let explained = !errors.is_empty();
+    match (code, explained) {
+        (Some(0), _) | (Some(1), true) => {}
+        _ => return SpectynReply::ExitFailure,
+    }
+    if output.is_empty() {
+        return SpectynReply::Error(format!("stopped early before any answer: {reason}"));
+    }
+    SpectynReply::Answer(format!("{output}\n\n[spectyn stopped early: {reason}]"))
 }
 
 /// How much of a failed turn's stderr (or stdout, when stderr is empty) the `Flaked` reason keeps.
@@ -621,6 +659,22 @@ mod tests {
         "\n",
     );
 
+    /// The `done` + explaining `error` pair spectyn really prints for a cut-off stream.
+    const SPECTYN_TRUNCATED: &str = concat!(
+        r#"{"type":"done","output":"edit the li","files_changed":[],"truncated":true}"#,
+        "\n",
+        r#"{"type":"error","code":1,"message":"error: the answer is INCOMPLETE — the stream ended before the model finished. The text above is a fragment; do not treat it as a complete answer."}"#,
+        "\n",
+    );
+
+    /// ... and for a run that used up its rounds (older builds: `stopped`, no `stop_reason`).
+    const SPECTYN_MAX_ROUNDS: &str = concat!(
+        r#"{"type":"done","output":"half done","truncated":false,"stopped":"max_rounds"}"#,
+        "\n",
+        r#"{"type":"error","code":1,"message":"error: the run STOPPED at its round limit before the task was finished (see [stopped: …] above). Raise max_rounds for this agent or split the task."}"#,
+        "\n",
+    );
+
     #[test]
     fn spectyn_reply_takes_the_done_output() {
         let out = format!(
@@ -628,12 +682,12 @@ mod tests {
             r#"{"type":"done","output":"  VERDICT: APPROVE\nall good  ","cost_usd":0.0,"elapsed_secs":1.5,"files_changed":["src/a.rs"],"truncated":false}"#
         );
         assert_eq!(
-            spectyn_reply(&out),
-            SpectynReply::Answer {
-                text: "VERDICT: APPROVE\nall good".into(),
-                stopped_early: false
-            }
+            spectyn_reply(&out, Some(0)),
+            SpectynReply::Answer("VERDICT: APPROVE\nall good".into())
         );
+        // a clean done with a non-zero exit is still a failed turn (WP-100)
+        assert_eq!(spectyn_reply(&out, Some(1)), SpectynReply::ExitFailure);
+        assert_eq!(spectyn_reply(&out, None), SpectynReply::ExitFailure);
     }
 
     #[test]
@@ -643,7 +697,7 @@ mod tests {
             r#"{"type":"error","code":1,"message":"provider unreachable"}"#
         );
         assert_eq!(
-            spectyn_reply(&out),
+            spectyn_reply(&out, Some(1)),
             SpectynReply::Error("provider unreachable".into())
         );
         // an error line after a clean done (e.g. every tool call was denied) still fails the turn
@@ -653,60 +707,131 @@ mod tests {
             r#"{"type":"error","code":1,"message":"all tools were denied"}"#
         );
         assert_eq!(
-            spectyn_reply(&out),
+            spectyn_reply(&out, Some(1)),
             SpectynReply::Error("all tools were denied".into())
         );
     }
 
     #[test]
     fn spectyn_reply_without_done_is_no_done() {
-        assert_eq!(spectyn_reply(SPECTYN_TOOL_LINES), SpectynReply::NoDone);
-        assert_eq!(spectyn_reply(""), SpectynReply::NoDone);
         assert_eq!(
-            spectyn_reply("plain text, not json\n"),
+            spectyn_reply(SPECTYN_TOOL_LINES, Some(0)),
+            SpectynReply::NoDone
+        );
+        assert_eq!(spectyn_reply("", Some(0)), SpectynReply::NoDone);
+        assert_eq!(
+            spectyn_reply("plain text, not json\n", Some(1)),
             SpectynReply::NoDone
         );
     }
 
     #[test]
-    fn spectyn_reply_truncated_keeps_the_text_with_a_note() {
-        // What spectyn really prints for a cut-off stream: done(truncated) + an explaining error.
-        let out = format!(
-            "{}\n{}\n",
-            r#"{"type":"done","output":"edit the li","files_changed":[],"truncated":true}"#,
-            r#"{"type":"error","code":1,"message":"error: the answer is INCOMPLETE"}"#
+    fn spectyn_reply_stopped_early_with_its_explaining_error_and_exit_1_keeps_the_text() {
+        assert_eq!(
+            spectyn_reply(SPECTYN_TRUNCATED, Some(1)),
+            SpectynReply::Answer("edit the li\n\n[spectyn stopped early: truncated]".into())
         );
         assert_eq!(
-            spectyn_reply(&out),
-            SpectynReply::Answer {
-                text: "edit the li\n\n[spectyn stopped early: truncated]".into(),
-                stopped_early: true
-            }
+            spectyn_reply(SPECTYN_MAX_ROUNDS, Some(1)),
+            SpectynReply::Answer("half done\n\n[spectyn stopped early: max_rounds]".into())
+        );
+        // spectyn prints the same lines in Chinese under a zh locale
+        let zh = concat!(
+            r#"{"type":"done","output":"edit the li","truncated":true}"#,
+            "\n",
+            r#"{"type":"error","code":1,"message":"錯誤:這個答案不完整——串流在模型講完之前就結束了。"}"#,
+        );
+        assert_eq!(
+            spectyn_reply(zh, Some(1)),
+            SpectynReply::Answer("edit the li\n\n[spectyn stopped early: truncated]".into())
+        );
+        // an older build that reports the stop and exits 0 with no error line
+        let old = r#"{"type":"done","output":"edit the li","truncated":true}"#;
+        assert_eq!(
+            spectyn_reply(old, Some(0)),
+            SpectynReply::Answer("edit the li\n\n[spectyn stopped early: truncated]".into())
         );
     }
 
     #[test]
-    fn spectyn_reply_stop_reason_wins_over_stopped_and_older_builds_use_stopped() {
-        let out = r#"{"type":"done","output":"half done","truncated":false,"stopped":"max_rounds","stop_reason":"round limit reached"}"#;
-        assert_eq!(
-            spectyn_reply(out),
-            SpectynReply::Answer {
-                text: "half done\n\n[spectyn stopped early: round limit reached]".into(),
-                stopped_early: true
-            }
+    fn spectyn_reply_stop_reason_wins_over_stopped() {
+        let out = concat!(
+            r#"{"type":"done","output":"half done","truncated":false,"stopped":"max_rounds","stop_reason":"round limit reached"}"#,
+            "\n",
+            r#"{"type":"error","code":1,"message":"error: the run STOPPED at its round limit before the task was finished."}"#,
         );
-        let out =
-            r#"{"type":"done","output":"half done","truncated":false,"stopped":"max_rounds"}"#;
         assert_eq!(
-            spectyn_reply(out),
-            SpectynReply::Answer {
-                text: "half done\n\n[spectyn stopped early: max_rounds]".into(),
-                stopped_early: true
-            }
+            spectyn_reply(out, Some(1)),
+            SpectynReply::Answer(
+                "half done\n\n[spectyn stopped early: round limit reached]".into()
+            )
         );
         // an early stop with no text at all has nothing to hand on
         let out = r#"{"type":"done","output":"","truncated":true}"#;
-        assert!(matches!(spectyn_reply(out), SpectynReply::Error(m) if m.contains("truncated")));
+        assert!(
+            matches!(spectyn_reply(out, Some(0)), SpectynReply::Error(m) if m.contains("truncated"))
+        );
+    }
+
+    #[test]
+    fn spectyn_reply_stopped_early_with_an_unrelated_error_is_an_error() {
+        // the line after done says something else: that is the failure, not the stop
+        let out = concat!(
+            r#"{"type":"done","output":"edit the li","truncated":true}"#,
+            "\n",
+            r#"{"type":"error","code":1,"message":"provider unreachable"}"#,
+        );
+        assert_eq!(
+            spectyn_reply(out, Some(1)),
+            SpectynReply::Error("provider unreachable".into())
+        );
+        // the right line, but another error came before done
+        let out = format!(
+            "{}\n{SPECTYN_TRUNCATED}",
+            r#"{"type":"error","code":1,"message":"disk full"}"#
+        );
+        assert_eq!(
+            spectyn_reply(&out, Some(1)),
+            SpectynReply::Error("disk full".into())
+        );
+        // the right line, but not the last event (something failed after it)
+        let out = format!(
+            "{SPECTYN_TRUNCATED}{}\n",
+            r#"{"type":"error","code":1,"message":"session store write failed"}"#
+        );
+        assert_eq!(
+            spectyn_reply(&out, Some(1)),
+            SpectynReply::Error("session store write failed".into())
+        );
+        // the max_rounds wording does not excuse a truncated stop
+        let out = concat!(
+            r#"{"type":"done","output":"edit the li","truncated":true}"#,
+            "\n",
+            r#"{"type":"error","code":1,"message":"error: the run STOPPED at its round limit."}"#,
+        );
+        assert!(matches!(
+            spectyn_reply(out, Some(1)),
+            SpectynReply::Error(_)
+        ));
+    }
+
+    #[test]
+    fn spectyn_reply_stopped_early_with_another_exit_code_or_a_signal_is_an_exit_failure() {
+        for code in [Some(2), Some(101), Some(-1), None] {
+            assert_eq!(
+                spectyn_reply(SPECTYN_TRUNCATED, code),
+                SpectynReply::ExitFailure,
+                "code {code:?}"
+            );
+            assert_eq!(
+                spectyn_reply(SPECTYN_MAX_ROUNDS, code),
+                SpectynReply::ExitFailure,
+                "code {code:?}"
+            );
+        }
+        // exit 1 with no explaining line: something else failed
+        let out = r#"{"type":"done","output":"edit the li","truncated":true}"#;
+        assert_eq!(spectyn_reply(out, Some(1)), SpectynReply::ExitFailure);
     }
 
     /// A fake `spectyn exec --json` that prints `jsonl` and exits with `code`.
@@ -756,12 +881,8 @@ mod tests {
     }
 
     #[test]
-    fn spectyn_run_keeps_a_truncated_answer_despite_exit_1() {
-        let (a, p) = fake_spectyn(
-            "trunc",
-            "{\"type\":\"done\",\"output\":\"edit the li\",\"truncated\":true}\n{\"type\":\"error\",\"code\":1,\"message\":\"INCOMPLETE\"}\n",
-            1,
-        );
+    fn spectyn_run_keeps_a_truncated_answer_only_with_exit_1() {
+        let (a, p) = fake_spectyn("trunc", SPECTYN_TRUNCATED, 1);
         let r = a.run("ignored", Path::new("."));
         let _ = std::fs::remove_file(&p);
         let text = r.expect("a cut-off answer is still handed on").text;
@@ -770,6 +891,31 @@ mod tests {
             text.ends_with("[spectyn stopped early: truncated]"),
             "{text}"
         );
+
+        // a delivered partial answer that mentions quota is not mistaken for a rate limit
+        let quota = concat!(
+            r#"{"type":"done","output":"fix the quota check, then the rate limit te","truncated":true}"#,
+            "\n",
+            r#"{"type":"error","code":1,"message":"error: the answer is INCOMPLETE"}"#,
+            "\n",
+        );
+        let (a, p) = fake_spectyn("quota", quota, 1);
+        let r = a.run("ignored", Path::new("."));
+        let _ = std::fs::remove_file(&p);
+        let text = r.expect("an excused partial answer is a reply").text;
+        assert!(text.starts_with("fix the quota check"), "{text}");
+
+        for code in [2, 101] {
+            let (a, p) = fake_spectyn(&format!("trunc{code}"), SPECTYN_TRUNCATED, code);
+            let r = a.run("ignored", Path::new("."));
+            let _ = std::fs::remove_file(&p);
+            match r {
+                Err(AdapterError::Flaked(m)) => {
+                    assert!(m.contains(&format!("code {code}")), "reason: {m}")
+                }
+                other => panic!("exit {code} must fail, got {other:?}"),
+            }
+        }
     }
 
     #[test]
