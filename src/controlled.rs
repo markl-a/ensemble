@@ -28,6 +28,12 @@ pub struct ControlledPtyConfig {
     pub args: Vec<String>,
     pub envs: Vec<(OsString, OsString)>,
     pub prompt_delay: Duration,
+    /// `None`: a steer's text and its Enter go out in ONE write, which is what
+    /// codex/claude/opencode/agy expect. `Some(d)`: the text, then `d` of
+    /// silence, then the Enter as a SEPARATE write — for a TUI with no bracketed
+    /// paste, which treats keys arriving in one burst as a paste, so an Enter in
+    /// the same burst becomes a newline in the input box instead of a submit.
+    pub submit_delay: Option<Duration>,
     pub relay_output: bool,
 }
 
@@ -49,12 +55,20 @@ impl ControlledPtyConfig {
             args,
             envs: Vec::new(),
             prompt_delay: DEFAULT_PROMPT_DELAY,
+            submit_delay: None,
             relay_output: true,
         }
     }
 
     pub fn env(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
         self.envs.push((key.into(), value.into()));
+        self
+    }
+
+    /// Send a steer's Enter as its own write, `delay` after the text. See
+    /// `submit_delay`.
+    pub fn submit_separately(mut self, delay: Duration) -> Self {
+        self.submit_delay = Some(delay);
         self
     }
 
@@ -113,10 +127,11 @@ pub fn prompt_enter_bytes(prompt: &str) -> Vec<u8> {
     bytes
 }
 
-fn write_script(
-    writer: &Arc<Mutex<Box<dyn Write + Send>>>,
+fn write_script<W: Write>(
+    writer: &Mutex<W>,
     script: &ControlScript,
     delay: Duration,
+    submit_delay: Option<Duration>,
 ) {
     if script.interrupt {
         if let Ok(mut w) = writer.lock() {
@@ -126,9 +141,26 @@ fn write_script(
     }
     if let Some(prompt) = &script.prompt {
         std::thread::sleep(delay);
-        if let Ok(mut w) = writer.lock() {
-            let _ = w.write_all(&prompt_enter_bytes(prompt));
-            let _ = w.flush();
+        match submit_delay {
+            None => {
+                if let Ok(mut w) = writer.lock() {
+                    let _ = w.write_all(&prompt_enter_bytes(prompt));
+                    let _ = w.flush();
+                }
+            }
+            Some(gap) => {
+                if let Ok(mut w) = writer.lock() {
+                    let _ = w.write_all(prompt.as_bytes());
+                    let _ = w.flush();
+                }
+                // The lock is released during the gap so the operator's own
+                // keystrokes are not stalled behind it.
+                std::thread::sleep(gap);
+                if let Ok(mut w) = writer.lock() {
+                    let _ = w.write_all(b"\r");
+                    let _ = w.flush();
+                }
+            }
         }
     }
 }
@@ -258,6 +290,7 @@ pub fn run_controlled_pty(config: ControlledPtyConfig) -> Result<i32, String> {
     let feed = Feed::open(member_control_path(&config.repo, &config.control_name));
     let mut cursor = feed.read_since(0).map(|lines| lines.len()).unwrap_or(0);
     let prompt_delay = config.prompt_delay;
+    let submit_delay = config.submit_delay;
     std::thread::spawn(move || loop {
         std::thread::sleep(CONTROL_POLL);
         let lines = match feed.read_since(cursor) {
@@ -269,7 +302,7 @@ pub fn run_controlled_pty(config: ControlledPtyConfig) -> Result<i32, String> {
                 continue;
             };
             let script = control_script(&cmd);
-            write_script(&control_writer, &script, prompt_delay);
+            write_script(&*control_writer, &script, prompt_delay, submit_delay);
             if script.kill {
                 control_abort.store(true, Ordering::Relaxed);
             }
@@ -438,6 +471,76 @@ mod tests {
         let cmd: ControlCmd = serde_json::from_str(old).expect("old line must still parse");
 
         assert!(control_script(&cmd).interrupt, "old steer stopped interrupting");
+    }
+
+    /// Records every `write` call as its own chunk, with when it arrived, so a
+    /// test can see how the keys were split across writes — the thing a
+    /// no-bracketed-paste TUI actually reacts to.
+    #[derive(Default)]
+    struct ChunkLog {
+        chunks: Vec<(std::time::Instant, Vec<u8>)>,
+    }
+
+    impl Write for ChunkLog {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.chunks.push((std::time::Instant::now(), buf.to_vec()));
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn steer(prompt: &str) -> ControlScript {
+        control_script(&ControlCmd::Steer {
+            from: "operator".to_string(),
+            prompt: prompt.to_string(),
+            interrupt: true,
+        })
+    }
+
+    #[test]
+    fn a_steer_sends_text_and_enter_in_one_write_by_default() {
+        // codex/claude/opencode/agy: unchanged — ESC, then text+CR together.
+        let log = Mutex::new(ChunkLog::default());
+
+        write_script(&log, &steer("focus"), Duration::ZERO, None);
+
+        let chunks: Vec<Vec<u8>> = log
+            .into_inner()
+            .unwrap()
+            .chunks
+            .into_iter()
+            .map(|c| c.1)
+            .collect();
+        assert_eq!(chunks, vec![b"\x1b".to_vec(), b"focus\r".to_vec()]);
+    }
+
+    #[test]
+    fn a_separate_submit_sends_enter_as_its_own_write_after_the_gap() {
+        // spectyn has no bracketed paste: text+CR in one burst reads as a paste
+        // and the CR becomes a newline in its input box, so the steer is typed
+        // but never submitted. The Enter has to arrive alone, after a pause.
+        let gap = Duration::from_millis(40);
+        let log = Mutex::new(ChunkLog::default());
+
+        write_script(&log, &steer("focus"), Duration::ZERO, Some(gap));
+
+        let chunks = log.into_inner().unwrap().chunks;
+        let bytes: Vec<&[u8]> = chunks.iter().map(|c| c.1.as_slice()).collect();
+        assert_eq!(bytes, vec![&b"\x1b"[..], &b"focus"[..], &b"\r"[..]]);
+        assert!(
+            chunks[2].0.duration_since(chunks[1].0) >= gap,
+            "Enter followed the text with no pause"
+        );
+    }
+
+    #[test]
+    fn a_separate_submit_is_set_by_the_builder_and_off_by_default() {
+        let base = ControlledPtyConfig::new("t", ".", "t@local", ".", "x", Vec::new());
+        assert_eq!(base.submit_delay, None);
+        let split = base.submit_separately(Duration::from_millis(350));
+        assert_eq!(split.submit_delay, Some(Duration::from_millis(350)));
     }
 
     #[test]
