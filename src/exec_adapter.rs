@@ -16,12 +16,22 @@ pub const DEFAULT_EXEC_TIMEOUT_SECS: u64 = 600;
 /// launcher's `ENSEMBLE_<CLIENT>_BIN`). Unset or blank → `spectyn` on PATH.
 pub const SPECTYN_BIN_ENV: &str = "ENSEMBLE_SPECTYN_BIN";
 
+/// How a vendor's stdout becomes the reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplyFormat {
+    /// The whole stdout, trimmed, is the answer (codex / claude / opencode).
+    Text,
+    /// `spectyn exec --json`: one JSON event per line; the `done` event carries the answer.
+    SpectynJsonl,
+}
+
 /// Drives a vendor CLI headlessly by exec: `program <args...>` with the prompt on stdin, capturing
 /// stdout as the reply. Per-vendor invocation contracts live in the constructors (design §4a).
 pub struct ExecAdapter {
     name: String,
     program: String,
     args: Vec<String>,
+    reply: ReplyFormat,
     /// Per-command timeout (see `DEFAULT_EXEC_TIMEOUT_SECS`).
     timeout: Duration,
     /// S1b: an optional hard-abort flag (set by the conductor's `set_abort`). When flipped DURING a
@@ -44,6 +54,7 @@ impl ExecAdapter {
                 "--dangerously-bypass-approvals-and-sandbox".into(),
                 "--skip-git-repo-check".into(),
             ],
+            reply: ReplyFormat::Text,
             timeout: Duration::from_secs(DEFAULT_EXEC_TIMEOUT_SECS),
             abort: Mutex::new(None),
         }
@@ -55,6 +66,7 @@ impl ExecAdapter {
             name: "claude".into(),
             program: "claude".into(),
             args: vec!["-p".into()],
+            reply: ReplyFormat::Text,
             timeout: Duration::from_secs(DEFAULT_EXEC_TIMEOUT_SECS),
             abort: Mutex::new(None),
         }
@@ -66,13 +78,15 @@ impl ExecAdapter {
             name: "opencode".into(),
             program: "opencode".into(),
             args: vec!["run".into()],
+            reply: ReplyFormat::Text,
             timeout: Duration::from_secs(DEFAULT_EXEC_TIMEOUT_SECS),
             abort: Mutex::new(None),
         }
     }
 
-    /// spectyn: `spectyn exec --agent coder` — reads the prompt on stdin, prints the answer on stdout
-    /// (exit 0 ok / 1 agent error / 2 bad args). `ENSEMBLE_SPECTYN_BIN` overrides the binary.
+    /// spectyn: `spectyn exec --json --agent coder` — reads the prompt on stdin and prints one JSON
+    /// event per line; the reply is the `done` event's `output` (see `spectyn_reply`). Exit 0 ok /
+    /// 1 agent error / 2 bad args. `ENSEMBLE_SPECTYN_BIN` overrides the binary.
     pub fn spectyn() -> Self {
         Self::spectyn_with_bin(std::env::var(SPECTYN_BIN_ENV).ok())
     }
@@ -86,7 +100,13 @@ impl ExecAdapter {
         Self {
             name: "spectyn".into(),
             program,
-            args: vec!["exec".into(), "--agent".into(), "coder".into()],
+            args: vec![
+                "exec".into(),
+                "--json".into(),
+                "--agent".into(),
+                "coder".into(),
+            ],
+            reply: ReplyFormat::SpectynJsonl,
             timeout: Duration::from_secs(DEFAULT_EXEC_TIMEOUT_SECS),
             abort: Mutex::new(None),
         }
@@ -275,9 +295,44 @@ impl Adapter for ExecAdapter {
                 return Err(AdapterError::RateLimited(info));
             }
         }
+        if self.reply == ReplyFormat::SpectynJsonl {
+            match spectyn_reply(&text) {
+                // A run spectyn itself says stopped early also exits 1 (with an error line explaining
+                // the stop); its text is still real work, so it is returned, flagged by the note.
+                SpectynReply::Answer {
+                    text,
+                    stopped_early,
+                } if status.success() || stopped_early => {
+                    if text.is_empty() {
+                        return Err(AdapterError::Empty);
+                    }
+                    return Ok(AgentOutput {
+                        agent: self.name.clone(),
+                        text,
+                    });
+                }
+                SpectynReply::Error(msg) => {
+                    return Err(AdapterError::Flaked(format!(
+                        "{} reported an error: {}",
+                        self.program,
+                        tail_chars(msg.trim(), EXIT_TAIL_CHARS)
+                    )));
+                }
+                SpectynReply::NoDone if status.success() => {
+                    return Err(AdapterError::Flaked(format!(
+                        "{} --json printed no done event",
+                        self.program
+                    )));
+                }
+                // A clean `done` with a non-zero exit, or no `done` at all after a failed exit: the
+                // generic non-zero handling below reports the exit code and stderr tail.
+                _ => {}
+            }
+        }
         // A non-zero exit is a failed turn even when the CLI printed something (spectyn exits 1 on an
-        // agent error or a cut-off answer, codex on failures): that text is an error message, and
-        // counting it as a reply could even turn it into a verdict.
+        // agent error, codex on failures): that text is an error message, and counting it as a
+        // reply could even turn it into a verdict. (spectyn's own early stops are handled above and
+        // keep their text only with the visible "[spectyn stopped early: …]" note.)
         if !status.success() {
             let code = status
                 .code()
@@ -303,6 +358,80 @@ impl Adapter for ExecAdapter {
     }
 }
 
+/// What a `spectyn exec --json` stdout amounts to.
+#[derive(Debug, PartialEq, Eq)]
+enum SpectynReply {
+    /// The last `done` event's `output`, with `[spectyn stopped early: <reason>]` appended when the
+    /// event says the run did not finish (`truncated`, `stop_reason`, or the older `stopped`).
+    Answer { text: String, stopped_early: bool },
+    /// A top-level `{"type":"error"}` line (its `message`), or an early stop with no text at all.
+    Error(String),
+    /// Neither a `done` nor an `error` event.
+    NoDone,
+}
+
+/// Parse `spectyn exec --json` stdout (one JSON event per line; non-JSON lines are ignored). An
+/// `error` line makes the turn an error, except when the `done` event itself reports an early stop:
+/// spectyn then prints an `error` line explaining that stop, and the partial text is still returned
+/// with the note so reviewers and the gate can see it was cut short.
+fn spectyn_reply(stdout: &str) -> SpectynReply {
+    let mut done: Option<serde_json::Value> = None;
+    let mut error: Option<String> = None;
+    for line in stdout.lines() {
+        let Ok(ev) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+            continue;
+        };
+        match ev.get("type").and_then(|t| t.as_str()) {
+            Some("done") => done = Some(ev),
+            Some("error") => {
+                let msg = ev
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("error event {ev}"));
+                error = Some(msg);
+            }
+            _ => {}
+        }
+    }
+    let Some(done) = done else {
+        return error.map_or(SpectynReply::NoDone, SpectynReply::Error);
+    };
+    let field = |k: &str| {
+        done.get(k)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let output = done
+        .get("output")
+        .and_then(|o| o.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let truncated = done.get("truncated").and_then(|t| t.as_bool()) == Some(true);
+    let reason = field("stop_reason")
+        .or_else(|| field("stopped"))
+        .or_else(|| truncated.then(|| "truncated".to_string()));
+    match reason {
+        Some(reason) if output.is_empty() => {
+            SpectynReply::Error(format!("stopped early before any answer: {reason}"))
+        }
+        Some(reason) => SpectynReply::Answer {
+            text: format!("{output}\n\n[spectyn stopped early: {reason}]"),
+            stopped_early: true,
+        },
+        None => match error {
+            Some(msg) => SpectynReply::Error(msg),
+            None => SpectynReply::Answer {
+                text: output,
+                stopped_early: false,
+            },
+        },
+    }
+}
+
 /// How much of a failed turn's stderr (or stdout, when stderr is empty) the `Flaked` reason keeps.
 const EXIT_TAIL_CHARS: usize = 300;
 
@@ -324,6 +453,7 @@ impl ExecAdapter {
             name: name.into(),
             program: program.into(),
             args: args.iter().map(|s| s.to_string()).collect(),
+            reply: ReplyFormat::Text,
             timeout,
             abort: Mutex::new(None),
         }
@@ -347,7 +477,9 @@ mod tests {
     fn spectyn_runs_exec_agent_coder_and_honours_the_bin_override() {
         let a = ExecAdapter::spectyn_with_bin(None);
         assert_eq!(a.program, "spectyn");
-        assert_eq!(a.args, vec!["exec", "--agent", "coder"]);
+        assert_eq!(a.args, vec!["exec", "--json", "--agent", "coder"]);
+        assert_eq!(a.reply, ReplyFormat::SpectynJsonl);
+        assert_eq!(ExecAdapter::codex().reply, ReplyFormat::Text);
         let a = ExecAdapter::spectyn_with_bin(Some(" C:/bin/spectyn.exe ".into()));
         assert_eq!(a.program, "C:/bin/spectyn.exe");
         assert_eq!(a.name(), "spectyn");
@@ -456,7 +588,9 @@ mod tests {
         let a = shell("spectyn", "echo hi & exit /b 0");
         #[cfg(not(windows))]
         let a = shell("spectyn", "echo hi; exit 0");
-        let r = a.run("ignored", Path::new(".")).expect("exit 0 + output is Ok");
+        let r = a
+            .run("ignored", Path::new("."))
+            .expect("exit 0 + output is Ok");
         assert_eq!(r.text, "hi");
     }
 
@@ -478,6 +612,164 @@ mod tests {
             }
             other => panic!("expected RateLimited, got {other:?}"),
         }
+    }
+
+    const SPECTYN_TOOL_LINES: &str = concat!(
+        r#"{"type":"tool_start","name":"file_read","args_preview":"{}"}"#,
+        "\n",
+        r#"{"type":"tool_done","name":"file_read","output_preview":"ok"}"#,
+        "\n",
+    );
+
+    #[test]
+    fn spectyn_reply_takes_the_done_output() {
+        let out = format!(
+            "{SPECTYN_TOOL_LINES}{}\n",
+            r#"{"type":"done","output":"  VERDICT: APPROVE\nall good  ","cost_usd":0.0,"elapsed_secs":1.5,"files_changed":["src/a.rs"],"truncated":false}"#
+        );
+        assert_eq!(
+            spectyn_reply(&out),
+            SpectynReply::Answer {
+                text: "VERDICT: APPROVE\nall good".into(),
+                stopped_early: false
+            }
+        );
+    }
+
+    #[test]
+    fn spectyn_reply_error_event_is_an_error() {
+        let out = format!(
+            "{SPECTYN_TOOL_LINES}{}\n",
+            r#"{"type":"error","code":1,"message":"provider unreachable"}"#
+        );
+        assert_eq!(
+            spectyn_reply(&out),
+            SpectynReply::Error("provider unreachable".into())
+        );
+        // an error line after a clean done (e.g. every tool call was denied) still fails the turn
+        let out = format!(
+            "{}\n{}\n",
+            r#"{"type":"done","output":"I could not edit anything","truncated":false}"#,
+            r#"{"type":"error","code":1,"message":"all tools were denied"}"#
+        );
+        assert_eq!(
+            spectyn_reply(&out),
+            SpectynReply::Error("all tools were denied".into())
+        );
+    }
+
+    #[test]
+    fn spectyn_reply_without_done_is_no_done() {
+        assert_eq!(spectyn_reply(SPECTYN_TOOL_LINES), SpectynReply::NoDone);
+        assert_eq!(spectyn_reply(""), SpectynReply::NoDone);
+        assert_eq!(
+            spectyn_reply("plain text, not json\n"),
+            SpectynReply::NoDone
+        );
+    }
+
+    #[test]
+    fn spectyn_reply_truncated_keeps_the_text_with_a_note() {
+        // What spectyn really prints for a cut-off stream: done(truncated) + an explaining error.
+        let out = format!(
+            "{}\n{}\n",
+            r#"{"type":"done","output":"edit the li","files_changed":[],"truncated":true}"#,
+            r#"{"type":"error","code":1,"message":"error: the answer is INCOMPLETE"}"#
+        );
+        assert_eq!(
+            spectyn_reply(&out),
+            SpectynReply::Answer {
+                text: "edit the li\n\n[spectyn stopped early: truncated]".into(),
+                stopped_early: true
+            }
+        );
+    }
+
+    #[test]
+    fn spectyn_reply_stop_reason_wins_over_stopped_and_older_builds_use_stopped() {
+        let out = r#"{"type":"done","output":"half done","truncated":false,"stopped":"max_rounds","stop_reason":"round limit reached"}"#;
+        assert_eq!(
+            spectyn_reply(out),
+            SpectynReply::Answer {
+                text: "half done\n\n[spectyn stopped early: round limit reached]".into(),
+                stopped_early: true
+            }
+        );
+        let out =
+            r#"{"type":"done","output":"half done","truncated":false,"stopped":"max_rounds"}"#;
+        assert_eq!(
+            spectyn_reply(out),
+            SpectynReply::Answer {
+                text: "half done\n\n[spectyn stopped early: max_rounds]".into(),
+                stopped_early: true
+            }
+        );
+        // an early stop with no text at all has nothing to hand on
+        let out = r#"{"type":"done","output":"","truncated":true}"#;
+        assert!(matches!(spectyn_reply(out), SpectynReply::Error(m) if m.contains("truncated")));
+    }
+
+    /// A fake `spectyn exec --json` that prints `jsonl` and exits with `code`.
+    fn fake_spectyn(tag: &str, jsonl: &str, code: i32) -> (ExecAdapter, std::path::PathBuf) {
+        let path =
+            std::env::temp_dir().join(format!("ensemble-wp172-{tag}-{}.jsonl", std::process::id()));
+        std::fs::write(&path, jsonl).unwrap();
+        #[cfg(windows)]
+        let script = format!("type {} & exit /b {code}", path.display()); // no quotes: cmd /C mangles them
+        #[cfg(not(windows))]
+        let script = format!("cat '{}'; exit {code}", path.display());
+        let mut a = shell("spectyn", &script);
+        a.reply = ReplyFormat::SpectynJsonl;
+        (a, path)
+    }
+
+    #[test]
+    fn spectyn_run_returns_done_output_and_flakes_on_error_or_missing_done() {
+        let (a, p) = fake_spectyn(
+            "ok",
+            "{\"type\":\"tool_start\",\"name\":\"ls\",\"args_preview\":\"{}\"}\n{\"type\":\"done\",\"output\":\"hello\",\"truncated\":false}\n",
+            0,
+        );
+        let r = a.run("ignored", Path::new("."));
+        let _ = std::fs::remove_file(&p);
+        assert_eq!(r.expect("done output is the reply").text, "hello");
+
+        let (a, p) = fake_spectyn(
+            "err",
+            "{\"type\":\"error\",\"code\":1,\"message\":\"model refused\"}\n",
+            1,
+        );
+        let r = a.run("ignored", Path::new("."));
+        let _ = std::fs::remove_file(&p);
+        match r {
+            Err(AdapterError::Flaked(m)) => assert!(m.contains("model refused"), "reason: {m}"),
+            other => panic!("expected Flaked, got {other:?}"),
+        }
+
+        let (a, p) = fake_spectyn("nodone", "{\"type\":\"token\",\"content\":\"hi\"}\n", 0);
+        let r = a.run("ignored", Path::new("."));
+        let _ = std::fs::remove_file(&p);
+        match r {
+            Err(AdapterError::Flaked(m)) => assert!(m.contains("no done event"), "reason: {m}"),
+            other => panic!("expected Flaked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn spectyn_run_keeps_a_truncated_answer_despite_exit_1() {
+        let (a, p) = fake_spectyn(
+            "trunc",
+            "{\"type\":\"done\",\"output\":\"edit the li\",\"truncated\":true}\n{\"type\":\"error\",\"code\":1,\"message\":\"INCOMPLETE\"}\n",
+            1,
+        );
+        let r = a.run("ignored", Path::new("."));
+        let _ = std::fs::remove_file(&p);
+        let text = r.expect("a cut-off answer is still handed on").text;
+        assert!(text.starts_with("edit the li"), "{text}");
+        assert!(
+            text.ends_with("[spectyn stopped early: truncated]"),
+            "{text}"
+        );
     }
 
     #[test]

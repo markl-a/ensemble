@@ -26,7 +26,7 @@ const USAGE: &str = "usage:\n  \
     ensemble mesh [--port <n>]   (this node's CLIs + which agents each tailnet peer hosts)\n  \
     ensemble doctor   (check this machine is ready: which AI CLIs + tailscale are on PATH, is-git-repo)\n  \
     ensemble agent <name> \"<task>\" [--node auto|<host>] [--repo <path>] [--json]   (delegate ONE turn to one CLI)\n  \
-    headless agents (run/agent/all/serve, crew.toml roles): codex | claude | opencode | agy | spectyn   (spectyn = `spectyn exec --agent coder`; ENSEMBLE_SPECTYN_BIN pins its binary)\n  \
+    headless agents (run/agent/all/serve, crew.toml roles): codex | claude | opencode | agy | spectyn   (spectyn = `spectyn exec --json --agent coder`, reply = the done event; ENSEMBLE_SPECTYN_BIN pins its binary)\n  \
     ensemble [--repo <path>] [--team <name>] [--member <member>] [--confirm-policy ask|approve|deny] [--print-config] <codex|claude|opencode> [vendor args...]\n  \
     ensemble [--repo <path>] [--team <name>] [--member <member>] [--timeout <secs>] [--confirm-policy ask|approve|deny] [--print-prompt] [--json] agy [vendor args...]   (no prompt: interactive; --prompt/-p: bounded team turn)\n  \
     ensemble merge <branch> [--into <target>] [--repo <path>] [--resolver <agent>]   (land a kept branch; conflict → escalate, or --resolver runs ONE AI round)\n  \
