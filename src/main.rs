@@ -29,6 +29,7 @@ const USAGE: &str = "usage:\n  \
     headless agents (run/agent/all/serve, crew.toml roles): codex | claude | opencode | agy | spectyn   (spectyn = `spectyn exec --agent coder`; ENSEMBLE_SPECTYN_BIN pins its binary)\n  \
     ensemble [--repo <path>] [--team <name>] [--member <member>] [--confirm-policy ask|approve|deny] [--print-config] <codex|claude|opencode> [vendor args...]\n  \
     ensemble [--repo <path>] [--team <name>] [--member <member>] [--timeout <secs>] [--confirm-policy ask|approve|deny] [--print-prompt] [--json] agy [vendor args...]   (no prompt: interactive; --prompt/-p: bounded team turn)\n  \
+    ensemble [--repo <path>] [--cwd <path>] [--team <name>] [--name <member>] [--print-config] spectyn [vendor args...]   (spectyn's interactive TUI on the board, steerable; no MCP: it posts with `ensemble team say`; --confirm-policy ask only; ENSEMBLE_SPECTYN_BIN pins its binary)\n  \
     ensemble merge <branch> [--into <target>] [--repo <path>] [--resolver <agent>]   (land a kept branch; conflict → escalate, or --resolver runs ONE AI round)\n  \
     ensemble serve [--bind <addr>|--port <n>] [--token <token>]   (default: this node's tailnet IP:7878; loopback if no tailnet)\n  \
     ensemble serve --install-service|--uninstall-service [--bind <addr>|--port <n>] [--token <token>] [--exe <path>] [--print]   (install/remove boot/login-started serve)\n  \
@@ -60,6 +61,7 @@ fn main() {
             args: parsed,
         })) => return member_launcher_cmd(client, parsed),
         Ok(Some(LauncherInvocation::Agy(parsed))) => return agy_cmd(parsed),
+        Ok(Some(LauncherInvocation::Spectyn(parsed))) => return spectyn_launcher_cmd(parsed),
         Ok(None) => {}
         Err(e) => {
             eprintln!("ensemble: {e}");
@@ -84,7 +86,7 @@ fn main() {
         Some("mesh") => mesh_cmd(&args),
         Some("doctor") => doctor_cmd(&args),
         Some("agent") => agent_cmd(&args),
-        Some("codex") | Some("claude") | Some("opencode") | Some("agy") => {
+        Some("codex") | Some("claude") | Some("opencode") | Some("agy") | Some("spectyn") => {
             eprintln!(
                 "ensemble: launcher syntax is `ensemble [ensemble options] {} [vendor args...]`",
                 sub.unwrap_or("<ai-cli>")
@@ -1649,6 +1651,10 @@ impl ConfirmPolicy {
 enum LauncherKind {
     Member(ensemble::mcp_install::ClientKind),
     Agy,
+    /// spectyn's interactive TUI. Not a `ClientKind`: those are the vendors
+    /// `ensemble mcp install` can register into, and spectyn has no MCP client —
+    /// it reaches the board through `ensemble team say` instead.
+    Spectyn,
 }
 
 impl LauncherKind {
@@ -1658,6 +1664,7 @@ impl LauncherKind {
             "claude" => Some(Self::Member(ensemble::mcp_install::ClientKind::Claude)),
             "opencode" => Some(Self::Member(ensemble::mcp_install::ClientKind::Opencode)),
             "agy" => Some(Self::Agy),
+            "spectyn" => Some(Self::Spectyn),
             _ => None,
         }
     }
@@ -1670,6 +1677,9 @@ enum LauncherInvocation {
         args: MemberLauncherArgs,
     },
     Agy(AgyCliArgs),
+    /// Same leading flags as a member launcher (`--repo/--cwd/--team/--name/
+    /// --confirm-policy/--print-config`), so it reuses that parser.
+    Spectyn(MemberLauncherArgs),
 }
 
 fn parse_launcher_invocation(args: &[String]) -> Result<Option<LauncherInvocation>, String> {
@@ -1687,7 +1697,7 @@ fn parse_launcher_invocation(args: &[String]) -> Result<Option<LauncherInvocatio
     }
 
     let (launcher_idx, kind) = find_launcher_token(args)?.ok_or_else(|| {
-        "expected one of codex, claude, opencode, or agy after ensemble launcher options"
+        "expected one of codex, claude, opencode, agy, or spectyn after ensemble launcher options"
             .to_string()
     })?;
     match kind {
@@ -1699,6 +1709,9 @@ fn parse_launcher_invocation(args: &[String]) -> Result<Option<LauncherInvocatio
             args,
             launcher_idx,
         )?))),
+        LauncherKind::Spectyn => Ok(Some(LauncherInvocation::Spectyn(
+            parse_member_launcher_args_at(args, launcher_idx)?,
+        ))),
     }
 }
 
@@ -1711,7 +1724,7 @@ fn find_launcher_token(args: &[String]) -> Result<Option<(usize, LauncherKind)>,
         }
         if !is_launcher_leading_flag(token) {
             return Err(format!(
-                "unexpected argument `{token}` before launcher; expected ensemble options followed by codex|claude|opencode|agy"
+                "unexpected argument `{token}` before launcher; expected ensemble options followed by codex|claude|opencode|agy|spectyn"
             ));
         }
         i += if launcher_flag_takes_value(token) {
@@ -1853,7 +1866,12 @@ fn vendor_bin_env_key(client: ensemble::mcp_install::ClientKind) -> String {
 
 /// Read the per-client vendor-binary override from this process's environment.
 fn vendor_bin_override(client: ensemble::mcp_install::ClientKind) -> Option<String> {
-    std::env::var(vendor_bin_env_key(client))
+    env_bin_override(&vendor_bin_env_key(client))
+}
+
+/// Read a vendor-binary override from `key`; unset or blank means "use PATH".
+fn env_bin_override(key: &str) -> Option<String> {
+    std::env::var(key)
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
@@ -1885,7 +1903,9 @@ fn parse_member_launcher_args(args: &[String]) -> Result<MemberLauncherArgs, Str
         "expected codex, claude, or opencode after ensemble launcher options".to_string()
     })?;
     match kind {
-        LauncherKind::Member(_) => parse_member_launcher_args_at(args, launcher_idx),
+        LauncherKind::Member(_) | LauncherKind::Spectyn => {
+            parse_member_launcher_args_at(args, launcher_idx)
+        }
         LauncherKind::Agy => Err("expected codex, claude, or opencode; got agy".to_string()),
     }
 }
@@ -2396,6 +2416,189 @@ fn build_member_vendor_argv(plan: &MemberLaunchPlan) -> Vec<String> {
     args
 }
 
+/// Pause between a steer's text and its Enter for a spectyn member. spectyn's
+/// TUI has no bracketed paste: keys that arrive in one burst are taken as a
+/// paste, so an Enter in the same write lands as a newline in the input box and
+/// the steer sits there unsent. spectyn's own bridge waits ~350 ms; this
+/// matches it.
+const SPECTYN_SUBMIT_DELAY: std::time::Duration = std::time::Duration::from_millis(350);
+
+/// `ensemble [opts] spectyn [vendor args]`: spectyn's interactive TUI under the
+/// controlled PTY. Unlike a `MemberLaunchPlan` there is no MCP config — spectyn
+/// has no MCP client, so it posts to the board with `ensemble team say`.
+#[derive(Debug, Clone)]
+struct SpectynLaunchPlan {
+    session: ensemble::TeamSession,
+    /// Working directory for spectyn; equals the session repo unless --cwd.
+    work_dir: std::path::PathBuf,
+    vendor_program: String,
+    vendor_args: Vec<String>,
+    confirm_policy: ConfirmPolicy,
+    print_config: bool,
+}
+
+/// `--confirm-policy` for spectyn. `ask` is how spectyn already behaves (it
+/// shows approval cards in the TUI). It has no launch flag yet that turns every
+/// card into approve or deny, so those are refused loudly rather than accepted
+/// and ignored — the opencode `--auto` lesson above.
+fn spectyn_confirmation_args(policy: ConfirmPolicy) -> Result<Vec<String>, String> {
+    match policy {
+        ConfirmPolicy::Ask => Ok(Vec::new()),
+        other => Err(format!(
+            "--confirm-policy {} is not supported for spectyn yet (spectyn has no launch flag for it); \
+             use ask and answer its approval cards in the session",
+            other.as_str()
+        )),
+    }
+}
+
+fn build_spectyn_launch_plan(
+    parsed: MemberLauncherArgs,
+    env: &MemberLauncherEnv,
+) -> Result<SpectynLaunchPlan, String> {
+    spectyn_confirmation_args(parsed.confirm_policy)?;
+    let repo = absolutize_from(std::path::PathBuf::from(parsed.repo), &env.cwd);
+    if !repo.is_absolute() {
+        return Err(format!(
+            "--repo did not resolve to an absolute path ({})",
+            repo.display()
+        ));
+    }
+    let work_dir = resolve_work_dir(parsed.cwd.as_deref(), &repo, &env.cwd)?;
+    let team = ensemble::default_team_name(Some(&parsed.team));
+    let member = parsed
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| ensemble::default_member_name("spectyn", env.raw_host.as_deref()));
+    Ok(SpectynLaunchPlan {
+        session: ensemble::resolve_team_session(
+            &repo,
+            Some(&team),
+            "spectyn",
+            Some(&member),
+            env.raw_host.as_deref(),
+        ),
+        work_dir,
+        vendor_program: env
+            .vendor_bin
+            .clone()
+            .unwrap_or_else(|| "spectyn".to_string()),
+        vendor_args: parsed.vendor_args,
+        confirm_policy: parsed.confirm_policy,
+        print_config: parsed.print_config,
+    })
+}
+
+fn build_spectyn_vendor_argv(plan: &SpectynLaunchPlan) -> Vec<String> {
+    let mut args = spectyn_confirmation_args(plan.confirm_policy).unwrap_or_default();
+    args.extend(plan.vendor_args.iter().cloned());
+    args
+}
+
+/// The PTY config for a spectyn member. Kept separate from the launch so the
+/// one spectyn-specific bit — the Enter sent on its own after a pause — is
+/// testable.
+fn spectyn_pty_config(plan: &SpectynLaunchPlan) -> ensemble::ControlledPtyConfig {
+    ensemble::ControlledPtyConfig::new(
+        "spectyn",
+        // repo — control feed + board; steer has to reach this member here.
+        plan.session.repo.clone(),
+        plan.session.member.clone(),
+        // cwd — where spectyn runs; see resolve_work_dir.
+        plan.work_dir.clone(),
+        plan.vendor_program.clone(),
+        build_spectyn_vendor_argv(plan),
+    )
+    .submit_separately(SPECTYN_SUBMIT_DELAY)
+    .env("ENSEMBLE_REPO", &plan.session.repo)
+    .env("ENSEMBLE_TEAM", &plan.session.team)
+    .env("ENSEMBLE_MEMBER", &plan.session.member)
+    .env("ENSEMBLE_BOARD", &plan.session.board)
+}
+
+fn render_spectyn_launch_preview(plan: &SpectynLaunchPlan) -> String {
+    let vendor_args = serde_json::to_string(&build_spectyn_vendor_argv(plan))
+        .unwrap_or_else(|_| "[]".to_string());
+    format!(
+        "client=spectyn\nmember={}\nteam={}\nconfirm_policy={}\nrepo={}\ncwd={}\nboard={}\nlaunch={} {}\n\n# no MCP config: spectyn has no MCP client; it posts with `ensemble team say`\n",
+        plan.session.member,
+        plan.session.team,
+        plan.confirm_policy.as_str(),
+        plan.session.repo.display(),
+        plan.work_dir.display(),
+        plan.session.board.display(),
+        plan.vendor_program,
+        vendor_args,
+    )
+}
+
+fn print_spectyn_launch_banner(plan: &SpectynLaunchPlan) {
+    let s = &plan.session;
+    println!("ensemble: launching controlled `spectyn` as `{}`", s.member);
+    println!("  repo: {}", s.repo.display());
+    if plan.work_dir != s.repo {
+        println!("  cwd:  {}", plan.work_dir.display());
+    }
+    println!("  team: {}", s.team);
+    println!("  confirm-policy: {}", plan.confirm_policy.as_str());
+    println!("  board: {}", s.board.display());
+    println!(
+        "  post: ensemble team say \"<message>\" --from {} --repo {} --team {}   (no MCP for spectyn)",
+        s.member,
+        s.repo.display(),
+        s.team
+    );
+    println!(
+        "  steer: ensemble steer {} \"<prompt>\" --repo {}",
+        s.member,
+        s.repo.display()
+    );
+    println!(
+        "  abort: ensemble abort {} --repo {}",
+        s.member,
+        s.repo.display()
+    );
+    println!(
+        "  hard-abort: ensemble abort {} --hard --repo {}",
+        s.member,
+        s.repo.display()
+    );
+}
+
+fn spectyn_launcher_cmd(parsed: MemberLauncherArgs) {
+    let mut env = runtime_member_launcher_env().unwrap_or_else(|e| {
+        eprintln!("ensemble spectyn: {e}");
+        std::process::exit(2);
+    });
+    env.vendor_bin = env_bin_override(ensemble::exec_adapter::SPECTYN_BIN_ENV);
+    let plan = build_spectyn_launch_plan(parsed, &env).unwrap_or_else(|e| {
+        eprintln!("ensemble spectyn: {e}");
+        std::process::exit(2);
+    });
+    if plan.print_config {
+        print!("{}", render_spectyn_launch_preview(&plan));
+        return;
+    }
+    if let Err(e) = std::fs::create_dir_all(&plan.session.root) {
+        eprintln!(
+            "ensemble spectyn: create team root {}: {e}",
+            plan.session.root.display()
+        );
+        std::process::exit(1);
+    }
+    print_spectyn_launch_banner(&plan);
+    let exit_code = ensemble::run_controlled_pty(spectyn_pty_config(&plan)).unwrap_or_else(|e| {
+        eprintln!("ensemble spectyn: start `{}`: {e}", plan.vendor_program);
+        std::process::exit(127);
+    });
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
+}
+
 const DEFAULT_AGY_TIMEOUT_SECS: u64 = 180;
 const AGY_CONTEXT_LIMIT: usize = 20;
 
@@ -2451,6 +2654,7 @@ fn parse_agy_args(args: &[String]) -> Result<AgyCliArgs, String> {
     match kind {
         LauncherKind::Agy => parse_agy_args_at(args, launcher_idx),
         LauncherKind::Member(client) => Err(format!("expected agy; got {}", client.as_str())),
+        LauncherKind::Spectyn => Err("expected agy; got spectyn".to_string()),
     }
 }
 
@@ -4751,6 +4955,120 @@ node = "http://m2:7878"
 
         // The override pins the exact program; PATH resolution of bare `codex` is bypassed.
         assert_eq!(plan.vendor_program, fake.display().to_string());
+    }
+
+    #[test]
+    fn launcher_parser_routes_spectyn_to_its_own_launcher() {
+        assert_eq!(LauncherKind::parse("spectyn"), Some(LauncherKind::Spectyn));
+
+        let parsed = match parse_launcher_invocation(&argv(&[
+            "ensemble", "--repo", "work", "--cwd", "wt", "--team", "ops", "--name", "sp-a",
+            "spectyn", "--resume", "last",
+        ]))
+        .unwrap()
+        .unwrap()
+        {
+            LauncherInvocation::Spectyn(args) => args,
+            other => panic!("expected spectyn launcher, got {other:?}"),
+        };
+
+        assert_eq!(parsed.repo, "work");
+        assert_eq!(parsed.cwd.as_deref(), Some("wt"));
+        assert_eq!(parsed.team, "ops");
+        assert_eq!(parsed.name.as_deref(), Some("sp-a"));
+        assert_eq!(parsed.confirm_policy, ConfirmPolicy::Ask);
+        assert_eq!(
+            parsed.vendor_args,
+            vec!["--resume".to_string(), "last".to_string()]
+        );
+        // Agy-only flags are still refused before spectyn.
+        let err = parse_launcher_invocation(&argv(&["ensemble", "--timeout", "5", "spectyn"]))
+            .unwrap_err();
+        assert!(err.contains("only valid before `agy`"), "{err}");
+    }
+
+    #[test]
+    fn spectyn_confirm_policy_is_ask_only_and_refuses_the_rest_loudly() {
+        assert_eq!(
+            spectyn_confirmation_args(ConfirmPolicy::Ask),
+            Ok(Vec::new())
+        );
+        for policy in [ConfirmPolicy::Approve, ConfirmPolicy::Deny] {
+            let err = spectyn_confirmation_args(policy).unwrap_err();
+            assert!(err.contains("not supported for spectyn"), "{err}");
+            assert!(err.contains(policy.as_str()), "{err}");
+        }
+
+        // And at plan time, so `ensemble --confirm-policy approve spectyn` exits
+        // with the message instead of launching a session that still asks.
+        let env = MemberLauncherEnv {
+            cwd: test_abs("cwd"),
+            exe: test_abs("bin").join("ensemble"),
+            raw_host: Some("node-a".to_string()),
+            home: test_abs("home"),
+            codex_home: None,
+            vendor_bin: None,
+        };
+        let parsed = parse_member_launcher_args(&argv(&[
+            "ensemble",
+            "--confirm-policy",
+            "approve",
+            "spectyn",
+        ]))
+        .unwrap();
+        assert!(build_spectyn_launch_plan(parsed, &env)
+            .unwrap_err()
+            .contains("not supported for spectyn"));
+    }
+
+    #[test]
+    fn spectyn_plan_joins_the_board_and_submits_steers_separately() {
+        let cwd = test_abs("cwd");
+        let mut env = MemberLauncherEnv {
+            cwd: cwd.clone(),
+            exe: test_abs("bin").join("ensemble"),
+            raw_host: Some("node-a.local".to_string()),
+            home: test_abs("home"),
+            codex_home: None,
+            vendor_bin: None,
+        };
+        let parsed = parse_member_launcher_args(&argv(&[
+            "ensemble", "--repo", "work", "--team", "ops", "spectyn", "--agent", "coder",
+        ]))
+        .unwrap();
+
+        let plan = build_spectyn_launch_plan(parsed.clone(), &env).unwrap();
+
+        assert_eq!(plan.session.repo, cwd.join("work"));
+        assert_eq!(plan.work_dir, cwd.join("work"));
+        assert_eq!(plan.session.team, "ops");
+        assert_eq!(plan.session.member, "spectyn@node-a");
+        assert_eq!(plan.vendor_program, "spectyn");
+
+        let config = spectyn_pty_config(&plan);
+        assert_eq!(config.program, "spectyn");
+        assert_eq!(
+            config.args,
+            vec!["--agent".to_string(), "coder".to_string()]
+        );
+        assert_eq!(config.control_name, "spectyn@node-a");
+        assert_eq!(config.repo, cwd.join("work"));
+        // The point of this launcher kind: spectyn has no bracketed paste, so a
+        // steer's Enter must arrive alone, after spectyn's own ~350 ms gap.
+        assert_eq!(
+            config.submit_delay,
+            Some(std::time::Duration::from_millis(350))
+        );
+        assert!(config
+            .envs
+            .iter()
+            .any(|(k, v)| k == "ENSEMBLE_MEMBER" && v == "spectyn@node-a"));
+
+        // ENSEMBLE_SPECTYN_BIN pins the binary, like the other vendors.
+        let fake = test_abs("fake").join("spectyn.exe");
+        env.vendor_bin = Some(fake.display().to_string());
+        let pinned = build_spectyn_launch_plan(parsed, &env).unwrap();
+        assert_eq!(pinned.vendor_program, fake.display().to_string());
     }
 
     #[test]
