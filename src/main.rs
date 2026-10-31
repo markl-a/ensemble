@@ -26,6 +26,7 @@ const USAGE: &str = "usage:\n  \
     ensemble mesh [--port <n>]   (this node's CLIs + which agents each tailnet peer hosts)\n  \
     ensemble doctor   (check this machine is ready: which AI CLIs + tailscale are on PATH, is-git-repo)\n  \
     ensemble agent <name> \"<task>\" [--node auto|<host>] [--repo <path>] [--json]   (delegate ONE turn to one CLI)\n  \
+    headless agents (run/agent/all/serve, crew.toml roles): codex | claude | opencode | agy | spectyn   (spectyn = `spectyn exec --agent coder`; ENSEMBLE_SPECTYN_BIN pins its binary)\n  \
     ensemble [--repo <path>] [--team <name>] [--member <member>] [--confirm-policy ask|approve|deny] [--print-config] <codex|claude|opencode> [vendor args...]\n  \
     ensemble [--repo <path>] [--team <name>] [--member <member>] [--timeout <secs>] [--confirm-policy ask|approve|deny] [--print-prompt] [--json] agy [vendor args...]   (no prompt: interactive; --prompt/-p: bounded team turn)\n  \
     ensemble merge <branch> [--into <target>] [--repo <path>] [--resolver <agent>]   (land a kept branch; conflict → escalate, or --resolver runs ONE AI round)\n  \
@@ -2872,6 +2873,7 @@ fn council_run_one(
             "codex" => Box::new(ExecAdapter::codex()),
             "claude" => Box::new(ExecAdapter::claude()),
             "opencode" => Box::new(ExecAdapter::opencode()),
+            "spectyn" => Box::new(ExecAdapter::spectyn()),
             "agy" => Box::new(AgyAdapter::new()),
             other => {
                 return (
@@ -3246,19 +3248,20 @@ fn load_crew(args: &[String]) -> CrewConfig {
     }
 }
 
-/// Phase-1b adapter registry: all four real CLIs (local). Used by `ensemble serve` to host this
+/// Phase-1b adapter registry: all the real headless CLIs (local). Used by `ensemble serve` to host this
 /// node's agents.
 fn adapters() -> HashMap<String, Box<dyn Adapter>> {
     let mut adapters: HashMap<String, Box<dyn Adapter>> = HashMap::new();
     adapters.insert("codex".into(), Box::new(ExecAdapter::codex()));
     adapters.insert("claude".into(), Box::new(ExecAdapter::claude()));
     adapters.insert("opencode".into(), Box::new(ExecAdapter::opencode()));
+    adapters.insert("spectyn".into(), Box::new(ExecAdapter::spectyn()));
     adapters.insert("agy".into(), Box::new(AgyAdapter::new()));
     adapters
 }
 
 /// item 6: apply a crew.toml `[agents.<n>]` `timeout`/`args` to a LOCAL ExecAdapter (codex/claude/
-/// opencode). `args` (e.g. `["--model","gpt-5.5"]`) is appended after the vendor's base args; `timeout`
+/// opencode/spectyn). `args` (e.g. `["--model","gpt-5.5"]`) is appended after the vendor's base args; `timeout`
 /// overrides the per-command deadline. A remote node ignores these (it configures its own).
 fn cfg_exec(base: ExecAdapter, crew: &CrewConfig, agent: &str) -> ExecAdapter {
     let mut a = base;
@@ -3342,6 +3345,12 @@ fn adapters_for(crew: &CrewConfig, discover: bool) -> HashMap<String, Box<dyn Ad
                         Box::new(cfg_exec(ExecAdapter::opencode(), crew, agent)),
                     );
                 }
+                "spectyn" => {
+                    m.insert(
+                        agent.into(),
+                        Box::new(cfg_exec(ExecAdapter::spectyn(), crew, agent)),
+                    );
+                }
                 "agy" => {
                     m.insert(agent.into(), Box::new(cfg_agy(crew, agent)));
                 }
@@ -3396,6 +3405,7 @@ fn local_agent_adapter(name: &str) -> Option<Box<dyn Adapter>> {
         "codex" => Box::new(ExecAdapter::codex()),
         "claude" => Box::new(ExecAdapter::claude()),
         "opencode" => Box::new(ExecAdapter::opencode()),
+        "spectyn" => Box::new(ExecAdapter::spectyn()),
         "agy" => Box::new(AgyAdapter::new()),
         _ => return None,
     };
@@ -4219,6 +4229,34 @@ backup = "agy"
             set.contains("agy"),
             "codex's backup agy must be built too, else substitution can't reach it"
         );
+    }
+
+    #[test]
+    fn crew_can_use_spectyn_as_implementer_or_reviewer() {
+        // spectyn is a headless vendor like codex/claude/opencode: a crew naming it in a role (or as
+        // a backup) gets a local adapter, so `run`/`dispatch` don't escalate on a missing adapter.
+        let crew: CrewConfig = toml::from_str(
+            r#"
+pipeline = ["implement", "review"]
+[gate]
+min_approvals = 1
+max_rounds = 1
+on_flake = "exclude"
+[roles.implement]
+agent = "spectyn"
+[roles.review]
+agent = "codex"
+[agents.codex]
+backup = "spectyn"
+[agents.spectyn]
+timeout = 1200
+"#,
+        )
+        .unwrap();
+        let m = adapters_for(&crew, false);
+        assert_eq!(m.get("spectyn").map(|a| a.name()), Some("spectyn"));
+        assert_eq!(m.get("codex").map(|a| a.name()), Some("codex"));
+        assert!(adapters().contains_key("spectyn"), "`serve` hosts spectyn");
     }
 
     #[test]
@@ -5744,7 +5782,7 @@ node = "http://m2:7878"
     #[test]
     fn resolve_one_known_local_name_without_discover_is_local_adapter() {
         // Each known local name resolves to its local adapter (label "local") with no node/discovery.
-        for n in ["codex", "claude", "opencode", "agy"] {
+        for n in ["codex", "claude", "opencode", "agy", "spectyn"] {
             let (a, label) = resolve_one(n, None, false)
                 .unwrap_or_else(|| panic!("{n} should resolve to a local adapter"));
             assert_eq!(a.name(), n);
