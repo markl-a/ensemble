@@ -1,5 +1,5 @@
 //! `ensemble doctor` — environment-readiness check. Reports, before a crew runs, whether each
-//! thing the mesh needs is present: the four AI CLIs (codex/claude/opencode/agy), `tailscale` (for
+//! thing the mesh needs is present: the AI CLIs (codex/claude/opencode/agy/spectyn), `tailscale` (for
 //! cross-machine discovery), and whether the cwd is a git repo. The CORE (`check_tools` / `is_ready`)
 //! is pure — it asks a `present(name)` probe / reads a `&[ToolStatus]` — so it is hermetically
 //! testable; `run_checks` is the thin IO wrapper that supplies a real PATH probe + a git-repo check.
@@ -23,6 +23,10 @@ const TOOLS: &[(&str, &str)] = &[
     ("claude", "install + log in: claude (Claude Code)"),
     ("opencode", "install + log in: opencode"),
     ("agy", "install + log in: agy (antigravity)"),
+    (
+        "spectyn",
+        "optional: install spectyn (headless `spectyn exec`; ENSEMBLE_SPECTYN_BIN pins the binary)",
+    ),
 ];
 
 /// The label `run_checks` files the cwd git-repo check under. Shared with `is_ready` so the
@@ -123,9 +127,9 @@ mod tests {
             st.iter().all(|t| t.hint.is_empty()),
             "present tools carry no hint"
         );
-        // the four expected CLIs are reported, in order
+        // the expected CLIs are reported, in order
         let names: Vec<&str> = st.iter().map(|t| t.name.as_str()).collect();
-        assert_eq!(names, vec!["codex", "claude", "opencode", "agy"]);
+        assert_eq!(names, vec!["codex", "claude", "opencode", "agy", "spectyn"]);
     }
 
     #[test]

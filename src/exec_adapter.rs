@@ -12,6 +12,10 @@ use std::time::Duration;
 /// (observed with opencode). Overridable via `with_timeout`.
 pub const DEFAULT_EXEC_TIMEOUT_SECS: u64 = 600;
 
+/// Environment variable that pins the binary `ExecAdapter::spectyn()` runs (same pattern as the
+/// launcher's `ENSEMBLE_<CLIENT>_BIN`). Unset or blank → `spectyn` on PATH.
+pub const SPECTYN_BIN_ENV: &str = "ENSEMBLE_SPECTYN_BIN";
+
 /// Drives a vendor CLI headlessly by exec: `program <args...>` with the prompt on stdin, capturing
 /// stdout as the reply. Per-vendor invocation contracts live in the constructors (design §4a).
 pub struct ExecAdapter {
@@ -62,6 +66,27 @@ impl ExecAdapter {
             name: "opencode".into(),
             program: "opencode".into(),
             args: vec!["run".into()],
+            timeout: Duration::from_secs(DEFAULT_EXEC_TIMEOUT_SECS),
+            abort: Mutex::new(None),
+        }
+    }
+
+    /// spectyn: `spectyn exec --agent coder` — reads the prompt on stdin, prints the answer on stdout
+    /// (exit 0 ok / 1 agent error / 2 bad args). `ENSEMBLE_SPECTYN_BIN` overrides the binary.
+    pub fn spectyn() -> Self {
+        Self::spectyn_with_bin(std::env::var(SPECTYN_BIN_ENV).ok())
+    }
+
+    /// `spectyn()` with the override passed in, so tests need not mutate the process env.
+    fn spectyn_with_bin(bin: Option<String>) -> Self {
+        let program = bin
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "spectyn".to_string());
+        Self {
+            name: "spectyn".into(),
+            program,
+            args: vec!["exec".into(), "--agent".into(), "coder".into()],
             timeout: Duration::from_secs(DEFAULT_EXEC_TIMEOUT_SECS),
             abort: Mutex::new(None),
         }
@@ -279,6 +304,20 @@ mod tests {
         assert_eq!(ExecAdapter::codex().name(), "codex");
         assert_eq!(ExecAdapter::claude().name(), "claude");
         assert_eq!(ExecAdapter::opencode().name(), "opencode");
+        assert_eq!(ExecAdapter::spectyn().name(), "spectyn");
+    }
+
+    #[test]
+    fn spectyn_runs_exec_agent_coder_and_honours_the_bin_override() {
+        let a = ExecAdapter::spectyn_with_bin(None);
+        assert_eq!(a.program, "spectyn");
+        assert_eq!(a.args, vec!["exec", "--agent", "coder"]);
+        let a = ExecAdapter::spectyn_with_bin(Some(" C:/bin/spectyn.exe ".into()));
+        assert_eq!(a.program, "C:/bin/spectyn.exe");
+        assert_eq!(a.name(), "spectyn");
+        // a blank override falls back to PATH instead of running an empty program name
+        let a = ExecAdapter::spectyn_with_bin(Some("  ".into()));
+        assert_eq!(a.program, "spectyn");
     }
 
     #[test]
