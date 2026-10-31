@@ -100,14 +100,30 @@ pub fn present_clis() -> Vec<String> {
 }
 
 /// True if the program an adapter would exec is installed here: a value with a directory part (an
-/// `ENSEMBLE_<X>_BIN`-style override such as `C:/bin/spectyn.exe`) must name an existing file; a
-/// bare name must resolve on PATH. Used by `ensemble serve` to advertise only runnable vendors.
+/// `ENSEMBLE_<X>_BIN`-style override such as `C:/bin/spectyn.exe`) must name an existing executable
+/// file; a bare name must resolve on PATH. Used by `ensemble serve` to advertise only runnable vendors.
 pub fn program_present(program: &str) -> bool {
     let p = Path::new(program);
     if p.components().count() > 1 {
-        p.is_file()
+        is_executable_file(p)
     } else {
         on_path(program)
+    }
+}
+
+/// A path override must be a regular file the OS can exec. On Unix that also needs an execute bit —
+/// otherwise the spawn fails with permission denied; on Windows `cmd /C` runs any existing file.
+fn is_executable_file(p: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(p)
+            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        p.is_file()
     }
 }
 
@@ -194,10 +210,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("spectyn.exe");
         std::fs::write(&bin, b"").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         assert!(program_present(bin.to_str().unwrap()), "existing override file");
         let missing = dir.path().join("no-such-spectyn.exe");
         assert!(!program_present(missing.to_str().unwrap()), "missing override file");
         assert!(!program_present(dir.path().to_str().unwrap()), "a directory is not a program");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn program_present_needs_an_execute_bit_on_unix() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("spectyn");
+        std::fs::write(&bin, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!program_present(bin.to_str().unwrap()), "non-executable file → permission denied");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(program_present(bin.to_str().unwrap()), "chmod +x → runnable");
     }
 
     #[test]
