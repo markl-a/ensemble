@@ -694,10 +694,19 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        assert!(program_present(bin.to_str().unwrap()), "existing override file");
+        assert!(
+            program_present(bin.to_str().unwrap()),
+            "existing override file"
+        );
         let missing = dir.path().join("no-such-spectyn.exe");
-        assert!(!program_present(missing.to_str().unwrap()), "missing override file");
-        assert!(!program_present(dir.path().to_str().unwrap()), "a directory is not a program");
+        assert!(
+            !program_present(missing.to_str().unwrap()),
+            "missing override file"
+        );
+        assert!(
+            !program_present(dir.path().to_str().unwrap()),
+            "a directory is not a program"
+        );
     }
 
     #[cfg(unix)]
@@ -708,9 +717,15 @@ mod tests {
         let bin = dir.path().join("spectyn");
         std::fs::write(&bin, b"#!/bin/sh\n").unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(!program_present(bin.to_str().unwrap()), "non-executable file → permission denied");
+        assert!(
+            !program_present(bin.to_str().unwrap()),
+            "non-executable file → permission denied"
+        );
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(program_present(bin.to_str().unwrap()), "chmod +x → runnable");
+        assert!(
+            program_present(bin.to_str().unwrap()),
+            "chmod +x → runnable"
+        );
     }
 
     #[test]

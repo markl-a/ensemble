@@ -4524,7 +4524,13 @@ timeout = 1200
         assert_eq!(m.keys().collect::<Vec<_>>(), vec!["spectyn"]);
         let mut asked = asked.into_inner();
         asked.sort();
-        let mut want = vec!["agy", "claude", "codex", "opencode", spectyn_program.as_str()];
+        let mut want = vec![
+            "agy",
+            "claude",
+            "codex",
+            "opencode",
+            spectyn_program.as_str(),
+        ];
         want.sort();
         assert_eq!(asked, want);
     }
