@@ -1,6 +1,6 @@
 use fs2::FileExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Process-wide monotonic counter making every worktree slug unique, so two tasks with the same
@@ -97,10 +97,14 @@ impl Worktree {
             )));
         }
         // nothing staged ⇒ nothing to commit (don't error)
+        // stdin null: an inherited open stdin pipe made Git for Windows hang here (10-31 test-suite hang).
         let diff = Command::new("git")
             .arg("-C")
             .arg(&self.path)
             .args(["diff", "--cached", "--quiet"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status()?;
         if diff.success() {
             return Ok(false); // exit 0 = no staged changes
