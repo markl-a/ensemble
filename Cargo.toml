@@ -8,22 +8,77 @@ readme = "README.md"
 keywords = ["ai", "agents", "orchestration", "code-review", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 
+# `cli` (default) is the whole ensemble program: the binary plus serve/mcp/mesh/dispatch/team,
+# PTY control, HTTP and SQLite. With `default-features = false` only the crew core builds —
+# adapter, blackboard, conductor (in-memory `run`), crew config, gate, verdict, test_gate, util,
+# and supervise's RunObserver + ControlState — so a host program (spectyn) can depend on the
+# library without pulling tiny_http / ureq / rusqlite / portable-pty.
+[features]
+default = ["cli"]
+cli = [
+    "dep:toml_edit",
+    "dep:portable-pty",
+    "dep:terminal_size",
+    "dep:tiny_http",
+    "dep:ureq",
+    "dep:serde_json",
+    "dep:base64",
+    "dep:rusqlite",
+    "dep:ctrlc",
+    "dep:fs2",
+    "dep:tempfile",
+]
+
 [[bin]]
 name = "ensemble"
 path = "src/main.rs"
+required-features = ["cli"]
+
+# The integration tests drive worktree runs, serve, the ledger or the binary: all `cli`.
+[[test]]
+name = "cross_machine"
+required-features = ["cli"]
+
+[[test]]
+name = "firewall_b"
+required-features = ["cli"]
+
+[[test]]
+name = "ledger_dispatch"
+required-features = ["cli"]
+
+[[test]]
+name = "live_smoke"
+required-features = ["cli"]
+
+[[test]]
+name = "pipeline_hermetic"
+required-features = ["cli"]
+
+[[test]]
+name = "test_gate_e2e"
+required-features = ["cli"]
+
+[[test]]
+name = "version_cli"
+required-features = ["cli"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
-toml_edit = "0.22"
 thiserror = "1"
-portable-pty = "0.8"
-terminal_size = "0.4"
-tiny_http = "0.12"
-ureq = { version = "2", default-features = false }
-serde_json = "1"
-base64 = "0.22"
-rusqlite = { version = "0.39", features = ["bundled"] }
-ctrlc = "3"
-fs2 = "0.4"
+toml_edit = { version = "0.22", optional = true }
+portable-pty = { version = "0.8", optional = true }
+terminal_size = { version = "0.4", optional = true }
+tiny_http = { version = "0.12", optional = true }
+ureq = { version = "2", default-features = false, optional = true }
+serde_json = { version = "1", optional = true }
+base64 = { version = "0.22", optional = true }
+rusqlite = { version = "0.39", features = ["bundled"], optional = true }
+ctrlc = { version = "3", optional = true }
+fs2 = { version = "0.4", optional = true }
+tempfile = { version = "3", optional = true }
+
+[dev-dependencies]
+# The core modules' unit tests need tempfile even without `cli` (the binary uses it too).
 tempfile = "3"
