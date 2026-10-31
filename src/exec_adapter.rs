@@ -116,9 +116,16 @@ impl ExecAdapter {
     /// Build the base command. On Windows the vendor CLIs are typically npm-global `.cmd` shims
     /// (codex/opencode) that `CreateProcess` cannot exec directly, so route through `cmd /C
     /// <program> <args...>`; on Unix, exec the program directly. (Same lesson as a real PTY/CLI
-    /// driver — npm shims need a shell on Windows.)
+    /// driver — npm shims need a shell on Windows.) Exception: an absolute path to an existing
+    /// `.exe` (e.g. `ENSEMBLE_SPECTYN_BIN=C:\Program Files\spectyn\spectyn.exe`) is spawned
+    /// directly — it needs no shell, and `cmd /C` would split a path containing spaces.
     #[cfg(windows)]
     fn build_command(&self) -> Command {
+        if is_direct_exe(Path::new(&self.program)) {
+            let mut c = Command::new(&self.program);
+            c.args(&self.args);
+            return c;
+        }
         let mut c = Command::new("cmd");
         c.arg("/C").arg(&self.program).args(&self.args);
         c
@@ -131,10 +138,10 @@ impl ExecAdapter {
     }
 
     /// Kill the timed-out child so no survivor keeps the captured pipes open (which would hang the
-    /// reader joins). Windows: the child is `cmd /C <program>`; `taskkill /F /T` walks the tree from
-    /// the STILL-LIVE cmd pid FIRST — killing cmd before taskkill would orphan the grandchild CLI
-    /// and break the enumeration — then `child.kill()` cleans up cmd itself. Unix: we exec the
-    /// program directly, so `child.kill()` reaps it; a CLI that forks a helper which inherits and
+    /// reader joins). Windows: the child is usually `cmd /C <program>`; `taskkill /F /T` walks the
+    /// tree from the STILL-LIVE cmd pid FIRST — killing cmd before taskkill would orphan the
+    /// grandchild CLI and break the enumeration — then `child.kill()` cleans up cmd itself. Unix:
+    /// we exec the program directly, so `child.kill()` reaps it; a CLI that forks a helper which inherits and
     /// holds the stdout pipe could still delay the reader joins (a documented limitation — a
     /// process-group kill was tried but misbehaved under the test harness).
     fn kill_tree(child: &mut std::process::Child) {
@@ -146,6 +153,18 @@ impl ExecAdapter {
         }
         let _ = child.kill();
     }
+}
+
+/// Windows: true when `program` can be handed straight to `CreateProcess` — an absolute path to an
+/// existing `.exe` file. Bare names (`codex`, `opencode`) may resolve to `.cmd`/`.bat` npm shims and
+/// keep going through `cmd /C`.
+#[cfg(windows)]
+fn is_direct_exe(program: &Path) -> bool {
+    program.is_absolute()
+        && program
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("exe"))
+        && program.is_file()
 }
 
 impl Adapter for ExecAdapter {
@@ -360,6 +379,58 @@ mod tests {
         // a blank override falls back to PATH instead of running an empty program name
         let a = ExecAdapter::spectyn_with_bin(Some("  ".into()));
         assert_eq!(a.program, "spectyn");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn spaced_absolute_exe_is_spawned_directly_not_through_cmd() {
+        // `cmd /C C:\Program Files\...\spectyn.exe` splits at the space; an existing absolute .exe
+        // must become the Command's program itself, with the vendor args untouched.
+        let dir = tempfile::Builder::new()
+            .prefix("ensemble dir with spaces ")
+            .tempdir()
+            .unwrap();
+        let exe = dir.path().join("spectyn.exe");
+        std::fs::write(&exe, b"").unwrap();
+        let a = ExecAdapter::spectyn_with_bin(Some(exe.to_string_lossy().into_owned()));
+        let c = a.build_command();
+        assert_eq!(c.get_program(), exe.as_os_str());
+        let args: Vec<_> = c.get_args().collect();
+        assert_eq!(args, ["exec", "--agent", "coder"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bare_name_still_goes_through_cmd() {
+        // npm-global `.cmd` shims (codex/opencode) need the shell; so does a non-existent .exe path.
+        let a = ExecAdapter::codex();
+        let c = a.build_command();
+        assert_eq!(c.get_program(), "cmd");
+        let args: Vec<_> = c.get_args().collect();
+        assert_eq!(&args[..2], ["/C", "codex"]);
+        assert_eq!(args[2], "exec");
+        let missing = ExecAdapter::spectyn_with_bin(Some(r"C:\no such dir\spectyn.exe".into()));
+        assert_eq!(missing.build_command().get_program(), "cmd");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn run_executes_an_exe_under_a_spaced_path() {
+        // End to end: a real exe in a directory with spaces runs and its stdout is captured.
+        let dir = tempfile::Builder::new()
+            .prefix("ensemble dir with spaces ")
+            .tempdir()
+            .unwrap();
+        let exe = dir.path().join("hostname.exe");
+        std::fs::copy(r"C:\Windows\System32\hostname.exe", &exe).unwrap();
+        let a = ExecAdapter::raw(
+            "spaced",
+            &exe.to_string_lossy(),
+            &[],
+            Duration::from_secs(10),
+        );
+        let r = a.run("", Path::new(".")).expect("spaced exe should run");
+        assert!(!r.text.is_empty(), "captured {:?}", r.text);
     }
 
     #[test]
