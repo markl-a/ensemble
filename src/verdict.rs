@@ -12,37 +12,41 @@ pub enum Verdict {
 pub fn parse_verdict(text: &str) -> Verdict {
     // Scan every line that MENTIONS "verdict" (case-insensitive) — tolerating markdown prefixes a
     // real reviewer adds, e.g. "## Review verdict: ✅ Approve" or "**VERDICT: LGTM**". Classify by
-    // approve/lgtm vs changes; keep the LAST such line as authoritative. A reply with no verdict
-    // line is conservatively changes-requested (an unparseable review must never land).
+    // the WORD right after the marker; keep the LAST such line as authoritative. A reply with no
+    // verdict line is conservatively changes-requested (an unparseable review must never land).
+    //
+    // Only that first word counts — not a substring scan of the rest of the line — so a negative
+    // word (`DISAPPROVE`, `NOT APPROVED`, `REJECT`) never lands through a bare "approve" match,
+    // and a changes-request whose message mentions "approve" in prose stays Changes.
     let mut result: Option<Verdict> = None;
     for line in text.lines() {
         let low = line.to_ascii_lowercase();
         let Some(verdict_idx) = low.find("verdict") else {
             continue;
         };
-        // Classify by whichever token appears FIRST after "verdict" — not by an unordered
-        // `contains` check — so a changes-request whose message happens to mention
-        // "approve"/"lgtm" in prose (e.g. "CHANGES: approve once you fix X") is never
-        // misread as an approval.
-        let after_start = verdict_idx + "verdict".len();
-        let after = &low[after_start..];
-        let changes_pos = after.find("changes");
-        let approve_pos = [after.find("lgtm"), after.find("approve")]
-            .into_iter()
-            .flatten()
-            .min();
+        // Skip the separators/markdown between the marker and the word (`:`, spaces, `✅`, `*`).
+        // Lowercasing ASCII preserves byte offsets, so `low` indices are valid in `line` too.
+        let rest = low[verdict_idx + "verdict".len()..]
+            .trim_start_matches(|ch: char| !ch.is_ascii_alphanumeric());
+        // The word keeps inner '_' / '-' (`CHANGES_REQUESTED`, `request-changes`); markdown
+        // underscores around it (`_APPROVE_`) are trimmed off.
+        let word_len = rest
+            .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'))
+            .unwrap_or(rest.len());
+        let word = rest[..word_len]
+            .trim_end_matches(['_', '-'])
+            .replace('-', "_");
 
-        result = Some(match (changes_pos, approve_pos) {
-            (Some(c), Some(a)) if a < c => Verdict::Approve,
-            (Some(c), _) => {
-                // byte indices match since lowercasing ASCII preserves positions.
-                let idx = after_start + c;
-                let msg = line[idx + "changes".len()..]
-                    .trim_start_matches(|ch: char| ch == ':' || ch.is_whitespace());
+        result = Some(match word.as_str() {
+            "approve" | "approved" | "lgtm" => Verdict::Approve,
+            "changes" | "changes_requested" | "request_changes" => {
+                let idx = line.len() - rest.len() + word_len;
+                let msg =
+                    line[idx..].trim_start_matches(|ch: char| ch == ':' || ch.is_whitespace());
                 Verdict::Changes(msg.to_string())
             }
-            (None, Some(_)) => Verdict::Approve,
-            (None, None) => Verdict::Changes(format!("unrecognized verdict line: {}", line.trim())),
+            // Unclear or negative (disapprove, not approved, reject, blank) ⇒ changes-requested.
+            _ => Verdict::Changes(format!("unrecognized verdict line: {}", line.trim())),
         });
     }
     result.unwrap_or_else(|| {
@@ -76,6 +80,61 @@ mod tests {
         assert_eq!(
             parse_verdict("VERDICT: CHANGES: approve once you fix X"),
             Verdict::Changes("approve once you fix X".to_string())
+        );
+        assert_eq!(
+            parse_verdict("VERDICT: CHANGES: do not approve until tests pass"),
+            Verdict::Changes("do not approve until tests pass".to_string())
+        );
+    }
+
+    #[test]
+    fn negative_or_unclear_words_are_changes() {
+        // "disapprove" / "not approved" contain "approve" but are NOT approvals; anything that is
+        // not an explicit approve word right after VERDICT is changes-requested.
+        for text in [
+            "VERDICT: DISAPPROVE",
+            "VERDICT: NOT APPROVED",
+            "VERDICT: REJECT",
+            "VERDICT: looks fine, LGTM",
+            "VERDICT:",
+        ] {
+            assert!(
+                matches!(parse_verdict(text), Verdict::Changes(_)),
+                "{text:?} must not approve"
+            );
+        }
+    }
+
+    #[test]
+    fn changes_spellings_carry_their_message() {
+        for text in [
+            "VERDICT: REQUEST_CHANGES: fix X",
+            "VERDICT: CHANGES_REQUESTED: fix X",
+            "VERDICT: Request-Changes: fix X",
+            "verdict: changes: fix X",
+        ] {
+            assert_eq!(
+                parse_verdict(text),
+                Verdict::Changes("fix X".to_string()),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn approve_words_with_markdown_still_land() {
+        assert_eq!(parse_verdict("VERDICT: _APPROVE_"), Verdict::Approve);
+        assert_eq!(parse_verdict("VERDICT: __LGTM__."), Verdict::Approve);
+        assert_eq!(parse_verdict("VERDICT: APPROVED"), Verdict::Approve);
+        assert_eq!(
+            parse_verdict("## Review verdict: ✅ Approve"),
+            Verdict::Approve
+        );
+        assert_eq!(parse_verdict("**VERDICT: LGTM**"), Verdict::Approve);
+        // A "changes" word BEFORE the marker is ignored — the word after the marker wins.
+        assert_eq!(
+            parse_verdict("no changes needed. VERDICT: LGTM"),
+            Verdict::Approve
         );
     }
 }
