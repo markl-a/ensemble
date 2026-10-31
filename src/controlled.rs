@@ -415,7 +415,10 @@ mod tests {
         // at all and would turn a cosmetic bug into a blank screen.
         let size = host_pty_size();
 
-        assert!(size.rows > 0 && size.cols > 0, "unusable PTY size: {size:?}");
+        assert!(
+            size.rows > 0 && size.cols > 0,
+            "unusable PTY size: {size:?}"
+        );
         match terminal_size::terminal_size() {
             Some((terminal_size::Width(c), terminal_size::Height(r))) if c > 0 && r > 0 => {
                 assert_eq!(
@@ -470,7 +473,10 @@ mod tests {
         let old = r#"{"cmd":"steer","from":"operator","prompt":"focus"}"#;
         let cmd: ControlCmd = serde_json::from_str(old).expect("old line must still parse");
 
-        assert!(control_script(&cmd).interrupt, "old steer stopped interrupting");
+        assert!(
+            control_script(&cmd).interrupt,
+            "old steer stopped interrupting"
+        );
     }
 
     /// Records every `write` call as its own chunk, with when it arrived, so a
