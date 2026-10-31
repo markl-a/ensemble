@@ -99,6 +99,18 @@ pub fn present_clis() -> Vec<String> {
         .collect()
 }
 
+/// True if the program an adapter would exec is installed here: a value with a directory part (an
+/// `ENSEMBLE_<X>_BIN`-style override such as `C:/bin/spectyn.exe`) must name an existing file; a
+/// bare name must resolve on PATH. Used by `ensemble serve` to advertise only runnable vendors.
+pub fn program_present(program: &str) -> bool {
+    let p = Path::new(program);
+    if p.components().count() > 1 {
+        p.is_file()
+    } else {
+        on_path(program)
+    }
+}
+
 /// True if `tool` is resolvable on PATH. Uses `where` on Windows / `command -v` on Unix — a cheap
 /// PATH lookup that does NOT spawn the tool itself (so an un-logged-in CLI still counts as present).
 fn on_path(tool: &str) -> bool {
@@ -175,6 +187,22 @@ mod tests {
             !is_ready(&statuses(&["codex", "claude"], false)),
             "no git repo → not ready (edits can't be bundled back)"
         );
+    }
+
+    #[test]
+    fn program_present_checks_a_path_override_as_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("spectyn.exe");
+        std::fs::write(&bin, b"").unwrap();
+        assert!(program_present(bin.to_str().unwrap()), "existing override file");
+        let missing = dir.path().join("no-such-spectyn.exe");
+        assert!(!program_present(missing.to_str().unwrap()), "missing override file");
+        assert!(!program_present(dir.path().to_str().unwrap()), "a directory is not a program");
+    }
+
+    #[test]
+    fn program_present_is_false_for_a_bare_name_not_on_path() {
+        assert!(!program_present("ensemble-wp140-no-such-cli"));
     }
 
     #[test]

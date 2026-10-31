@@ -92,6 +92,12 @@ impl ExecAdapter {
         }
     }
 
+    /// The program this adapter execs (a bare PATH name, or the `ENSEMBLE_SPECTYN_BIN` override).
+    /// `ensemble serve` probes it so a node only advertises the vendors it can actually run.
+    pub fn program(&self) -> &str {
+        &self.program
+    }
+
     /// Override the per-command timeout (e.g. from a `[agents.<n>] timeout = N` crew.toml knob).
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
