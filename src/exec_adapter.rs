@@ -456,7 +456,9 @@ mod tests {
         let a = shell("spectyn", "echo hi & exit /b 0");
         #[cfg(not(windows))]
         let a = shell("spectyn", "echo hi; exit 0");
-        let r = a.run("ignored", Path::new(".")).expect("exit 0 + output is Ok");
+        let r = a
+            .run("ignored", Path::new("."))
+            .expect("exit 0 + output is Ok");
         assert_eq!(r.text, "hi");
     }
 

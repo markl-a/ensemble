@@ -2208,8 +2208,14 @@ fn build_member_launch_plan(
         home: env.home.clone(),
         codex_home: env.codex_home.clone(),
     };
-    let config_path =
-        launcher_config_path(client, &repo, &work_dir, &session.root, &member, &config_env);
+    let config_path = launcher_config_path(
+        client,
+        &repo,
+        &work_dir,
+        &session.root,
+        &member,
+        &config_env,
+    );
     if client == ensemble::mcp_install::ClientKind::Opencode {
         reject_opencode_config_owned_by_another_member(&config_path, &member)?;
     }
@@ -3038,8 +3044,8 @@ fn agy_cmd(parsed: AgyCliArgs) {
         ensemble::AgyAdapter::with_timeout(std::time::Duration::from_secs(plan.timeout_secs))
             .with_dangerously_skip_permissions(plan.confirm_policy == ConfirmPolicy::Approve)
             .with_vendor_args(plan.vendor_args.clone());
-    let (report, exit_code) =
-        run_agy_team_turn(&plan.session, &adapter, &prompt, &plan.work_dir).unwrap_or_else(|e| {
+    let (report, exit_code) = run_agy_team_turn(&plan.session, &adapter, &prompt, &plan.work_dir)
+        .unwrap_or_else(|e| {
             eprintln!("ensemble agy: {e}");
             std::process::exit(1);
         });
@@ -4710,7 +4716,13 @@ node = "http://m2:7878"
         );
         // Flag BEFORE the prompt must not eat it either.
         assert_eq!(
-            positional_tasks(&argv(&["ensemble", "steer", "agy-i", "--no-interrupt", "yes"])),
+            positional_tasks(&argv(&[
+                "ensemble",
+                "steer",
+                "agy-i",
+                "--no-interrupt",
+                "yes"
+            ])),
             vec!["agy-i".to_string(), "yes".to_string()]
         );
     }
@@ -5330,7 +5342,10 @@ node = "http://m2:7878"
         let got = resolve_work_dir(Some("work"), &repo, &tmp).unwrap();
 
         assert_eq!(got, work);
-        assert!(!got.starts_with(&repo), "resolved against the repo: {got:?}");
+        assert!(
+            !got.starts_with(&repo),
+            "resolved against the repo: {got:?}"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -5363,19 +5378,19 @@ node = "http://m2:7878"
             "claude",
         ]))
         .unwrap();
-        let plan = build_member_launch_plan(
-            ensemble::mcp_install::ClientKind::Claude,
-            parsed,
-            &env,
-        )
-        .unwrap();
+        let plan =
+            build_member_launch_plan(ensemble::mcp_install::ClientKind::Claude, parsed, &env)
+                .unwrap();
 
         assert_eq!(plan.work_dir, work, "agent must run in --cwd");
         assert_eq!(plan.repo, test_abs("repo"), "board must stay on --repo");
         assert_ne!(plan.work_dir, plan.repo);
         // The board is what makes them one team; if it followed --cwd, every
         // worktree would be its own island and this flag would be pointless.
-        assert!(plan.session.board.starts_with(&plan.repo), "board followed cwd");
+        assert!(
+            plan.session.board.starts_with(&plan.repo),
+            "board followed cwd"
+        );
         let _ = std::fs::remove_dir_all(&work);
     }
 
@@ -5509,7 +5524,10 @@ node = "http://m2:7878"
             !work.join("opencode.json").exists() && !work.join(".mcp.json").exists(),
             "wrote into the work tree",
         );
-        assert!(!repo.join(".mcp.json").exists(), "wrote the tracked project file");
+        assert!(
+            !repo.join(".mcp.json").exists(),
+            "wrote the tracked project file"
+        );
         // And it did land somewhere — an assertion of absence alone would pass
         // if the write silently did nothing.
         assert!(plan.config_path.exists(), "config was never written");
@@ -5665,8 +5683,14 @@ node = "http://m2:7878"
             &env,
         );
         let name = slashed.file_name().unwrap().to_string_lossy().to_string();
-        assert!(!name.contains('/'), "unsanitised member name in path: {name}");
-        assert!(!name.contains('@'), "unsanitised member name in path: {name}");
+        assert!(
+            !name.contains('/'),
+            "unsanitised member name in path: {name}"
+        );
+        assert!(
+            !name.contains('@'),
+            "unsanitised member name in path: {name}"
+        );
     }
 
     #[test]
@@ -5691,7 +5715,10 @@ node = "http://m2:7878"
             .iter()
             .position(|a| a == "--mcp-config")
             .expect("claude must be given --mcp-config");
-        assert_eq!(argv.get(i + 1), Some(&plan.config_path.display().to_string()));
+        assert_eq!(
+            argv.get(i + 1),
+            Some(&plan.config_path.display().to_string())
+        );
         // strict would drop the project's own servers (spectyn on this fleet).
         assert!(!argv.iter().any(|a| a == "--strict-mcp-config"));
     }
@@ -5991,7 +6018,8 @@ node = "http://m2:7878"
             ensemble::resolve_team_session(tmp.path(), None, "agy", Some("agy@host"), None);
         let adapter = ensemble::MockAdapter::new("agy", vec![Ok("hello from agy".to_string())]);
 
-        let (report, exit_code) = run_agy_team_turn(&session, &adapter, "prompt", &session.repo).unwrap();
+        let (report, exit_code) =
+            run_agy_team_turn(&session, &adapter, "prompt", &session.repo).unwrap();
 
         assert_eq!(exit_code, 0);
         assert!(report.ok);
@@ -6009,7 +6037,8 @@ node = "http://m2:7878"
             ensemble::resolve_team_session(tmp.path(), None, "agy", Some("agy@host"), None);
         let adapter = ensemble::MockAdapter::new("agy", vec![Err(ensemble::AdapterError::Empty)]);
 
-        let (report, exit_code) = run_agy_team_turn(&session, &adapter, "prompt", &session.repo).unwrap();
+        let (report, exit_code) =
+            run_agy_team_turn(&session, &adapter, "prompt", &session.repo).unwrap();
 
         assert_eq!(exit_code, ensemble::AdapterError::Empty.exit_code());
         assert!(!report.ok);
