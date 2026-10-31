@@ -211,9 +211,9 @@ impl Adapter for ExecAdapter {
         // reported Flaked rather than hanging the whole run (the conductor's wall-clock budget only
         // fires at round boundaries, so it cannot rescue a single wedged `run()`).
         let deadline = Instant::now() + self.timeout;
-        loop {
+        let status = loop {
             match child.try_wait() {
-                Ok(Some(_status)) => break,
+                Ok(Some(status)) => break status,
                 Ok(None) => {
                     // S1b `--hard`: an operator hard-abort flips this flag — kill the running CLI now
                     // (don't wait for the timeout or the round boundary) and report it Flaked.
@@ -251,26 +251,49 @@ impl Adapter for ExecAdapter {
                     return Err(AdapterError::Flaked(e.to_string()));
                 }
             }
-        }
+        };
         let _ = writer.join();
         let stdout_buf = out_reader.join().unwrap_or_default();
         let stderr_buf = err_reader.join().unwrap_or_default();
         let text = String::from_utf8_lossy(&stdout_buf).trim().to_string();
+        let err = String::from_utf8_lossy(&stderr_buf);
         if text.is_empty() {
             // When shelled through `cmd /C`, a missing CLI is a non-zero exit + a "not recognized"
             // stderr (not a spawn NotFound), so classify that here.
-            let err = String::from_utf8_lossy(&stderr_buf);
             let err_low = err.to_lowercase();
             if err_low.contains("not recognized") || err_low.contains("cannot find") {
                 return Err(AdapterError::NotInstalled(self.program.clone()));
             }
-            // Quota/rate-limit: vendors print this to EITHER stream and may exit 0 (codex prints
-            // "You've hit your usage limit … try again at <when>" with an empty answer), so scan the
-            // combined output and preserve the reason + reset time instead of a bare `Empty`.
+        }
+        // Quota/rate-limit: vendors print this to EITHER stream and may exit 0 (codex prints
+        // "You've hit your usage limit … try again at <when>" with an empty answer) or non-zero, so
+        // scan the combined output and preserve the reason + reset time instead of a bare `Empty` /
+        // `Flaked`. An exit-0 turn WITH an answer is not scanned: the answer may merely mention quota.
+        if text.is_empty() || !status.success() {
             let combined = format!("{}\n{}", String::from_utf8_lossy(&stdout_buf), err);
             if let Some(info) = detect_rate_limit(&combined) {
                 return Err(AdapterError::RateLimited(info));
             }
+        }
+        // A non-zero exit is a failed turn even when the CLI printed something (spectyn exits 1 on an
+        // agent error or a cut-off answer, codex on failures): that text is an error message, and
+        // counting it as a reply could even turn it into a verdict.
+        if !status.success() {
+            let code = status
+                .code()
+                .map_or_else(|| "a signal".to_string(), |c| format!("code {c}"));
+            let tail = if err.trim().is_empty() {
+                text.as_str()
+            } else {
+                err.trim()
+            };
+            return Err(AdapterError::Flaked(format!(
+                "{} exited with {code}: {}",
+                self.program,
+                tail_chars(tail, EXIT_TAIL_CHARS)
+            )));
+        }
+        if text.is_empty() {
             return Err(AdapterError::Empty);
         }
         Ok(AgentOutput {
@@ -278,6 +301,19 @@ impl Adapter for ExecAdapter {
             text,
         })
     }
+}
+
+/// How much of a failed turn's stderr (or stdout, when stderr is empty) the `Flaked` reason keeps.
+const EXIT_TAIL_CHARS: usize = 300;
+
+/// The last `max` chars of `s` (char-boundary safe), prefixed with `…` when cut.
+fn tail_chars(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    let cut: String = s.chars().skip(n - max).collect();
+    format!("…{cut}")
 }
 
 #[cfg(test)]
@@ -387,6 +423,67 @@ mod tests {
             }
             other => panic!("expected RateLimited, got {other:?}"),
         }
+    }
+
+    /// A tiny fake CLI running `script` in the OS shell (cmd on Windows, sh elsewhere).
+    fn shell(name: &str, script: &str) -> ExecAdapter {
+        #[cfg(windows)]
+        let (program, flag) = ("cmd", "/C");
+        #[cfg(not(windows))]
+        let (program, flag) = ("sh", "-c");
+        ExecAdapter::raw(name, program, &[flag, script], Duration::from_secs(10))
+    }
+
+    #[test]
+    fn non_zero_exit_with_output_flakes_with_code_and_stderr_tail() {
+        // spectyn exits 1 on an agent error and still prints text: that text is NOT a reply.
+        #[cfg(windows)]
+        let a = shell("spectyn", "echo hi & echo boom-on-stderr 1>&2 & exit /b 3");
+        #[cfg(not(windows))]
+        let a = shell("spectyn", "echo hi; echo boom-on-stderr 1>&2; exit 3");
+        match a.run("ignored", Path::new(".")) {
+            Err(AdapterError::Flaked(reason)) => {
+                assert!(reason.contains("code 3"), "reason: {reason}");
+                assert!(reason.contains("boom-on-stderr"), "reason: {reason}");
+            }
+            other => panic!("expected Flaked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zero_exit_with_output_is_a_reply() {
+        #[cfg(windows)]
+        let a = shell("spectyn", "echo hi & exit /b 0");
+        #[cfg(not(windows))]
+        let a = shell("spectyn", "echo hi; exit 0");
+        let r = a.run("ignored", Path::new(".")).expect("exit 0 + output is Ok");
+        assert_eq!(r.text, "hi");
+    }
+
+    #[test]
+    fn non_zero_exit_with_a_rate_limit_line_is_rate_limited_not_flaked() {
+        #[cfg(windows)]
+        let a = shell(
+            "codex",
+            "echo ERROR: You've hit your usage limit. Try again at Jun 25th, 2026 5:33 AM. & exit /b 1",
+        );
+        #[cfg(not(windows))]
+        let a = shell(
+            "codex",
+            "echo \"ERROR: You've hit your usage limit. Try again at Jun 25th, 2026 5:33 AM.\"; exit 1",
+        );
+        match a.run("ignored", Path::new(".")) {
+            Err(AdapterError::RateLimited(info)) => {
+                assert_eq!(info.retry_at.as_deref(), Some("Jun 25th, 2026 5:33 AM"));
+            }
+            other => panic!("expected RateLimited, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tail_chars_keeps_the_end_on_a_char_boundary() {
+        assert_eq!(tail_chars("short", 300), "short");
+        assert_eq!(tail_chars("abcdé", 2), "…dé");
     }
 
     #[test]
