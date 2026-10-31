@@ -5,10 +5,10 @@
 //! testable; `run_checks` is the thin IO wrapper that supplies a real PATH probe + a git-repo check.
 
 use std::io::Read;
-use std::path::Path;
-use std::process::{Command, Stdio};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// One readiness item: a named thing the mesh wants, whether it is present, and (when missing) a
 /// one-line hint telling the operator how to satisfy it. A present item may still carry a detail in
@@ -164,44 +164,110 @@ fn build_date(version: &str) -> Option<String> {
         4 | 7 => c == '-',
         _ => c.is_ascii_digit(),
     });
-    shape_ok.then(|| d.to_string())
+    // the date must end there: `)`, whitespace or the end of the line, not `2026-10-30123`
+    let ends = match rest[10..].chars().next() {
+        None => true,
+        Some(c) => c == ')' || c.is_whitespace(),
+    };
+    (shape_ok && ends).then(|| d.to_string())
 }
 
-/// Every `spectyn` on PATH in resolution order, de-duplicated. `where` on Windows lists them all
-/// (cwd first, as cmd resolves); on Unix walk `$PATH`, since `command -v` only gives the first.
+/// Every `spectyn` on PATH in resolution order, one per directory (a directory holding both a
+/// `spectyn.exe` and a `spectyn.cmd` shim is one installation). PATH is walked here rather than in
+/// a shell, so an entry with glob or space characters is taken literally. On Windows the cwd is
+/// searched first and paths compare case-insensitively, as cmd (which ensemble launches spectyn
+/// through) does; elsewhere paths are case-sensitive.
 fn spectyn_paths() -> Vec<String> {
-    let (prog, args) = if cfg!(windows) {
-        ("cmd", vec!["/C", "where", "spectyn"])
-    } else {
-        (
-            "sh",
-            vec![
-                "-c",
-                r#"IFS=:; for d in $PATH; do [ -f "$d/$1" ] && [ -x "$d/$1" ] && echo "$d/$1"; done"#,
-                "sh",
-                "spectyn",
-            ],
-        )
-    };
-    let Ok(o) = Command::new(prog).args(args).output() else {
-        return Vec::new();
-    };
-    let mut out: Vec<String> = Vec::new();
-    for line in String::from_utf8_lossy(&o.stdout).lines() {
-        let line = line.trim();
-        if !line.is_empty() && !out.iter().any(|p| p.eq_ignore_ascii_case(line)) {
-            out.push(line.to_string());
+    let windows = cfg!(windows);
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if windows {
+        dirs.extend(std::env::current_dir().ok());
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&path));
+    }
+    let names = exe_names("spectyn", std::env::var("PATHEXT").ok().as_deref(), windows);
+    find_on_path(&dirs, &names, windows, is_executable_file)
+}
+
+/// PURE: the file names a bare `name` resolves to inside one directory, most preferred first. On
+/// Windows that is `name.exe`, then `name` plus each other `PATHEXT` extension (default
+/// `.COM;.EXE;.BAT;.CMD`); elsewhere just `name`.
+fn exe_names(name: &str, pathext: Option<&str>, windows: bool) -> Vec<String> {
+    if !windows {
+        return vec![name.to_string()];
+    }
+    let mut out = vec![format!("{name}.exe")];
+    for ext in pathext.unwrap_or(".COM;.EXE;.BAT;.CMD").split(';') {
+        let ext = ext.trim().to_ascii_lowercase();
+        let file = format!("{name}{ext}");
+        if ext.len() > 1 && ext.starts_with('.') && !out.contains(&file) {
+            out.push(file);
         }
     }
     out
 }
 
-/// Run `<path> --version` and return its first non-empty stdout line, or `None` on a spawn error,
-/// a non-zero exit or no output. Killed after `timeout` so a hung binary cannot stall doctor; stdout
-/// is read on a helper thread so a stuck pipe cannot either.
+/// PURE: walk `dirs` in order and keep, per directory, the first of `names` that `is_exe` accepts,
+/// so several shims in one directory count as one copy. Empty entries are skipped and a path seen
+/// before (a directory listed twice) is kept once; `fold_case` compares paths case-insensitively,
+/// which is right only on Windows.
+fn find_on_path(
+    dirs: &[PathBuf],
+    names: &[String],
+    fold_case: bool,
+    is_exe: impl Fn(&Path) -> bool,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for dir in dirs.iter().filter(|d| !d.as_os_str().is_empty()) {
+        let Some(hit) = names.iter().map(|n| dir.join(n)).find(|p| is_exe(p)) else {
+            continue;
+        };
+        let hit = hit.to_string_lossy().into_owned();
+        let seen = out.iter().any(|p| {
+            if fold_case {
+                p.eq_ignore_ascii_case(&hit)
+            } else {
+                *p == hit
+            }
+        });
+        if !seen {
+            out.push(hit);
+        }
+    }
+    out
+}
+
+/// A regular file that can be run: on Unix it must also have an execute bit set.
+fn is_executable_file(p: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(p) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.is_file() && meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        meta.is_file()
+    }
+}
+
+/// Run `<path> --version` and return its first non-empty stdout line (see `first_line_within`).
 fn version_of(path: &str, timeout: Duration) -> Option<String> {
-    let mut child = Command::new(path)
-        .arg("--version")
+    let mut cmd = Command::new(path);
+    cmd.arg("--version");
+    first_line_within(cmd, timeout)
+}
+
+/// `cmd`'s first non-empty stdout line, or `None` on a spawn error, a non-zero exit, no output, or
+/// when it has not both closed its output and exited by the deadline. ONE deadline (`timeout` from
+/// now) covers the read and the exit, so a child that closes stdout but keeps running is killed
+/// too; stdout is read on a helper thread so a stuck pipe cannot stall doctor either.
+fn first_line_within(mut cmd: Command, timeout: Duration) -> Option<String> {
+    let deadline = Instant::now() + timeout;
+    let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -214,18 +280,33 @@ fn version_of(path: &str, timeout: Duration) -> Option<String> {
         let _ = stdout.read_to_string(&mut s);
         let _ = tx.send(s);
     });
-    let Ok(text) = rx.recv_timeout(timeout) else {
+    let text = rx
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .ok();
+    let status = text.as_ref().and_then(|_| exit_by(&mut child, deadline));
+    let (Some(text), Some(status)) = (text, status) else {
         let _ = child.kill();
         let _ = child.wait();
         return None;
     };
-    if !child.wait().ok()?.success() {
+    if !status.success() {
         return None;
     }
     text.lines()
         .map(str::trim)
         .find(|l| !l.is_empty())
         .map(str::to_string)
+}
+
+/// Poll `child` until it exits (`Some(status)`), or `None` once `deadline` passes or waiting fails.
+fn exit_by(child: &mut Child, deadline: Instant) -> Option<ExitStatus> {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            _ => return None,
+        }
+    }
 }
 
 /// The AI CLIs actually on PATH (the names a crew can drive locally). Used by `ensemble mesh`.
@@ -405,6 +486,154 @@ mod tests {
         assert_eq!(build_date("spectyn 0.6.0"), None);
         assert_eq!(build_date("built 2026/10/30"), None);
         assert_eq!(build_date("built 2026-10"), None);
+        // the date must be delimited: `)`, whitespace or end of line
+        assert_eq!(build_date("built 2026-10-30123"), None);
+        assert_eq!(build_date("built 2026-10-30x"), None);
+        assert_eq!(
+            build_date("built 2026-10-30").as_deref(),
+            Some("2026-10-30")
+        );
+        assert_eq!(
+            build_date("spectyn 1 built 2026-10-30 extra").as_deref(),
+            Some("2026-10-30")
+        );
+    }
+
+    /// `dir` joined with `name` as the PATH walk renders it (separator differs per OS).
+    fn joined(dir: &str, name: &str) -> String {
+        Path::new(dir).join(name).to_string_lossy().into_owned()
+    }
+
+    fn dirs(list: &[&str]) -> Vec<PathBuf> {
+        list.iter().map(PathBuf::from).collect()
+    }
+
+    #[test]
+    fn exe_names_prefer_exe_then_pathext_on_windows_only() {
+        assert_eq!(
+            exe_names("spectyn", Some(".EXE;.CMD"), false),
+            vec!["spectyn"]
+        );
+        assert_eq!(
+            exe_names("spectyn", Some(".COM;.EXE;.BAT;.CMD"), true),
+            vec!["spectyn.exe", "spectyn.com", "spectyn.bat", "spectyn.cmd"]
+        );
+        // PATHEXT unset: the cmd default; junk entries are ignored
+        assert_eq!(exe_names("spectyn", None, true).len(), 4);
+        assert_eq!(
+            exe_names("spectyn", Some(";.;CMD;.Cmd"), true),
+            vec!["spectyn.exe", "spectyn.cmd"]
+        );
+    }
+
+    #[test]
+    fn path_walk_counts_shims_in_one_directory_as_one_copy() {
+        // npm-style shims: spectyn.cmd + spectyn.exe side by side are one installation (the .exe
+        // is reported), so no false "2 copies" warning; a later dir with only a .cmd still counts
+        let files = [
+            joined("C:/shims", "spectyn.cmd"),
+            joined("C:/shims", "spectyn.exe"),
+            joined("C:/cli", "spectyn.cmd"),
+        ];
+        let names = exe_names("spectyn", Some(".COM;.EXE;.BAT;.CMD"), true);
+        let got = find_on_path(
+            &dirs(&["C:/shims", "C:/empty", "C:/cli"]),
+            &names,
+            true,
+            |p: &Path| files.contains(&p.to_string_lossy().into_owned()),
+        );
+        assert_eq!(
+            got,
+            vec![
+                joined("C:/shims", "spectyn.exe"),
+                joined("C:/cli", "spectyn.cmd")
+            ]
+        );
+    }
+
+    #[test]
+    fn path_walk_folds_case_only_when_asked() {
+        // Unix paths are case-sensitive: /opt/A and /opt/a are two copies; Windows folds them.
+        // Empty PATH entries are skipped and a repeated directory is reported once.
+        let path = dirs(&["/opt/A", "", "/opt/a", "/opt/A"]);
+        let names = exe_names("spectyn", None, false);
+        let any = |_: &Path| true;
+        assert_eq!(
+            find_on_path(&path, &names, false, any),
+            vec![joined("/opt/A", "spectyn"), joined("/opt/a", "spectyn")]
+        );
+        assert_eq!(
+            find_on_path(&path, &names, true, any),
+            vec![joined("/opt/A", "spectyn")]
+        );
+    }
+
+    #[test]
+    fn path_walk_takes_directory_names_literally_and_needs_an_executable() {
+        // `d[x] y` would be a glob matching `dx y` in a shell; the walk uses the name as-is
+        let tmp = tempfile::tempdir().unwrap();
+        let odd = tmp.path().join("d[x] y");
+        let lookalike = tmp.path().join("dx y");
+        std::fs::create_dir_all(&odd).unwrap();
+        std::fs::create_dir_all(&lookalike).unwrap();
+        let names = exe_names("spectyn", None, cfg!(windows));
+        let exe = odd.join(&names[0]);
+        std::fs::write(&exe, b"").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+            // a file without an execute bit is not a runnable copy
+            std::fs::write(lookalike.join("spectyn"), b"").unwrap();
+        }
+        let got = find_on_path(&[odd, lookalike], &names, cfg!(windows), is_executable_file);
+        assert_eq!(got, vec![exe.to_string_lossy().into_owned()]);
+    }
+
+    /// A command that prints `spectyn 9` and exits 0 at once.
+    fn quick() -> Command {
+        let mut c = Command::new(if cfg!(windows) { "cmd" } else { "sh" });
+        if cfg!(windows) {
+            c.args(["/C", "echo", "spectyn", "9"]);
+        } else {
+            c.args(["-c", "echo spectyn 9"]);
+        }
+        c
+    }
+
+    /// A command that keeps running ~30 s. On Unix it prints a line and then CLOSES stdout, so
+    /// reading ends at once and only the exit wait could stall (the round-1 bug); on Windows
+    /// `ping` keeps writing, so the read is what times out.
+    fn lingering() -> Command {
+        let mut c = Command::new(if cfg!(windows) { "ping" } else { "sh" });
+        if cfg!(windows) {
+            c.args(["-n", "30", "127.0.0.1"]);
+        } else {
+            c.args(["-c", "echo spectyn 9; exec sleep 30 >&-"]);
+        }
+        c
+    }
+
+    #[test]
+    fn first_line_within_returns_a_quick_commands_line() {
+        assert_eq!(
+            first_line_within(quick(), Duration::from_secs(20)).as_deref(),
+            Some("spectyn 9")
+        );
+    }
+
+    #[test]
+    fn first_line_within_kills_a_command_that_outlives_the_deadline() {
+        let start = Instant::now();
+        assert_eq!(
+            first_line_within(lingering(), Duration::from_millis(500)),
+            None
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "one deadline must bound read + exit; took {:?}",
+            start.elapsed()
+        );
     }
 
     #[test]
