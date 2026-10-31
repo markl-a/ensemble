@@ -329,7 +329,7 @@ pub fn run_controlled_pty(config: ControlledPtyConfig) -> Result<i32, String> {
             break 130;
         }
         ticks = ticks.wrapping_add(1);
-        if ticks % 10 == 0 {
+        if ticks.is_multiple_of(10) {
             let now = host_pty_size();
             if now.rows != last_size.rows || now.cols != last_size.cols {
                 let _ = pair.master.resize(now);
