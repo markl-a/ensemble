@@ -23,7 +23,7 @@ tiny_http = "0.12"
 ureq = { version = "2", default-features = false }
 serde_json = "1"
 base64 = "0.22"
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
 ctrlc = "3"
 fs2 = "0.4"
 tempfile = "3"
