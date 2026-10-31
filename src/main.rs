@@ -3458,15 +3458,30 @@ fn load_crew(args: &[String]) -> CrewConfig {
     }
 }
 
-/// Phase-1b adapter registry: all the real headless CLIs (local). Used by `ensemble serve` to host this
-/// node's agents.
+/// Phase-1b adapter registry that `ensemble serve`/`up` host — and advertise on `/health`. Only the
+/// headless CLIs actually installed on this node are included: peer discovery prefers remote nodes,
+/// so advertising a missing CLI would route work here that only fails at run time with NotInstalled.
 fn adapters() -> HashMap<String, Box<dyn Adapter>> {
+    installed_adapters(ensemble::doctor::program_present)
+}
+
+/// The registry, keeping each vendor only when `present(program)` says the program its adapter
+/// execs is installed (injectable so tests need no real PATH).
+fn installed_adapters(present: impl Fn(&str) -> bool) -> HashMap<String, Box<dyn Adapter>> {
     let mut adapters: HashMap<String, Box<dyn Adapter>> = HashMap::new();
-    adapters.insert("codex".into(), Box::new(ExecAdapter::codex()));
-    adapters.insert("claude".into(), Box::new(ExecAdapter::claude()));
-    adapters.insert("opencode".into(), Box::new(ExecAdapter::opencode()));
-    adapters.insert("spectyn".into(), Box::new(ExecAdapter::spectyn()));
-    adapters.insert("agy".into(), Box::new(AgyAdapter::new()));
+    for a in [
+        ExecAdapter::codex(),
+        ExecAdapter::claude(),
+        ExecAdapter::opencode(),
+        ExecAdapter::spectyn(),
+    ] {
+        if present(a.program()) {
+            adapters.insert(a.name().to_string(), Box::new(a));
+        }
+    }
+    if present("agy") {
+        adapters.insert("agy".into(), Box::new(AgyAdapter::new()));
+    }
     adapters
 }
 
@@ -4470,7 +4485,48 @@ timeout = 1200
         let m = adapters_for(&crew, false);
         assert_eq!(m.get("spectyn").map(|a| a.name()), Some("spectyn"));
         assert_eq!(m.get("codex").map(|a| a.name()), Some("codex"));
-        assert!(adapters().contains_key("spectyn"), "`serve` hosts spectyn");
+        assert!(
+            installed_adapters(|_| true).contains_key("spectyn"),
+            "`serve` hosts spectyn"
+        );
+    }
+
+    #[test]
+    fn serve_registry_advertises_only_installed_vendors() {
+        let sorted = |m: HashMap<String, Box<dyn Adapter>>| {
+            let mut k: Vec<String> = m.into_keys().collect();
+            k.sort();
+            k
+        };
+        assert_eq!(
+            sorted(installed_adapters(|_| true)),
+            vec!["agy", "claude", "codex", "opencode", "spectyn"]
+        );
+        assert!(
+            installed_adapters(|_| false).is_empty(),
+            "nothing installed, nothing advertised"
+        );
+        assert_eq!(
+            sorted(installed_adapters(|p| p == "codex" || p == "agy")),
+            vec!["agy", "codex"]
+        );
+    }
+
+    #[test]
+    fn serve_registry_probes_the_program_each_adapter_runs() {
+        // spectyn is probed by the program it would exec (honours ENSEMBLE_SPECTYN_BIN), not its name.
+        let asked = std::cell::RefCell::new(Vec::<String>::new());
+        let spectyn_program = ExecAdapter::spectyn().program().to_string();
+        let m = installed_adapters(|p| {
+            asked.borrow_mut().push(p.to_string());
+            p == spectyn_program
+        });
+        assert_eq!(m.keys().collect::<Vec<_>>(), vec!["spectyn"]);
+        let mut asked = asked.into_inner();
+        asked.sort();
+        let mut want = vec!["agy", "claude", "codex", "opencode", spectyn_program.as_str()];
+        want.sort();
+        assert_eq!(asked, want);
     }
 
     #[test]
