@@ -28,14 +28,19 @@ pub fn parse_verdict(text: &str) -> Verdict {
         // Lowercasing ASCII preserves byte offsets, so `low` indices are valid in `line` too.
         let rest = low[verdict_idx + "verdict".len()..]
             .trim_start_matches(|ch: char| !ch.is_ascii_alphanumeric());
+        // The word keeps inner '_' / '-' (`CHANGES_REQUESTED`, `request-changes`); markdown
+        // underscores around it (`_APPROVE_`) are trimmed off.
         let word_len = rest
-            .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'))
             .unwrap_or(rest.len());
+        let word = rest[..word_len]
+            .trim_end_matches(['_', '-'])
+            .replace('-', "_");
 
-        result = Some(match &rest[..word_len] {
+        result = Some(match word.as_str() {
             "approve" | "approved" | "lgtm" => Verdict::Approve,
-            word if word.starts_with("changes") => {
-                let idx = line.len() - rest.len() + "changes".len();
+            "changes" | "changes_requested" | "request_changes" => {
+                let idx = line.len() - rest.len() + word_len;
                 let msg =
                     line[idx..].trim_start_matches(|ch: char| ch == ':' || ch.is_whitespace());
                 Verdict::Changes(msg.to_string())
@@ -101,7 +106,25 @@ mod tests {
     }
 
     #[test]
+    fn changes_spellings_carry_their_message() {
+        for text in [
+            "VERDICT: REQUEST_CHANGES: fix X",
+            "VERDICT: CHANGES_REQUESTED: fix X",
+            "VERDICT: Request-Changes: fix X",
+            "verdict: changes: fix X",
+        ] {
+            assert_eq!(
+                parse_verdict(text),
+                Verdict::Changes("fix X".to_string()),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
     fn approve_words_with_markdown_still_land() {
+        assert_eq!(parse_verdict("VERDICT: _APPROVE_"), Verdict::Approve);
+        assert_eq!(parse_verdict("VERDICT: __LGTM__."), Verdict::Approve);
         assert_eq!(parse_verdict("VERDICT: APPROVED"), Verdict::Approve);
         assert_eq!(
             parse_verdict("## Review verdict: ✅ Approve"),
