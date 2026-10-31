@@ -4332,7 +4332,11 @@ fn doctor_cmd(_args: &[String]) {
     let st = ensemble::doctor::run_checks();
     println!("ensemble doctor — environment readiness:");
     for t in &st {
-        let mark = if t.ok { "ok     " } else { "MISSING" };
+        let mark = match (t.ok, t.warn) {
+            (false, _) => "MISSING",
+            (true, true) => "WARN   ",
+            (true, false) => "ok     ",
+        };
         if t.hint.is_empty() {
             println!("  [{mark}] {}", t.name);
         } else {

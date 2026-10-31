@@ -4,15 +4,20 @@
 //! is pure — it asks a `present(name)` probe / reads a `&[ToolStatus]` — so it is hermetically
 //! testable; `run_checks` is the thin IO wrapper that supplies a real PATH probe + a git-repo check.
 
+use std::io::Read;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::time::Duration;
 
 /// One readiness item: a named thing the mesh wants, whether it is present, and (when missing) a
-/// one-line hint telling the operator how to satisfy it.
+/// one-line hint telling the operator how to satisfy it. A present item may still carry a detail in
+/// `hint` (spectyn's version line) and be flagged `warn`; a warning never affects readiness.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolStatus {
     pub name: String,
     pub ok: bool,
+    pub warn: bool,
     pub hint: String,
 }
 
@@ -44,6 +49,7 @@ pub fn check_tools(present: impl Fn(&str) -> bool) -> Vec<ToolStatus> {
             ToolStatus {
                 name: name.to_string(),
                 ok,
+                warn: false,
                 hint: if ok { String::new() } else { hint.to_string() },
             }
         })
@@ -67,10 +73,19 @@ pub fn is_ready(statuses: &[ToolStatus]) -> bool {
 /// the single source of truth for what the mesh needs.
 pub fn run_checks() -> Vec<ToolStatus> {
     let mut out = check_tools(on_path);
+    if let Some(sp) = out.iter_mut().find(|t| t.name == "spectyn" && t.ok) {
+        if let Some((warn, detail)) =
+            inspect_spectyn(spectyn_paths, |p| version_of(p, VERSION_TIMEOUT))
+        {
+            sp.warn = warn;
+            sp.hint = detail;
+        }
+    }
     let ts = on_path("tailscale");
     out.push(ToolStatus {
         name: "tailscale".to_string(),
         ok: ts,
+        warn: false,
         hint: if ts {
             String::new()
         } else {
@@ -81,6 +96,7 @@ pub fn run_checks() -> Vec<ToolStatus> {
     out.push(ToolStatus {
         name: GIT_REPO.to_string(),
         ok: git,
+        warn: false,
         hint: if git {
             String::new()
         } else {
@@ -88,6 +104,128 @@ pub fn run_checks() -> Vec<ToolStatus> {
         },
     });
     out
+}
+
+/// How long `spectyn --version` may take before doctor gives up on it.
+const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// PURE core of the spectyn detail. `lookup()` lists every `spectyn` on PATH in resolution order
+/// (first = the one a bare `spectyn` runs); `version_of(path)` returns that copy's
+/// `spectyn --version` line. `None` when no copy is found, else `(warn, detail)`: the detail leads
+/// with the first copy's version line, and `warn` is set when that version could not be read, or
+/// when several copies resolve and the first is not the newest by its `built YYYY-MM-DD` date (on
+/// Windows an old App copy can shadow the CLI). Copies after the first are only run when there
+/// are several.
+pub fn inspect_spectyn(
+    lookup: impl Fn() -> Vec<String>,
+    version_of: impl Fn(&str) -> Option<String>,
+) -> Option<(bool, String)> {
+    let paths = lookup();
+    let first = paths.first()?;
+    let Some(first_ver) = version_of(first) else {
+        return Some((
+            true,
+            format!("WARNING: `{first} --version` failed or timed out"),
+        ));
+    };
+    if paths.len() < 2 {
+        return Some((false, first_ver));
+    }
+    let first_date = build_date(&first_ver);
+    let newest_other = paths[1..]
+        .iter()
+        .filter_map(|p| version_of(p).and_then(|v| build_date(&v)).map(|d| (d, p)))
+        .max_by(|a, b| a.0.cmp(&b.0));
+    let warning = match (first_date, newest_other) {
+        (Some(fd), Some((od, op))) if od > fd => Some(format!(
+            "first on PATH ({first}, built {fd}) is older than {op} (built {od})"
+        )),
+        (None, _) => Some(format!(
+            "{} copies on PATH and the first ({first}) has no readable build date",
+            paths.len()
+        )),
+        _ => None,
+    };
+    Some(match warning {
+        Some(w) => (
+            true,
+            format!("{first_ver}; WARNING: {w}; fix PATH or pin one with ENSEMBLE_SPECTYN_BIN"),
+        ),
+        None => (false, first_ver),
+    })
+}
+
+/// PURE: the `YYYY-MM-DD` after `built ` in a `spectyn 0.6.0 (<sha>, <os>, built YYYY-MM-DD)`
+/// version line. ISO dates compare correctly as strings, so callers can `max` them directly.
+fn build_date(version: &str) -> Option<String> {
+    let rest = &version[version.find("built ")? + "built ".len()..];
+    let d = rest.get(..10)?;
+    let shape_ok = d.char_indices().all(|(i, c)| match i {
+        4 | 7 => c == '-',
+        _ => c.is_ascii_digit(),
+    });
+    shape_ok.then(|| d.to_string())
+}
+
+/// Every `spectyn` on PATH in resolution order, de-duplicated. `where` on Windows lists them all
+/// (cwd first, as cmd resolves); on Unix walk `$PATH`, since `command -v` only gives the first.
+fn spectyn_paths() -> Vec<String> {
+    let (prog, args) = if cfg!(windows) {
+        ("cmd", vec!["/C", "where", "spectyn"])
+    } else {
+        (
+            "sh",
+            vec![
+                "-c",
+                r#"IFS=:; for d in $PATH; do [ -f "$d/$1" ] && [ -x "$d/$1" ] && echo "$d/$1"; done"#,
+                "sh",
+                "spectyn",
+            ],
+        )
+    };
+    let Ok(o) = Command::new(prog).args(args).output() else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = Vec::new();
+    for line in String::from_utf8_lossy(&o.stdout).lines() {
+        let line = line.trim();
+        if !line.is_empty() && !out.iter().any(|p| p.eq_ignore_ascii_case(line)) {
+            out.push(line.to_string());
+        }
+    }
+    out
+}
+
+/// Run `<path> --version` and return its first non-empty stdout line, or `None` on a spawn error,
+/// a non-zero exit or no output. Killed after `timeout` so a hung binary cannot stall doctor; stdout
+/// is read on a helper thread so a stuck pipe cannot either.
+fn version_of(path: &str, timeout: Duration) -> Option<String> {
+    let mut child = Command::new(path)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut s = String::new();
+        let _ = stdout.read_to_string(&mut s);
+        let _ = tx.send(s);
+    });
+    let Ok(text) = rx.recv_timeout(timeout) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    };
+    if !child.wait().ok()?.success() {
+        return None;
+    }
+    text.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .map(str::to_string)
 }
 
 /// The AI CLIs actually on PATH (the names a crew can drive locally). Used by `ensemble mesh`.
@@ -152,9 +290,121 @@ mod tests {
         v.push(ToolStatus {
             name: GIT_REPO.to_string(),
             ok: git,
+            warn: false,
             hint: String::new(),
         });
         v
+    }
+
+    const NEW: &str = "spectyn 0.6.0 (abc1234, windows, built 2026-10-30)";
+    const OLD: &str = "spectyn 0.6.0 (0ld0000, windows, built 2026-09-01)";
+
+    /// Fake `version_of`: maps each fake path to a canned `--version` line (None = it failed).
+    fn versions<'a>(
+        table: &'a [(&'a str, Option<&'a str>)],
+    ) -> impl Fn(&str) -> Option<String> + 'a {
+        move |p| {
+            table
+                .iter()
+                .find(|(path, _)| *path == p)
+                .and_then(|(_, v)| v.map(str::to_string))
+        }
+    }
+
+    #[test]
+    fn spectyn_not_found_gives_no_detail() {
+        assert_eq!(inspect_spectyn(Vec::new, versions(&[])), None);
+    }
+
+    #[test]
+    fn spectyn_one_copy_shows_version_no_warning() {
+        let got = inspect_spectyn(
+            || vec!["C:/bin/spectyn.exe".into()],
+            versions(&[("C:/bin/spectyn.exe", Some(NEW))]),
+        );
+        assert_eq!(got, Some((false, NEW.to_string())));
+    }
+
+    #[test]
+    fn spectyn_two_copies_newest_first_no_warning() {
+        let got = inspect_spectyn(
+            || vec!["C:/cli/spectyn.exe".into(), "C:/app/spectyn.exe".into()],
+            versions(&[
+                ("C:/cli/spectyn.exe", Some(NEW)),
+                ("C:/app/spectyn.exe", Some(OLD)),
+            ]),
+        );
+        assert_eq!(got, Some((false, NEW.to_string())));
+    }
+
+    #[test]
+    fn spectyn_two_copies_old_first_warns_with_both_paths() {
+        let (warn, detail) = inspect_spectyn(
+            || vec!["C:/app/spectyn.exe".into(), "C:/cli/spectyn.exe".into()],
+            versions(&[
+                ("C:/app/spectyn.exe", Some(OLD)),
+                ("C:/cli/spectyn.exe", Some(NEW)),
+            ]),
+        )
+        .expect("found");
+        assert!(warn, "an older copy shadowing a newer one must warn");
+        assert!(
+            detail.starts_with(OLD),
+            "detail leads with the version that runs: {detail}"
+        );
+        assert!(detail.contains("C:/app/spectyn.exe") && detail.contains("C:/cli/spectyn.exe"));
+        assert!(detail.contains("2026-09-01") && detail.contains("2026-10-30"));
+    }
+
+    #[test]
+    fn spectyn_unparsable_version() {
+        // one copy, odd version text: shown as-is, no warning
+        let got = inspect_spectyn(
+            || vec!["/usr/bin/spectyn".into()],
+            versions(&[("/usr/bin/spectyn", Some("spectyn dev"))]),
+        );
+        assert_eq!(got, Some((false, "spectyn dev".to_string())));
+        // two copies, first has no build date: cannot confirm it is the newest -> warn
+        let (warn, detail) = inspect_spectyn(
+            || vec!["/a/spectyn".into(), "/b/spectyn".into()],
+            versions(&[
+                ("/a/spectyn", Some("spectyn dev")),
+                ("/b/spectyn", Some(NEW)),
+            ]),
+        )
+        .expect("found");
+        assert!(warn && detail.starts_with("spectyn dev"), "{detail}");
+        // two copies, a later one unparsable: ignored, the first stays the newest known
+        let got = inspect_spectyn(
+            || vec!["/a/spectyn".into(), "/b/spectyn".into()],
+            versions(&[
+                ("/a/spectyn", Some(OLD)),
+                ("/b/spectyn", Some("garbage built 20x6-1")),
+            ]),
+        );
+        assert_eq!(got, Some((false, OLD.to_string())));
+        // --version failed outright: still found, but warned
+        let (warn, _) = inspect_spectyn(
+            || vec!["/a/spectyn".into()],
+            versions(&[("/a/spectyn", None)]),
+        )
+        .expect("found");
+        assert!(warn);
+    }
+
+    #[test]
+    fn spectyn_warning_does_not_change_readiness() {
+        let mut st = statuses(&["spectyn"], true);
+        st.iter_mut().find(|t| t.name == "spectyn").unwrap().warn = true;
+        assert!(is_ready(&st), "a spectyn warning is not a failure");
+    }
+
+    #[test]
+    fn build_date_parses_only_the_iso_shape() {
+        assert_eq!(build_date(NEW).as_deref(), Some("2026-10-30"));
+        assert_eq!(build_date("spectyn 0.6.0"), None);
+        assert_eq!(build_date("built 2026/10/30"), None);
+        assert_eq!(build_date("built 2026-10"), None);
     }
 
     #[test]
