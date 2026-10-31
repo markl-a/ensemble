@@ -4,7 +4,7 @@
 collaborative dev crew — across your own machines.**
 
 `ensemble` is a single Rust binary that drives **Claude Code**, **OpenAI Codex**,
-**Google Antigravity (`agy`)**, and **opencode** as a *crew*: one agent implements, others
+**Google Antigravity (`agy`)**, **opencode**, and **spectyn** as a *crew*: one agent implements, others
 review and audit, and work only lands when **two distinct vendors** sign off (a double-gate).
 The crew can be spread across several machines on a Tailscale mesh, and every run is
 **observable** (watch / steer / abort), **durable** (resumable via a SQLite ledger), and
@@ -72,7 +72,7 @@ task → git worktree → codex implements + posts "did X" to the blackboard
 ## Quickstart
 
 **Prerequisites:** Rust (stable), the vendor CLIs you want to use on `PATH`
-(`claude`, `codex`, `agy`, `opencode`), and — for cross-machine — Tailscale.
+(`claude`, `codex`, `agy`, `opencode`, optionally `spectyn`), and — for cross-machine — Tailscale.
 
 ### 1. Installation
 
@@ -93,7 +93,8 @@ To clean up the binary and remove user registry/PATH configurations:
 ### 2. Verification & Quickstart
 
 ```sh
-# Verify that your local machine is crew-ready (checks PATH, git, and CLIs)
+# Verify that your local machine is crew-ready (checks PATH, git, and CLIs;
+# spectyn and tailscale are reported as optional)
 ensemble doctor
 
 # Run a governed task in the current git repository
@@ -104,8 +105,11 @@ ensemble run "add a --version flag and write a test for it" --crew crew-main.tom
 
 When running `ensemble` headlessly (e.g. in CI or batch processing), prompt confirmations will cause AI CLIs to stall. Expose the `--confirm-policy` flag to define confirmation behaviors:
 *   `--confirm-policy ask` (Default): Interactive prompt forwarding.
-*   `--confirm-policy approve`: Auto-approve prompts. Adds agy's and opencode's `--dangerously-skip-permissions` automatically.
+*   `--confirm-policy approve`: Auto-approve prompts. Adds codex's `--dangerously-bypass-approvals-and-sandbox`, claude's and agy's `--dangerously-skip-permissions`, and opencode's `--auto`.
 *   `--confirm-policy deny`: Auto-deny prompts (Note: `deny` is unsupported for `opencode`).
+
+The interactive `spectyn` launcher accepts `ask` only: spectyn has no launch flag that answers
+its approval cards, so `approve` / `deny` are refused with an error instead of being silently ignored.
 
 ### What a crew looks like
 
@@ -145,6 +149,37 @@ backup  = "agy"
 
 [agents.agy]
 timeout = 180
+```
+
+### spectyn as a vendor
+
+spectyn runs headlessly as `spectyn exec --agent coder`, with the prompt on stdin and the
+answer on stdout. It works anywhere a vendor name does: `run`, `run-many`, `dispatch`,
+`agent`, `all`, `serve`, and crew roles or backups. Set `ENSEMBLE_SPECTYN_BIN` to pin the
+binary; unset, `spectyn` is taken from `PATH`. For example, spectyn implements and two
+other vendors review:
+
+```toml
+pipeline = ["implement", "review", "audit"]
+
+[gate]
+min_approvals = 2
+max_rounds    = 2
+on_flake      = "exclude"
+
+[roles.implement]
+agent = "spectyn"
+
+[roles.review]
+agent = "codex"
+blind = true
+
+[roles.audit]
+agent = "agy"
+blind = true
+
+[agents.spectyn]
+timeout = 1200   # local models can be slow; `args = [...]` is appended after `exec --agent coder`
 ```
 
 Verify how a crew parses before relying on it:
@@ -206,7 +241,7 @@ Run `ensemble help` for the full, authoritative usage.
 
 #### Launching a live CLI as a crew member
 
-`ensemble [global flags] <codex|claude|opencode|agy> [vendor args…]` starts that
+`ensemble [global flags] <codex|claude|opencode|agy|spectyn> [vendor args…]` starts that
 CLI inside a controlled PTY, so `steer` / `abort` reach it while it runs. **Global
 flags go BEFORE the vendor name** — anything after it is forwarded to the vendor,
 so `ensemble claude --repo X` hands `--repo` to Claude Code, which rejects it.
@@ -229,6 +264,20 @@ ensemble steer claude-a "start with the auth module" --repo ~/proj
 
 Note: a vendor's first-run modal (workspace trust, MCP approval) consumes the
 first steer's Enter. Let a new session settle before steering it real work.
+
+`ensemble [global flags] spectyn` runs spectyn's interactive TUI the same way, with three
+differences:
+
+- spectyn has no MCP client, so it posts to the board with `ensemble team say "<message>"
+  --from <member> --repo <path> --team <name>` (the launch banner prints the exact line).
+- A steer sends its text, waits about 350 ms, then sends Enter on its own. spectyn's input box
+  has no bracketed paste, so an Enter in the same burst would become a newline, not a submit.
+- `--confirm-policy` accepts `ask` only; answer spectyn's approval cards in the session.
+
+```bash
+ensemble --repo ~/proj --cwd ~/proj-wt/feature-c --name spectyn-c spectyn
+ensemble steer spectyn-c "add tests for the parser" --repo ~/proj
+```
 
 ### MCP server
 
