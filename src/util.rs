@@ -6,7 +6,8 @@
 
 /// Map every char outside `[A-Za-z0-9_-]` to `-`. With `allow_dot`, `.` is also kept — callers
 /// that allow dots MUST trim leading/trailing dots themselves so `""`, `"."`, `".."` can never
-/// name a traversal/hidden entry.
+/// name a traversal/hidden entry. Only the `cli` modules (journal, worktree, repo_sync) call it.
+#[cfg_attr(not(feature = "cli"), allow(dead_code))]
 pub(crate) fn sanitize_component(s: &str, allow_dot: bool) -> String {
     s.chars()
         .map(|c| {

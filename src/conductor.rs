@@ -441,6 +441,8 @@ impl Conductor {
     /// If the worktree can't be created, ESCALATE — never fall back to running in `repo` itself:
     /// under `run_many` another task may be mutating the shared working tree concurrently, so a
     /// task that can't get an isolated worktree must not run at all (isolation is the contract).
+    /// `cli` only: it needs ensemble's worktree + run journal.
+    #[cfg(feature = "cli")]
     pub fn run_in_repo(&self, task: &str, repo: &Path) -> RunOutcome {
         match crate::worktree::Worktree::create(repo, task) {
             Ok(mut wt) => {
@@ -521,7 +523,8 @@ impl Conductor {
 
     /// Run many tasks in parallel — each in its own git worktree of `repo`. Results are returned in
     /// the same order as `tasks`. (甲) For Phase 2 we spawn one thread per task (the task list is
-    /// operator-sized, not unbounded); a bounded pool is a later refinement.
+    /// operator-sized, not unbounded); a bounded pool is a later refinement. `cli` only.
+    #[cfg(feature = "cli")]
     pub fn run_many(&self, tasks: &[String], repo: &Path) -> Vec<RunOutcome> {
         use std::sync::Mutex;
         let results: Vec<Mutex<Option<RunOutcome>>> =
@@ -699,6 +702,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn run_in_repo_streams_worktree_unavailable_escalation() {
         use super::*;

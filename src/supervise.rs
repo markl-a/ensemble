@@ -3,12 +3,15 @@
 //! CLI session; `ensemble watch` renders them. Pure (schema + render + path confinement + arg parse);
 //! the IO shell lives in main.rs.
 
+#[cfg(feature = "cli")]
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "cli")]
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// One line in a member's stream feed. Internally tagged on `"ev"` (like journal::Entry's `"rec"`).
+#[cfg(feature = "cli")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "ev", rename_all = "snake_case")]
 pub enum StreamEvent {
@@ -63,6 +66,7 @@ pub enum StreamEvent {
 }
 
 /// Render one stream event as a single human line for `ensemble watch`.
+#[cfg(feature = "cli")]
 pub fn render_event(ev: &StreamEvent) -> String {
     match ev {
         StreamEvent::SessionStart {
@@ -101,6 +105,7 @@ pub fn render_event(ev: &StreamEvent) -> String {
 
 /// Render one RAW feed line: parse → pretty render; on ANY parse failure (a torn line, or a forward-
 /// compat event kind this binary doesn't know) fall back to the raw line so nothing is hidden.
+#[cfg(feature = "cli")]
 pub fn render_line(raw: &str) -> String {
     // A `StreamEvent` (tagged on "ev") wins — it's the more specific member-session shape. A KNOWN kind
     // renders pretty.
@@ -125,6 +130,7 @@ pub fn render_line(raw: &str) -> String {
 }
 
 /// Collapse a possibly-multiline excerpt to one whitespace-normalized line, bounded for the watch view.
+#[cfg(feature = "cli")]
 fn inline(s: &str) -> String {
     let one = s.split_whitespace().collect::<Vec<_>>().join(" ");
     if one.chars().count() <= 120 {
@@ -137,6 +143,7 @@ fn inline(s: &str) -> String {
 /// The stream feed path for `member` under `repo`, confined to `<repo>/.ensemble/stream/`. `member`
 /// comes from untrusted input (argv / HTTP path), so it is reduced to ONE safe filename component by
 /// journal's shared path-component sanitizer.
+#[cfg(feature = "cli")]
 pub fn member_stream_path(repo: &Path, member: &str) -> PathBuf {
     repo.join(".ensemble")
         .join("stream")
@@ -161,16 +168,19 @@ impl RunObserver for Vec<Box<dyn RunObserver>> {
 /// The production `RunObserver`: mirrors each blackboard post into an append-only `ndjson::Feed` (one
 /// `Message` JSON per line) for `ensemble watch <name> --follow` to tail. Best-effort — a serialize or
 /// write failure is swallowed so live supervision can NEVER change a governed run's outcome.
+#[cfg(feature = "cli")]
 pub struct FeedObserver {
     feed: crate::ndjson::Feed,
 }
 
+#[cfg(feature = "cli")]
 impl FeedObserver {
     pub fn new(feed: crate::ndjson::Feed) -> Self {
         Self { feed }
     }
 }
 
+#[cfg(feature = "cli")]
 impl RunObserver for FeedObserver {
     fn post(&self, m: &crate::blackboard::Message) {
         if let Ok(line) = serde_json::to_string(m) {
@@ -181,12 +191,14 @@ impl RunObserver for FeedObserver {
 
 /// serde default for `ControlCmd::Steer::interrupt`: keep the old behaviour for
 /// feeds written before the field existed.
+#[cfg(feature = "cli")]
 fn yes() -> bool {
     true
 }
 
 /// One line in a run's CONTROL feed (.ensemble/control/<name>.ndjson) — the operator's channel to steer
 /// or interrupt a live governed run (S1b). Internally tagged on `"cmd"` (like StreamEvent's `"ev"`).
+#[cfg(feature = "cli")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum ControlCmd {
@@ -214,6 +226,7 @@ pub enum ControlCmd {
 
 /// The control feed path for `name` under `repo`, confined to `<repo>/.ensemble/control/` by the same
 /// shared one-component sanitizer as the stream feed (untrusted argv / HTTP path).
+#[cfg(feature = "cli")]
 pub fn member_control_path(repo: &Path, name: &str) -> PathBuf {
     repo.join(".ensemble")
         .join("control")
@@ -260,6 +273,7 @@ impl ControlState {
 /// Apply every NEW control line at index >= `cursor` to `st`, advancing `cursor` past what was read.
 /// Unknown/torn lines are skipped (forward-compat). Best-effort: a read error leaves state untouched
 /// (a flaky control feed can never crash a run).
+#[cfg(feature = "cli")]
 pub fn drain_control(feed: &crate::ndjson::Feed, cursor: &mut usize, st: &ControlState) {
     let lines = match feed.read_since(*cursor) {
         Ok(l) => l,
@@ -282,6 +296,7 @@ pub fn drain_control(feed: &crate::ndjson::Feed, cursor: &mut usize, st: &Contro
 }
 
 /// Parsed `ensemble watch` arguments (pure; the IO shell in main.rs consumes this).
+#[cfg(feature = "cli")]
 #[derive(Debug, PartialEq)]
 pub struct WatchArgs {
     pub member: Option<String>,
@@ -296,6 +311,7 @@ pub struct WatchArgs {
 /// Parse the argv of `ensemble watch <member> [--repo <p>] [--since <n>] [--follow]`. `args` is the full
 /// process argv (args[0]=exe, args[1]="watch"). The first non-flag token is the member; unknown
 /// `--flags` are skipped (no value assumed); a non-numeric `--since` falls back to 0.
+#[cfg(feature = "cli")]
 pub fn parse_watch_args(args: &[String]) -> WatchArgs {
     let mut out = WatchArgs {
         member: None,
@@ -351,7 +367,9 @@ pub fn parse_watch_args(args: &[String]) -> WatchArgs {
     out
 }
 
-#[cfg(test)]
+// These tests are about the `cli` items (feeds, ndjson, serde_json); RunObserver + ControlState are
+// also exercised by the conductor tests, which build without `cli`.
+#[cfg(all(test, feature = "cli"))]
 mod tests {
     use super::*;
 
