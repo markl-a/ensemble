@@ -456,7 +456,13 @@ fn spectyn_reply(stdout: &str, code: Option<i32>) -> SpectynReply {
     // other error event is the real failure. (At most one event can pass, so `explained` means
     // exactly that one line is present.)
     let excused = |e: usize| e == d + 1 && e + 1 == events.len() && explains(&message(&events[e]));
-    if let Some(&e) = errors.iter().find(|&&e| !excused(e)) {
+    // Report the real failure: an error that does not merely explain the stop, before a misplaced
+    // explaining line.
+    if let Some(&e) = errors
+        .iter()
+        .find(|&&e| !excused(e) && !explains(&message(&events[e])))
+        .or_else(|| errors.iter().find(|&&e| !excused(e)))
+    {
         return SpectynReply::Error(message(&events[e]));
     }
     let explained = !errors.is_empty();
