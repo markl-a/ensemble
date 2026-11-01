@@ -238,7 +238,9 @@ fn find_on_path(
     out
 }
 
-/// A regular file that can be run: on Unix it must also have an execute bit set.
+/// A regular file that can be run: on Unix it must also have an execute bit set (otherwise the spawn
+/// fails with permission denied); on Windows `cmd /C` runs any existing file. Used by the PATH walk
+/// (WP-181) and by path overrides (WP-140).
 fn is_executable_file(p: &Path) -> bool {
     let Ok(meta) = std::fs::metadata(p) else {
         return false;
@@ -327,22 +329,6 @@ pub fn program_present(program: &str) -> bool {
         is_executable_file(p)
     } else {
         on_path(program)
-    }
-}
-
-/// A path override must be a regular file the OS can exec. On Unix that also needs an execute bit —
-/// otherwise the spawn fails with permission denied; on Windows `cmd /C` runs any existing file.
-fn is_executable_file(p: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::metadata(p)
-            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false)
-    }
-    #[cfg(not(unix))]
-    {
-        p.is_file()
     }
 }
 
