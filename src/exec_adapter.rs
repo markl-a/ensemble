@@ -356,6 +356,19 @@ impl Adapter for ExecAdapter {
     }
 }
 
+/// The exact `error` lines `spectyn exec --json` prints after a `done` with `truncated: true`
+/// (English, Chinese). Keep in sync with spectyn's `exec` (`exec_json_error_exit` callers).
+const SPECTYN_TRUNCATED_LINES: [&str; 2] = [
+    "error: the answer is INCOMPLETE — the stream ended before the model finished. The text above is a fragment; do not treat it as a complete answer.",
+    "錯誤:這個答案不完整——串流在模型講完之前就結束了。上面的文字是片段,不要當成完整答案。",
+];
+
+/// ... and after a `done` that stopped at `max_rounds`.
+const SPECTYN_MAX_ROUNDS_LINES: [&str; 2] = [
+    "error: the run STOPPED at its round limit before the task was finished (see [stopped: …] above). Raise max_rounds for this agent or split the task.",
+    "錯誤:回合數用完,任務還沒做完就停了(見上面的 [stopped: …])。請調高這個 agent 的 max_rounds,或把任務拆小。",
+];
+
 /// What a `spectyn exec --json` run amounts to (its stdout plus its exit code).
 #[derive(Debug, PartialEq, Eq)]
 enum SpectynReply {
@@ -434,23 +447,17 @@ fn spectyn_reply(stdout: &str, code: Option<i32>) -> SpectynReply {
             (None, _) => SpectynReply::ExitFailure,
         };
     };
-    // Does `msg` explain THIS stop? The stop's own words (spectyn prints them in English or
-    // Chinese) or the reason's machine token itself (the max_rounds line says "Raise max_rounds
-    // …"); only `snake_case` tokens count, so a plain word such as "error" cannot match anything.
+    // Does `msg` explain THIS stop? Only the exact line spectyn prints for it (English or Chinese,
+    // `exec_json_error_exit` in spectyn's `exec`), never a substring: a real failure that merely
+    // contains "incomplete" must stay a failure.
+    let max_rounds = [&stop_reason, &stopped]
+        .into_iter()
+        .flatten()
+        .any(|r| r == "max_rounds");
     let explains = |msg: &str| {
-        let low = msg.to_lowercase();
-        let named = [&stop_reason, &stopped]
-            .into_iter()
-            .flatten()
-            .filter(|r| r.contains('_'))
-            .any(|r| low.contains(&r.to_lowercase()));
-        let rounds = [&stop_reason, &stopped]
-            .into_iter()
-            .flatten()
-            .any(|r| r.to_lowercase().contains("round"))
-            && (low.contains("round limit") || msg.contains("回合數用完"));
-        let cut = truncated && (low.contains("incomplete") || msg.contains("不完整"));
-        named || rounds || cut
+        let msg = msg.trim();
+        (truncated && SPECTYN_TRUNCATED_LINES.contains(&msg))
+            || (max_rounds && SPECTYN_MAX_ROUNDS_LINES.contains(&msg))
     };
     // Only the line right after `done`, as the last event, that explains the stop is excused; any
     // other error event is the real failure. (At most one event can pass, so `explained` means
@@ -665,6 +672,11 @@ mod tests {
         "\n",
     );
 
+    /// A top-level `error` event line carrying `msg`.
+    fn error_line(msg: &str) -> String {
+        serde_json::json!({"type": "error", "code": 1, "message": msg}).to_string()
+    }
+
     /// The `done` + explaining `error` pair spectyn really prints for a cut-off stream.
     const SPECTYN_TRUNCATED: &str = concat!(
         r#"{"type":"done","output":"edit the li","files_changed":[],"truncated":true}"#,
@@ -742,13 +754,13 @@ mod tests {
             SpectynReply::Answer("half done\n\n[spectyn stopped early: max_rounds]".into())
         );
         // spectyn prints the same lines in Chinese under a zh locale
-        let zh = concat!(
+        let zh = format!(
+            "{}\n{}",
             r#"{"type":"done","output":"edit the li","truncated":true}"#,
-            "\n",
-            r#"{"type":"error","code":1,"message":"錯誤:這個答案不完整——串流在模型講完之前就結束了。"}"#,
+            error_line(SPECTYN_TRUNCATED_LINES[1])
         );
         assert_eq!(
-            spectyn_reply(zh, Some(1)),
+            spectyn_reply(&zh, Some(1)),
             SpectynReply::Answer("edit the li\n\n[spectyn stopped early: truncated]".into())
         );
         // an older build that reports the stop and exits 0 with no error line
@@ -761,13 +773,13 @@ mod tests {
 
     #[test]
     fn spectyn_reply_stop_reason_wins_over_stopped() {
-        let out = concat!(
+        let out = format!(
+            "{}\n{}",
             r#"{"type":"done","output":"half done","truncated":false,"stopped":"max_rounds","stop_reason":"round limit reached"}"#,
-            "\n",
-            r#"{"type":"error","code":1,"message":"error: the run STOPPED at its round limit before the task was finished."}"#,
+            error_line(SPECTYN_MAX_ROUNDS_LINES[0])
         );
         assert_eq!(
-            spectyn_reply(out, Some(1)),
+            spectyn_reply(&out, Some(1)),
             SpectynReply::Answer(
                 "half done\n\n[spectyn stopped early: round limit reached]".into()
             )
@@ -809,6 +821,23 @@ mod tests {
             spectyn_reply(&out, Some(1)),
             SpectynReply::Error("session store write failed".into())
         );
+        // a real failure that merely contains the stop's words is not the explaining line
+        for msg in [
+            "permission denied; incomplete output",
+            "error: the answer is INCOMPLETE",
+            "provider error; raise max_rounds? no: connection reset",
+        ] {
+            let out = format!(
+                "{}\n{}",
+                r#"{"type":"done","output":"edit the li","truncated":true,"stopped":"max_rounds"}"#,
+                error_line(msg)
+            );
+            assert_eq!(
+                spectyn_reply(&out, Some(1)),
+                SpectynReply::Error(msg.into()),
+                "{msg}"
+            );
+        }
         // the max_rounds wording does not excuse a truncated stop
         let out = concat!(
             r#"{"type":"done","output":"edit the li","truncated":true}"#,
@@ -899,13 +928,12 @@ mod tests {
         );
 
         // a delivered partial answer that mentions quota is not mistaken for a rate limit
-        let quota = concat!(
+        let quota = format!(
+            "{}\n{}\n",
             r#"{"type":"done","output":"fix the quota check, then the rate limit te","truncated":true}"#,
-            "\n",
-            r#"{"type":"error","code":1,"message":"error: the answer is INCOMPLETE"}"#,
-            "\n",
+            error_line(SPECTYN_TRUNCATED_LINES[0])
         );
-        let (a, p) = fake_spectyn("quota", quota, 1);
+        let (a, p) = fake_spectyn("quota", &quota, 1);
         let r = a.run("ignored", Path::new("."));
         let _ = std::fs::remove_file(&p);
         let text = r.expect("an excused partial answer is a reply").text;
