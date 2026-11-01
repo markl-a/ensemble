@@ -75,12 +75,12 @@ pub use crew::{
     RoleConfig, TestConfig,
 };
 pub use gate::{decide, GateDecision, RoleVerdict};
-pub use supervise::{ControlState, RunObserver};
 #[cfg(feature = "cli")]
 pub use supervise::{
     drain_control, member_control_path, member_stream_path, parse_watch_args, render_event,
     render_line, ControlCmd, FeedObserver, StreamEvent, WatchArgs,
 };
+pub use supervise::{ControlState, RunObserver};
 pub use test_gate::{run_tests, TestOutcome};
 pub use util::is_ipv4_literal;
 pub use verdict::{parse_verdict, Verdict};
