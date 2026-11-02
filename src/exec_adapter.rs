@@ -579,7 +579,7 @@ mod tests {
         let c = a.build_command();
         assert_eq!(c.get_program(), exe.as_os_str());
         let args: Vec<_> = c.get_args().collect();
-        assert_eq!(args, ["exec", "--agent", "coder"]);
+        assert_eq!(args, ["exec", "--json", "--agent", "coder"]);
     }
 
     #[cfg(windows)]
